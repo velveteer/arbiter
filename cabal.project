@@ -2,7 +2,6 @@ packages:
   arbiter-core
   arbiter-migrations
   arbiter-worker
-  arbiter-worker-testkit
   arbiter-simple
   arbiter-hasql
   arbiter-libpq
@@ -12,7 +11,7 @@ packages:
   arbiter-servant-ui
   arbiter-otel
   arbiter-demo
-  arbiter-test-common
+  arbiter-test
   arbiter-bench
 
 -- GHC 9.14 ships base 4.22 and template-haskell 2.24, ahead of the upper

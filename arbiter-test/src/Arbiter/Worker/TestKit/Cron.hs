@@ -12,7 +12,6 @@ import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobRead, dedupKey, defaultJob, payload)
 import Arbiter.Core.MonadArbiter (withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
-import Arbiter.Test.Setup (mkTime, withConn)
 import Arbiter.Worker.Cron
   ( BackfillPolicy (..)
   , CronJob (..)
@@ -40,6 +39,7 @@ import Test.Hspec (Spec, before, describe, expectationFailure, it, shouldBe, sho
 import UnliftIO (newEmptyMVar, putMVar, takeMVar)
 import UnliftIO.Async (wait, withAsync)
 
+import Arbiter.Test.Setup (mkTime, withConn)
 import Arbiter.Worker.TestKit.Backend (TestBackend (..))
 
 -- | 'processCronCatchUp' under a fresh gate store.

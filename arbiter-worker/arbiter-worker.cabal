@@ -106,6 +106,7 @@ test-suite arbiter-worker-tests
     Test.Arbiter.Worker.BackoffStrategy
     Test.Arbiter.Worker.BatchSim
     Test.Arbiter.Worker.Cron
+    Test.Arbiter.Worker.Fixtures
     Test.Arbiter.Worker.GuardSim
     Test.Arbiter.Worker.Logging
     Test.Arbiter.Worker.MultiQueue
@@ -113,8 +114,8 @@ test-suite arbiter-worker-tests
     Test.Arbiter.Worker.WorkQueue
 
   build-depends:
+    , aeson                >=2.2 && <2.3
     , arbiter-core         >=0.1 && <0.2
-    , arbiter-test-common  >=0.1 && <0.2
     , arbiter-worker
     , base >=4.20 && <5
     , containers           >=0.6 && <0.9

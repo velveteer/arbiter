@@ -16,8 +16,6 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.MonadArbiter (RegistryOf, ResultOf, withDbTransaction)
 import Arbiter.Core.QueueRegistry (RegistryTables)
-import Arbiter.Test.Poll (waitUntil)
-import Arbiter.Test.Setup (execQuery, terminateBackendsMatching, terminatePid)
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
 import Arbiter.Worker.Config (WorkerConfig (..), transactionalWorkerConfig)
@@ -31,6 +29,8 @@ import Test.Hspec
 import UnliftIO (bracket)
 import UnliftIO.Async (withAsync)
 
+import Arbiter.Test.Poll (waitUntil)
+import Arbiter.Test.Setup (execQuery, terminateBackendsMatching, terminatePid)
 import Arbiter.Worker.TestKit.Backend (TestBackend (..))
 
 -- | Connection recovery suite. The queue under test declares @()@ as its result type.

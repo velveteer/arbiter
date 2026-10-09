@@ -39,7 +39,7 @@ type TestOrville registry = OrvilleDb registry (ReaderT O.OrvilleState IO)
 
 setupOrvilleTest :: ByteString -> Text -> Text -> Int -> IO (OrvilleTestEnv registry)
 setupOrvilleTest connStr schemaName tableName maxConns = do
-  -- Setup DDL using test-common helper
+  -- Setup DDL using arbiter-test helper
   TestSetup.setupOnce connStr schemaName tableName False
   createOrvilleTestEnv connStr schemaName tableName maxConns
 

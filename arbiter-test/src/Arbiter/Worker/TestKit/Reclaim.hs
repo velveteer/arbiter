@@ -17,7 +17,6 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.MonadArbiter (RegistryOf, ResultOf)
 import Arbiter.Core.QueueRegistry (RegistryTables)
-import Arbiter.Test.Poll (waitUntil, withLinkedAsync)
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.Config (WorkerConfig (..), transactionalWorkerConfig)
 import Control.Concurrent (threadDelay)
@@ -27,6 +26,7 @@ import Data.Foldable (traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Test.Hspec
 
+import Arbiter.Test.Poll (waitUntil, withLinkedAsync)
 import Arbiter.Worker.TestKit.Backend (TestBackend (..))
 import Arbiter.Worker.TestKit.Rows (reclaimJob)
 

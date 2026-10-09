@@ -1,7 +1,7 @@
 name: CI
 
 env:
-  RELEASE_PACKAGES: arbiter-core arbiter-migrations arbiter-test-common arbiter-worker arbiter-worker-testkit arbiter-libpq arbiter-simple arbiter-hasql arbiter-orville arbiter-servant arbiter-servant-openapi arbiter-servant-ui arbiter-otel
+  RELEASE_PACKAGES: arbiter-core arbiter-migrations arbiter-worker arbiter-test arbiter-libpq arbiter-simple arbiter-hasql arbiter-orville arbiter-servant arbiter-servant-openapi arbiter-servant-ui arbiter-otel
 
 on:
   push:

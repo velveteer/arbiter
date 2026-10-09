@@ -77,8 +77,6 @@ import Arbiter.Core.MonadArbiter
   )
 import Arbiter.Core.QueueRegistry (RegistryTables)
 import Arbiter.Core.Sql.Query (raw)
-import Arbiter.Test.Poll (waitUntil)
-import Arbiter.Test.Setup (listenerConnectionCount, terminateBackendsMatching, withConn)
 import Arbiter.Worker (childResults, runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (BackoffStrategy (Constant), Jitter (NoJitter))
 import Arbiter.Worker.Config
@@ -120,6 +118,8 @@ import Test.Hspec
 import UnliftIO (atomically, bracket, newEmptyMVar, putMVar, takeMVar, try)
 import UnliftIO.Async (concurrently_, withAsync)
 
+import Arbiter.Test.Poll (waitUntil)
+import Arbiter.Test.Setup (listenerConnectionCount, terminateBackendsMatching, withConn)
 import Arbiter.Worker.TestKit.Backend (TestBackend (..))
 import Arbiter.Worker.TestKit.ConnectionRecovery (connectionRecoverySpec)
 import Arbiter.Worker.TestKit.Cron (cronSpec)

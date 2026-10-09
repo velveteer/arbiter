@@ -12,7 +12,6 @@ module Arbiter.Worker.TestKit.Rows
   ) where
 
 import Arbiter.Core.Job.Schema (jobQueueTable)
-import Arbiter.Test.Setup (execute_, withConn)
 import Control.Concurrent (threadDelay)
 import Control.Monad (void)
 import Data.ByteString (ByteString)
@@ -21,6 +20,8 @@ import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Database.PostgreSQL.Simple qualified as PG
+
+import Arbiter.Test.Setup (execute_, withConn)
 
 -- | Run one UPDATE on a job row over a fresh connection.
 updateJob :: ByteString -> Text -> Text -> Text -> Int64 -> IO ()

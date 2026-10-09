@@ -4,8 +4,6 @@
 module Test.Arbiter.Worker.Cron (spec) where
 
 import Arbiter.Core.Job.Types (defaultJob)
-import Arbiter.Test.Fixtures (WorkerTestPayload (..))
-import Arbiter.Test.Setup (mkTime)
 import Data.List (find)
 import Data.Time
   ( UTCTime (..)
@@ -39,6 +37,7 @@ import Arbiter.Worker.Cron
   , resolveTZ
   , truncateToMinute
   )
+import Test.Arbiter.Worker.Fixtures (WorkerTestPayload (..), mkTime)
 
 spec :: Spec
 spec = do

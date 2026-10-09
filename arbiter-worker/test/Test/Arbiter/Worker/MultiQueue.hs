@@ -7,7 +7,6 @@ module Test.Arbiter.Worker.MultiQueue (spec) where
 
 import Arbiter.Core.MonadArbiter (JobHandler, MonadArbiter (..))
 import Arbiter.Core.QueueRegistry (Queue)
-import Arbiter.Test.Fixtures (WorkerTestPayload)
 import Control.Exception (Exception)
 import Control.Monad.IO.Class (MonadIO)
 import Test.Hspec (Spec, describe, it, shouldBe, shouldThrow)
@@ -21,6 +20,7 @@ import Arbiter.Worker
   , runSelectedWorkerPools
   , transactionalWorkerConfig
   )
+import Test.Arbiter.Worker.Fixtures (WorkerTestPayload)
 
 newtype FailingDb a = FailingDb {runFailingDb :: IO a}
   deriving newtype (Applicative, Functor, Monad, MonadFail, MonadIO, MonadUnliftIO)

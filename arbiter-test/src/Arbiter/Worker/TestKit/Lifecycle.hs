@@ -37,8 +37,6 @@ import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (RegistryTables)
 import Arbiter.Core.Queues qualified as Q
 import Arbiter.Core.Worker qualified as WR
-import Arbiter.Test.Poll (waitUntil, withLinkedAsync)
-import Arbiter.Test.Setup (execStatement, execute_, withConn)
 import Arbiter.Worker
   ( MaintenancePace (..)
   , WorkerState (..)
@@ -104,6 +102,8 @@ import Test.Hspec
 import UnliftIO.Async (withAsync)
 import UnliftIO.Async qualified as Async
 
+import Arbiter.Test.Poll (waitUntil, withLinkedAsync)
+import Arbiter.Test.Setup (execStatement, execute_, withConn)
 import Arbiter.Worker.TestKit.Backend (TestBackend (..))
 import Arbiter.Worker.TestKit.Rows (reclaimJob)
 

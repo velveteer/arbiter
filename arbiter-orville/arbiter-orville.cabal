@@ -89,9 +89,8 @@ test-suite arbiter-orville-tests
     , arbiter-core            >=0.1 && <0.2
     , arbiter-libpq           >=0.1 && <0.2
     , arbiter-orville
-    , arbiter-test-common     >=0.1 && <0.2
+    , arbiter-test            >=0.1 && <0.2
     , arbiter-worker          >=0.1 && <0.2
-    , arbiter-worker-testkit  >=0.1 && <0.2
     , base >=4.20 && <5
     , bytestring              >=0.10.12 && <0.13
     , hspec                   >=2.8 && <2.12

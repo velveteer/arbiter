@@ -8,10 +8,11 @@ import Arbiter.Otel qualified as Otel
 
 main :: IO ()
 main = do
-  env <- createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"
+  let workers = [namedWorkerPool emailCfg, namedWorkerPool imageCfg]
+  poolCfg <- poolConfigForWorkers workers
+  env <- createSimpleEnvWithConfig (Proxy @AppRegistry) connStr "arbiter" poolCfg
 
-  runSimpleDb env $
-    Otel.runWorkerPools [namedWorkerPool emailCfg, namedWorkerPool imageCfg]
+  runSimpleDb env $ Otel.runWorkerPools workers
 ```
 
 `Otel.runWorkerPools` replaces `runWorkerPools` with the same arguments. It

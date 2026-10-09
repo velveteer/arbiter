@@ -24,7 +24,6 @@ import Arbiter.Core.Job.Types
 import Arbiter.Core.MonadArbiter (JobHandler, RegistryOf, ResultOf)
 import Arbiter.Core.QueueRegistry (RegistryTables)
 import Arbiter.Core.Trace (capturingContextIO)
-import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
 import Arbiter.Worker.Config
@@ -56,6 +55,7 @@ import Test.Hspec (Spec, before, describe, it, shouldBe, shouldReturn, shouldSat
 import UnliftIO (MonadUnliftIO, finally, mask_, tryAny, withRunInIO)
 import UnliftIO.Async (async, poll, waitCatch, withAsync)
 
+import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Worker.TestKit.Backend (TestBackend (..))
 import Arbiter.Worker.TestKit.Rows (flagCancelled, holdRowLock, reclaimJob, releaseRow, rowCount, takeClaimHolder)
 
