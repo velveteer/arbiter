@@ -176,7 +176,6 @@ import Data.List (genericLength)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -235,7 +234,7 @@ queueTable = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m))
 onQueue
   :: forall payload m a
    . (KnownSymbol (TableForPayload payload (RegistryOf m)), MonadArbiter m)
-  => (Text -> Text -> m a)
+  => (SchemaName -> TableName -> m a)
   -> m a
 onQueue operation = getSchema >>= \schemaName -> operation schemaName (queueTable @payload @m)
 
@@ -1053,9 +1052,8 @@ countDLQChildren
   => Int64
   -- ^ Parent job id
   -> m Int64
-countDLQChildren parentJobId = do
-  counts <- countDLQChildrenBatch @payload [parentJobId]
-  pure $ fromMaybe 0 (Map.lookup parentJobId counts)
+countDLQChildren parentJobId =
+  Map.findWithDefault 0 parentJobId <$> countDLQChildrenBatch @payload [parentJobId]
 
 -- | DLQ child counts per parent id, over a batch. Parents with none are absent.
 countDLQChildrenBatch

@@ -1,7 +1,4 @@
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 module Test.Arbiter.Hasql.RateLimit (spec) where
 

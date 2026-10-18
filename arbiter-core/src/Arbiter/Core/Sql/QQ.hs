@@ -142,9 +142,9 @@ parseColType rawType =
           Nothing -> Right (KScalar, trimmed)
   where
     bracketed token = do
-      afterOpen <- T.stripPrefix "[" (T.strip token)
-      T.strip <$> T.stripSuffix "]" (T.strip afterOpen)
-    maybePrefixed token = T.strip <$> T.stripPrefix "Maybe " (T.strip token)
+      afterOpen <- T.stripPrefix "[" token
+      T.strip <$> T.stripSuffix "]" afterOpen
+    maybePrefixed token = T.strip <$> T.stripPrefix "Maybe " token
 
 -- ---------------------------------------------------------------------------
 -- Codegen
@@ -170,9 +170,7 @@ paramsE :: [Token] -> Q Exp
 paramsE tokens = [|concat $(TH.listE (map paramsExp tokens))|]
 
 decoderE :: [Token] -> Q Exp
-decoderE tokens = case [(name, nullable, colType) | OutHole name nullable colType <- tokens] of
-  [] -> [|pure ()|]
-  holes -> mkDecoder holes
+decoderE tokens = mkDecoder [(name, nullable, colType) | OutHole name nullable colType <- tokens]
 
 -- | A token's contribution to the query's pieces.
 piecesExp :: Token -> Q Exp
@@ -200,7 +198,7 @@ mkDecoder holes
   | length holes > 8 =
       fail "sql: more than 8 @{} output holes. Attach a handwritten codec with `rows` instead"
   | otherwise = case map colDecoder holes of
-      [] -> fail "sql: mkDecoder called with no holes"
+      [] -> [|pure ()|]
       [single] -> single
       decoders ->
         foldl' (\acc decoder -> [|$acc <*> $decoder|]) [|pure $(TH.conE (TH.tupleDataName (length decoders)))|] decoders

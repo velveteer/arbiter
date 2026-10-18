@@ -65,8 +65,7 @@ module Arbiter.Core.Codec
   ) where
 
 import Control.Applicative.Free.Final (Ap, liftAp, runAp, runAp_)
-import Data.Aeson (Value, parseJSON)
-import Data.Aeson.Types (parseMaybe)
+import Data.Aeson (Value)
 import Data.Int (Int32, Int64)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -93,6 +92,7 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.Job.Types qualified as JT
 import Arbiter.Core.Job.Types.Internal (JobRecord (Job))
+import Arbiter.Core.Json (decodeOrEmpty)
 import Arbiter.Core.Queues (QueueRow (..))
 import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
 import Arbiter.Core.RateLimit.Stats (RateLimitBucketView (..), RateLimitPolicyView (..))
@@ -380,7 +380,7 @@ archiveRowCodec queueName =
 
 -- | A jsonb array of text. Any other shape reads as empty.
 jsonTexts :: Value -> [Text]
-jsonTexts = fromMaybe [] . parseMaybe parseJSON
+jsonTexts = decodeOrEmpty
 
 -- | A policy row with bucket aggregates and live throttled count.
 rateLimitPolicyViewCodec :: RowCodec RateLimitPolicyView

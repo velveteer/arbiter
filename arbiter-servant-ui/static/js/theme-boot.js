@@ -3,7 +3,7 @@
 {
   let theme = null;
   try {
-    theme = localStorage.getItem('arbiter-theme');
+    theme = localStorage.getItem('arb.theme');
   } catch {
     // Site data is blocked.
   }

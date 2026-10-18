@@ -1,5 +1,3 @@
-{-# OPTIONS_GHC -Wno-missing-import-lists #-}
-
 -- | Convenience re-exports for the @orville-postgresql@ backend.
 --
 -- @

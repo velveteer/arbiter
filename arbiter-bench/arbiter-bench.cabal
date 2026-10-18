@@ -1,4 +1,4 @@
-cabal-version:   2.2
+cabal-version:   3.0
 name:            arbiter-bench
 version:         0.1.0.0
 synopsis:        Benchmarks for arbiter job queue
@@ -18,11 +18,12 @@ bug-reports:     https://github.com/velveteer/arbiter/issues
 source-repository head
   type:     git
   location: https://github.com/velveteer/arbiter.git
+  subdir:   arbiter-bench
 
 flag hasql2
   description: Build against hasql 2, whose transport is a pqi adapter.
   default:     True
-  manual:      False
+  manual:      True
 
 common shared-properties
   default-language: GHC2024
@@ -66,9 +67,9 @@ benchmark benchmarks
 
   if flag(hasql2)
     build-depends:
-      , hasql       >=2.0
-      , pqi-ffi     >=1.0
-      , pqi-native  >=1.0
+      , hasql       >=2.0 && <2.1
+      , pqi-ffi     >=1.0 && <1.1
+      , pqi-native  >=1.0 && <1.1
 
   else
-    build-depends: hasql >=1.9 && <1.11
+    build-depends: hasql >=1.10 && <1.11

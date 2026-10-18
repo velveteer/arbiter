@@ -21,7 +21,6 @@ import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), setDedupKey)
 import Arbiter.Core.MonadArbiter (MonadArbiter, getSchema, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
-import Control.Concurrent.STM (retry)
 import Control.Monad (unless, void, when)
 import Control.Monad.IO.Class (MonadIO)
 import Data.Either (fromRight)
@@ -37,6 +36,7 @@ import UnliftIO
   , SomeException
   , TVar
   , atomically
+  , checkSTM
   , liftIO
   , readTVar
   , readTVarIO
@@ -251,7 +251,7 @@ resolveAndParse cron mRow =
 -- the watermark to @tick@. Returns whether this call fired the gate.
 insertCronJob
   :: (QueueOperation m payload)
-  => Text -> CronJob payload -> OverlapPolicy -> TickKind -> UTCTime -> m Bool
+  => SchemaName -> CronJob payload -> OverlapPolicy -> TickKind -> UTCTime -> m Bool
 insertCronJob schemaName cron effectiveOv kind tick = do
   -- Gate first. Another pool may have fired this minute.
   fired <- Ops.tryFireCronGate schemaName (name cron) tick
@@ -362,7 +362,7 @@ waitForWake stateVar runNowVar timerVar = liftIO . atomically $ do
           then pure WakeMinute
           else do
             requested <- readTVar runNowVar
-            unless requested retry
+            checkSTM requested
             pure WakeRunNow
       writeTVar runNowVar False
       pure reason

@@ -1,4 +1,3 @@
-{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 
@@ -29,7 +28,7 @@ import Test.Hspec
 import UnliftIO (bracket)
 import UnliftIO.Async (withAsync)
 
-import Arbiter.Test.Poll (waitUntil)
+import Arbiter.Test.Poll (bumpRef, waitUntil)
 import Arbiter.Test.Setup (execQuery, terminateBackendsMatching, terminatePid)
 import Arbiter.Worker.TestKit.Backend (TestBackend (..))
 
@@ -51,7 +50,7 @@ connectionRecoverySpec TestBackend {schema, connStr, mkSimple, mkFreshEnv, destr
       it "processes jobs inserted before and after a connection kill" $ \(env, spare) -> do
         completedRef <- newIORef (0 :: Int)
 
-        let handler _job = liftIO $ atomicModifyIORef' completedRef $ \count -> (count + 1, ())
+        let handler _job = liftIO $ bumpRef completedRef
 
         traverse_
           ( \jobIndex ->
@@ -103,7 +102,7 @@ connectionRecoverySpec TestBackend {schema, connStr, mkSimple, mkFreshEnv, destr
                 when shouldKill $ do
                   myPid <- execQuery "SELECT pg_backend_pid() AS pid" [] (col "pid" CInt4)
                   liftIO $ traverse_ (terminatePid connStr) myPid
-              liftIO $ atomicModifyIORef' completedRef $ \count -> (count + 1, ())
+              liftIO $ bumpRef completedRef
 
         runM env
           $ void

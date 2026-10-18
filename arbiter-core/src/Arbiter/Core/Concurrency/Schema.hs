@@ -42,12 +42,11 @@ import Arbiter.Core.Job.Schema
   , jobQueueTable
   , maintenanceFunctionNames
   )
-import Arbiter.Core.SqlLiterals (intLiteral, quoteIdentifier, textLiteral)
+import Arbiter.Core.SqlLiterals (intLiteral, sharedTable, textLiteral)
 
 -- | Qualified name of the global per-key in-flight count table.
 arbiterConcurrencyTable :: SchemaName -> Text
-arbiterConcurrencyTable schemaName =
-  quoteIdentifier schemaName <> "." <> arbiterConcurrencyTableName
+arbiterConcurrencyTable schemaName = sharedTable schemaName arbiterConcurrencyTableName
 
 -- | Bare name of the in-flight count table, for catalog lookups by relname.
 arbiterConcurrencyTableName :: Text
@@ -55,8 +54,7 @@ arbiterConcurrencyTableName = "arbiter_concurrency"
 
 -- | Qualified name of the app-global concurrency policies table.
 arbiterConcurrencyPoliciesTable :: SchemaName -> Text
-arbiterConcurrencyPoliciesTable schemaName =
-  quoteIdentifier schemaName <> "." <> arbiterConcurrencyPoliciesTableName
+arbiterConcurrencyPoliciesTable schemaName = sharedTable schemaName arbiterConcurrencyPoliciesTableName
 
 -- | Bare name of the concurrency policies table, for catalog lookups by relname.
 arbiterConcurrencyPoliciesTableName :: Text
@@ -114,19 +112,18 @@ createConcurrencyIndexSQL schemaName tableName =
 createConcurrencyTriggerFunctionsSQL :: SchemaName -> TableName -> Text
 createConcurrencyTriggerFunctionsSQL schemaName tableName =
   let concTbl = arbiterConcurrencyTable schemaName
-      baseName = "maintain_" <> tableName <> "_concurrency"
+      baseName = concurrencyTriggerBase tableName
       (funcInsert, funcDelete, funcUpdate) = maintenanceFunctionNames schemaName baseName
-      dollarQuote = "$$"
    in T.unlines
-        [ concurrencyInsertFunction funcInsert concTbl dollarQuote
-        , concurrencyDeleteFunction funcDelete concTbl dollarQuote
-        , concurrencyUpdateFunction funcUpdate concTbl dollarQuote
+        [ concurrencyInsertFunction funcInsert concTbl
+        , concurrencyDeleteFunction funcDelete concTbl
+        , concurrencyUpdateFunction funcUpdate concTbl
         ]
 
 -- | Seed a count row for a fresh key. A per-key shared advisory lock makes a
 -- concurrent prune skip the key.
-concurrencyInsertFunction :: Text -> Text -> Text -> Text
-concurrencyInsertFunction funcName concTbl dollarQuote =
+concurrencyInsertFunction :: Text -> Text -> Text
+concurrencyInsertFunction funcName concTbl =
   let lockExpr = concurrencyAdvisoryLockExpr "t.k"
    in [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
@@ -153,8 +150,8 @@ concurrencyInsertFunction funcName concTbl dollarQuote =
     ${dollarQuote} LANGUAGE plpgsql;
   |]
 
-concurrencyDeleteFunction :: Text -> Text -> Text -> Text
-concurrencyDeleteFunction funcName concTbl dollarQuote =
+concurrencyDeleteFunction :: Text -> Text -> Text
+concurrencyDeleteFunction funcName concTbl =
   [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
     RETURNS TRIGGER AS ${dollarQuote}
@@ -187,8 +184,8 @@ concurrencyDeleteFunction funcName concTbl dollarQuote =
     ${dollarQuote} LANGUAGE plpgsql;
   |]
 
-concurrencyUpdateFunction :: Text -> Text -> Text -> Text
-concurrencyUpdateFunction funcName concTbl dollarQuote =
+concurrencyUpdateFunction :: Text -> Text -> Text
+concurrencyUpdateFunction funcName concTbl =
   [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
     RETURNS TRIGGER AS ${dollarQuote}
@@ -285,7 +282,7 @@ createConcurrencyTriggersSQL schemaName tableName =
   createMaintenanceTriggersSQL
     schemaName
     (jobQueueTable schemaName tableName)
-    ("maintain_" <> tableName <> "_concurrency")
+    (concurrencyTriggerBase tableName)
 
 -- | Upsert a policy's @default_limit@. Any operator @override_limit@ is left untouched.
 upsertConcurrencyPolicyRowSQL :: SchemaName -> ConcurrencyPolicy -> Text
@@ -294,3 +291,11 @@ upsertConcurrencyPolicyRowSQL schemaName policy =
     (arbiterConcurrencyPoliciesTable schemaName)
     (textLiteral (cpPrefix policy))
     [("default_limit", intLiteral (cpLimit policy))]
+
+-- | Base name of a queue's concurrency trigger functions and triggers.
+concurrencyTriggerBase :: TableName -> Text
+concurrencyTriggerBase tableName = "maintain_" <> tableName <> "_concurrency"
+
+-- | The plpgsql function-body delimiter.
+dollarQuote :: Text
+dollarQuote = "$$"

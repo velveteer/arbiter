@@ -1,6 +1,5 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeFamilies #-}
 
 -- | Configuration types for the arbiter worker pool.
 module Arbiter.Worker.Config
@@ -18,6 +17,9 @@ module Arbiter.Worker.Config
   , ResultOf
   , WorkerConfigException (..)
   , validateWorkerConfig
+  , defaultMaintenanceSparseInterval
+  , defaultMaintenanceBucketIdle
+  , defaultMaintenanceTimeout
 
     -- * Batch callbacks
   , BatchCallbacks (..)
@@ -52,6 +54,7 @@ import Control.Exception (Exception)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (Value, (.=))
+import Data.Bifunctor (first)
 import Data.Foldable (toList)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty ((:|)))
@@ -174,11 +177,11 @@ data WorkerConfig m payload = WorkerConfig
   -- reaper operation. Default: @300@ (5 minutes).
   , reaperSparseInterval :: NominalDiffTime
   -- ^ Gap in seconds between runs of 'PruneRateLimitBuckets' and
-  -- 'ReconcilePruneConcurrency'. Default: @3600@ (1 hour).
+  -- 'ReconcilePruneConcurrency'. Default: 'defaultMaintenanceSparseInterval'.
   , reaperBucketIdle :: NominalDiffTime
-  -- ^ Idle age in seconds at which the reaper prunes a full rate-limit bucket. Default: @300@ (5 minutes).
+  -- ^ Idle age in seconds at which the reaper prunes a full rate-limit bucket. Default: 'defaultMaintenanceBucketIdle'.
   , reaperTimeout :: NominalDiffTime
-  -- ^ Abort any single reaper statement that runs longer than this many seconds. Default: @300@ (5 minutes).
+  -- ^ Abort any single reaper statement that runs longer than this many seconds. Default: 'defaultMaintenanceTimeout'.
   , workerId :: UUID
   -- ^ This worker's registry id. Default: a fresh random UUID.
   , workerHost :: Maybe Text
@@ -286,9 +289,8 @@ handlerBatchSize config = case handlerMode config of
 -- violations.
 validateWorkerConfig :: WorkerConfig m payload -> Either Text ()
 validateWorkerConfig config =
-  case fieldInvariants config *> crossFieldInvariants config of
-    Validation (Left messages) -> Left (T.intercalate "; " (toList messages))
-    Validation (Right ()) -> Right ()
+  let Validation result = fieldInvariants config *> crossFieldInvariants config
+   in first (T.intercalate "; " . toList) result
 
 -- | Rebuilds the config with every field checked or waived. A field added
 -- to 'WorkerConfig' is a type error here until it is classified.
@@ -331,9 +333,7 @@ crossFieldInvariants config =
       "workerHeartbeatInterval must be less than workerStaleThreshold"
 
 newtype Validation a = Validation (Either (NonEmpty Text) a)
-
-instance Functor Validation where
-  fmap mapper (Validation result) = Validation (fmap mapper result)
+  deriving newtype (Functor)
 
 instance Applicative Validation where
   pure = Validation . Right
@@ -411,6 +411,18 @@ withMaintenance
 withMaintenance report cfg =
   cfg {onMaintenance = \operation count -> report operation count `andThen` onMaintenance cfg operation count}
 
+-- | Gap the bucket prune and the concurrency reconcile-and-prune keep.
+defaultMaintenanceSparseInterval :: NominalDiffTime
+defaultMaintenanceSparseInterval = 3600
+
+-- | Age after which an idle rate-limit bucket is pruned.
+defaultMaintenanceBucketIdle :: NominalDiffTime
+defaultMaintenanceBucketIdle = 300
+
+-- | Statement timeout for one maintenance operation.
+defaultMaintenanceTimeout :: NominalDiffTime
+defaultMaintenanceTimeout = 300
+
 -- | Internal helper to create a config with the given handler mode.
 mkDefaultConfig
   :: (Applicative n, MonadIO m)
@@ -418,7 +430,7 @@ mkDefaultConfig
   -> HandlerMode n payload
   -> m (WorkerConfig n payload)
 mkDefaultConfig workerCnt mode = do
-  heartbeatTMVar <- liftIO newEmptyTMVarIO
+  heartbeatTMVar <- newEmptyTMVarIO
   shutdownTVar <- newTVarIO Running
   pauseTVar <- newTVarIO False
   pauseEpochTVar <- newTVarIO 0
@@ -453,9 +465,9 @@ mkDefaultConfig workerCnt mode = do
       , logConfig = withWorkerIdContext uuid defaultLogConfig
       , cronJobs = []
       , reaperInterval = 300
-      , reaperSparseInterval = 3600
-      , reaperBucketIdle = 300
-      , reaperTimeout = 300
+      , reaperSparseInterval = defaultMaintenanceSparseInterval
+      , reaperBucketIdle = defaultMaintenanceBucketIdle
+      , reaperTimeout = defaultMaintenanceTimeout
       , workerId = uuid
       , workerHost = Just (T.pack host)
       , workerMetadata = Nothing

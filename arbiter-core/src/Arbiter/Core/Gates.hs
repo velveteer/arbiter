@@ -18,11 +18,11 @@ import Data.Text (Text)
 import Data.Text qualified as T
 
 import Arbiter.Core.Job.Schema (SchemaName)
-import Arbiter.Core.SqlLiterals (quoteIdentifier)
+import Arbiter.Core.SqlLiterals (sharedTable)
 
 -- | Qualified name of the gates table.
 arbiterGatesTable :: SchemaName -> Text
-arbiterGatesTable schemaName = quoteIdentifier schemaName <> "." <> arbiterGatesTableName
+arbiterGatesTable schemaName = sharedTable schemaName arbiterGatesTableName
 
 -- | Bare name of the gates table, for catalog lookups by relname.
 arbiterGatesTableName :: Text

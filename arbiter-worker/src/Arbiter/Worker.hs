@@ -26,6 +26,9 @@ module Arbiter.Worker
   , ResultOf
   , WorkerConfigException (..)
   , validateWorkerConfig
+  , defaultMaintenanceSparseInterval
+  , defaultMaintenanceBucketIdle
+  , defaultMaintenanceTimeout
   , module Arbiter.Worker.BackoffStrategy
 
     -- * Batch callbacks
@@ -80,6 +83,9 @@ import Arbiter.Worker.Config
   , WorkerConfigException (..)
   , WorkerRuntime
   , batchedWorkerConfig
+  , defaultMaintenanceBucketIdle
+  , defaultMaintenanceSparseInterval
+  , defaultMaintenanceTimeout
   , getListenerReady
   , getWorkerState
   , handlerBatchSize

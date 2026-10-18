@@ -15,7 +15,6 @@ module Arbiter.Core.Sql.Jobs
   , ArchiveSortColumn (..)
   , archiveSortColumnName
   , SortDir (..)
-  , sortDirSql
   , sortDirName
   , throttledPredicateSQL
   , jobStatusCaseSQL
@@ -29,7 +28,6 @@ module Arbiter.Core.Sql.Jobs
   , buildDLQOrderBy
   , buildArchiveOrderBy
   , countDLQFilteredSQL
-  , allDLQColumns
   , jobColsExceptId
   , dlqCarriedCols
   , requeuedCols
@@ -37,7 +35,6 @@ module Arbiter.Core.Sql.Jobs
   , enqueuedAgainCols
   , enqueuedAgainValsEditing
   , jobColumns
-  , dedupUpdateSet
   , insertJobSQL
   , insertJobReplaceSQL
   , insertJobsBatchSQL
@@ -405,7 +402,11 @@ countDLQFilteredSQL schema tableName whereFrag =
 
 -- | The job read columns, in codec order, for SELECT and RETURNING.
 jobColumns :: Text
-jobColumns = joinColumns (codecColumns (jobRowCodec ""))
+jobColumns = joinColumns jobReadColumnNames
+
+-- | The job read column names, in codec order.
+jobReadColumnNames :: [Text]
+jobReadColumnNames = codecColumns (jobRowCodec "")
 
 -- | The DLQ read columns, in codec order. The DLQ uses @job_id@ for the main-table @id@.
 allDLQColumns :: Text
@@ -414,19 +415,12 @@ allDLQColumns = joinColumns (codecColumns (dlqRowCodec ""))
 -- | The job read columns except @id@. The archive INSERT copies them with the main
 -- table's @id@ as @job_id@.
 jobColsExceptId :: Text
-jobColsExceptId = joinColumns (drop 1 (codecColumns (jobRowCodec "")))
+jobColsExceptId = joinColumns (drop 1 jobReadColumnNames)
 
 -- | Job columns carried through a DLQ round-trip. The read columns except @id@ and
 -- @last_error@, plus write-only @rate_limit_cost@.
 dlqCarriedCols :: Text
-dlqCarriedCols =
-  [text|
-    payload, group_key, inserted_at, updated_at, attempts, priority,
-    last_attempted_at, not_visible_until, dedup_key, dedup_strategy, max_attempts,
-    parent_id, parent_state, traceparent, tracestate, suspended, claimed_by, claim_seq,
-    archive_for, kind, rate_limit_key, rate_limit_prefix, concurrency_key, concurrency_prefix,
-    rate_limit_cost
-  |]
+dlqCarriedCols = joinColumns (filter (/= "last_error") (drop 1 jobReadColumnNames) <> ["rate_limit_cost"])
 
 -- | Job columns a DLQ retry carries back to the main table. The retry re-arms the rest.
 requeuedColumnNames :: [Text]

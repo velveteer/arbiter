@@ -23,7 +23,6 @@ module Arbiter.Core.Sql.DLQ
 
 import Data.Int (Int64)
 import Data.Text (Text)
-import Data.Text qualified as T
 import NeatInterpolation (text)
 
 import Arbiter.Core.Codec (jobRowCodec)
@@ -34,7 +33,7 @@ import Arbiter.Core.Sql.Jobs (dlqCarriedCols, jobColumns, requeuedCols, requeued
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen, rows)
 import Arbiter.Core.Sql.Tree (lockedByIdsCte)
-import Arbiter.Core.SqlLiterals (defaultMaxAttemptsSQL)
+import Arbiter.Core.SqlLiterals (defaultMaxAttemptsSQL, intLiteral, lockGroupKeyOnConflictSQL)
 
 -- | Whether a DLQ move re-checks the attempt budget it was selected on.
 data DLQMove
@@ -78,7 +77,7 @@ moveToDLQSQL move schema tableName jobId cseq errorMsg =
 selectExhaustedJobsSQL :: SchemaName -> TableName -> Int -> Query (Int64, Int64, Maybe Int64, Bool)
 selectExhaustedJobsSQL schema tableName limit =
   let tbl = jobQueueTable schema tableName
-      lim = T.pack (show limit)
+      lim = intLiteral limit
    in [sql|
         SELECT @{id :: CInt8}, @{claim_seq :: CInt8}, @{parent_id :: Maybe CInt8},
                (parent_state IS NOT NULL) AS @{is_rollup :: CBool}
@@ -235,7 +234,7 @@ lockDLQRetryGroupsSQL schema tableName dlqId =
         ) keys
         WHERE group_key IS NOT NULL
         ORDER BY group_key
-        ON CONFLICT (group_key) DO UPDATE SET group_key = EXCLUDED.group_key WHERE FALSE
+        ${lockGroupKeyOnConflictSQL}
       |]
 
 -- | An edited column, taken from the edit on the target row and kept on the others.

@@ -13,7 +13,7 @@ import Data.Text qualified as T
 import UnliftIO (MonadUnliftIO, liftIO, tryAny)
 import UnliftIO.Async (Async, race, withAsync)
 import UnliftIO.Concurrent (threadDelay)
-import UnliftIO.STM (TVar, atomically, readTVar, readTVarIO, retrySTM)
+import UnliftIO.STM (TVar, atomically, checkSTM, readTVar, readTVarIO)
 
 import Arbiter.Worker.Logger (LogConfig, LogLevel (..), tryLog)
 import Arbiter.Worker.WorkerState (WorkerState (..))
@@ -47,6 +47,4 @@ spawnRetried stateVar logCfg queue label action =
         -- Shutdown wins the race.
         race awaitShutdown (liftIO (threadDelay retryBackoffMicros))
           >>= either pure (const loop)
-    awaitShutdown = liftIO . atomically $ do
-      state <- readTVar stateVar
-      unless (state == ShuttingDown) retrySTM
+    awaitShutdown = atomically (readTVar stateVar >>= checkSTM . (== ShuttingDown))

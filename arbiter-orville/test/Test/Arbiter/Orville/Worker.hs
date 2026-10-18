@@ -1,10 +1,8 @@
-{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 
 module Test.Arbiter.Orville.Worker
-  ( OrvilleWorkerTestPayload (..)
-  , withOrvilleBackend
+  ( withOrvilleBackend
   , spec
   , deadlineSpec
   , cronSpec
@@ -14,12 +12,11 @@ module Test.Arbiter.Orville.Worker
   ) where
 
 import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
+import Arbiter.Test.Fixtures (WorkerTestPayload (..))
 import Arbiter.Test.Setup qualified as TestSetup
 import Arbiter.Worker.TestKit qualified as TestKit
-import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
 import Data.Text (Text)
-import GHC.Generics (Generic)
 import Test.Hspec (Spec, afterAll_, beforeAll, runIO)
 
 import Test.Arbiter.Orville.TestHelpers
@@ -29,6 +26,7 @@ import Test.Arbiter.Orville.TestHelpers
   , createOrvilleTestEnv
   , destroyOrvilleTestEnv
   , disableOrvilleListener
+  , orvillePoolSize
   , orvilleTestHandler
   , runOrvilleTest
   )
@@ -36,14 +34,8 @@ import Test.Arbiter.Orville.TestHelpers
 workerTestSchemaName :: Text
 workerTestSchemaName = "arbiter_orville_worker_test"
 
-data OrvilleWorkerTestPayload
-  = SimpleTask Text
-  | FailingTask Int
-  deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
-
 type OrvilleWorkerTestRegistry =
-  '[QueueWithResult "arbiter_orville_worker_test" OrvilleWorkerTestPayload (Maybe [Text])]
+  '[QueueWithResult "arbiter_orville_worker_test" WorkerTestPayload (Maybe [Text])]
 
 spec :: ByteString -> Spec
 spec connStr = withOrvilleBackend @OrvilleWorkerTestRegistry connStr workerTestSchemaName TestKit.workerSpec
@@ -53,7 +45,7 @@ withOrvilleBackend
   :: forall registry
    . ByteString
   -> Text
-  -> (TestKit.TestBackend OrvilleWorkerTestPayload (TestOrville registry) (OrvilleTestEnv registry) -> Spec)
+  -> (TestKit.TestBackend WorkerTestPayload (TestOrville registry) (OrvilleTestEnv registry) -> Spec)
   -> Spec
 withOrvilleBackend connStr schema suite =
   beforeAll (TestSetup.setupOnce connStr schema schema True) $ do
@@ -65,7 +57,7 @@ orvilleBackend
    . ByteString
   -> Text
   -> OrvilleTestEnv registry
-  -> TestKit.TestBackend OrvilleWorkerTestPayload (TestOrville registry) (OrvilleTestEnv registry)
+  -> TestKit.TestBackend WorkerTestPayload (TestOrville registry) (OrvilleTestEnv registry)
 orvilleBackend connStr schema env =
   TestKit.TestBackend
     { schema
@@ -82,13 +74,10 @@ orvilleBackend connStr schema env =
     , runM = runOrvilleTest
     }
 
-orvillePoolSize :: Int
-orvillePoolSize = 10
-
 deadlineSchema :: Text
 deadlineSchema = "arbiter_orville_deadline_test"
 
-type OrvilleDeadlineRegistry = '[Queue "arbiter_orville_deadline_test" OrvilleWorkerTestPayload]
+type OrvilleDeadlineRegistry = '[Queue "arbiter_orville_deadline_test" WorkerTestPayload]
 
 deadlineSpec :: ByteString -> Spec
 deadlineSpec connStr = withOrvilleBackend @OrvilleDeadlineRegistry connStr deadlineSchema TestKit.deadlineSpec
@@ -96,7 +85,7 @@ deadlineSpec connStr = withOrvilleBackend @OrvilleDeadlineRegistry connStr deadl
 cronSchema :: Text
 cronSchema = "arbiter_orville_cron_test"
 
-type OrvilleCronRegistry = '[Queue "arbiter_orville_cron_test" OrvilleWorkerTestPayload]
+type OrvilleCronRegistry = '[Queue "arbiter_orville_cron_test" WorkerTestPayload]
 
 cronSpec :: ByteString -> Spec
 cronSpec connStr = withOrvilleBackend @OrvilleCronRegistry connStr cronSchema TestKit.cronSpec
@@ -104,7 +93,7 @@ cronSpec connStr = withOrvilleBackend @OrvilleCronRegistry connStr cronSchema Te
 reclaimSchema :: Text
 reclaimSchema = "arbiter_orville_reclaim_test"
 
-type OrvilleReclaimRegistry = '[Queue "arbiter_orville_reclaim_test" OrvilleWorkerTestPayload]
+type OrvilleReclaimRegistry = '[Queue "arbiter_orville_reclaim_test" WorkerTestPayload]
 
 reclaimSpec :: ByteString -> Spec
 reclaimSpec connStr = withOrvilleBackend @OrvilleReclaimRegistry connStr reclaimSchema TestKit.reclaimSpec
@@ -112,7 +101,7 @@ reclaimSpec connStr = withOrvilleBackend @OrvilleReclaimRegistry connStr reclaim
 recoverySchema :: Text
 recoverySchema = "arbiter_orville_recovery_test"
 
-type OrvilleRecoveryRegistry = '[Queue "arbiter_orville_recovery_test" OrvilleWorkerTestPayload]
+type OrvilleRecoveryRegistry = '[Queue "arbiter_orville_recovery_test" WorkerTestPayload]
 
 connectionRecoverySpec :: ByteString -> Spec
 connectionRecoverySpec connStr = withOrvilleBackend @OrvilleRecoveryRegistry connStr recoverySchema TestKit.connectionRecoverySpec
@@ -121,7 +110,7 @@ lifecycleSchema :: Text
 lifecycleSchema = "arbiter_orville_lifecycle_test"
 
 type OrvilleLifecycleRegistry =
-  '[QueueWithResult "arbiter_orville_lifecycle_test" OrvilleWorkerTestPayload (Maybe [Text])]
+  '[QueueWithResult "arbiter_orville_lifecycle_test" WorkerTestPayload (Maybe [Text])]
 
 lifecycleSpec :: ByteString -> Spec
 lifecycleSpec connStr = withOrvilleBackend @OrvilleLifecycleRegistry connStr lifecycleSchema TestKit.lifecycleSpec

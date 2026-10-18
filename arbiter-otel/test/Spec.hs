@@ -1,7 +1,5 @@
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeApplications #-}
 
 -- | The three signals against a real Postgres (ARBITER_TEST_CONN_STRING).
 module Main (main) where

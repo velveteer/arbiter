@@ -9,11 +9,11 @@ module Arbiter.Test.Setup
   , terminatePid
   , listenerConnectionCount
   , execute_
+  , toQuery
   , execStatement
   , execQuery
   , setupOnce
   , addQueueTable
-  , disableNoticeReporting
   , createSharedPool
   , createPoolOf
   , createPoolWith
@@ -21,12 +21,15 @@ module Arbiter.Test.Setup
   , mkTime
   , seedConcurrencyPolicySQL
   , drainWith
+  , quietHubLog
   ) where
 
 import Arbiter.Core.Codec (RowCodec)
 import Arbiter.Core.Concurrency.Schema qualified as CC
 import Arbiter.Core.Concurrency.Spec (ConcurrencyPolicy (..))
+import Arbiter.Core.FailureGate (defaultFailureRepeatInterval)
 import Arbiter.Core.Job.Schema qualified as Schema
+import Arbiter.Core.Listen (HubLog (..))
 import Arbiter.Core.MonadArbiter (MonadArbiter, Params)
 import Arbiter.Core.MonadArbiter qualified as MA
 import Arbiter.Core.RateLimit.Schema qualified as RL
@@ -133,7 +136,11 @@ listenerConnectionCount connStr schema =
 
 -- | Run a statement with no parameters (test setup only).
 execute_ :: Connection -> Text -> IO ()
-execute_ conn sql = void $ execute conn (fromString (T.unpack sql) :: Query) ()
+execute_ conn sql = void $ execute conn (toQuery sql) ()
+
+-- | A postgresql-simple query from rendered SQL text.
+toQuery :: Text -> Query
+toQuery = fromString . T.unpack
 
 -- | Run a pre-rendered statement with @?@ placeholders and positional parameters
 -- (test setup only).
@@ -234,3 +241,13 @@ truncateToMicros :: UTCTime -> UTCTime
 truncateToMicros (UTCTime day dayTime) =
   let micros = floor (dayTime * 1e6) :: Integer
    in UTCTime day (picosecondsToDiffTime (micros * 1000000))
+
+-- | A hub logger that swallows warn and error output.
+quietHubLog :: HubLog
+quietHubLog =
+  HubLog
+    { hubRecovered = const (pure ())
+    , hubWarn = const (pure ())
+    , hubError = const (pure ())
+    , hubRepeatInterval = defaultFailureRepeatInterval
+    }

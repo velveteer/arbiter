@@ -29,7 +29,6 @@ import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Data.Foldable (traverse_)
 import Data.Maybe (isJust)
-import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (UTCTime, getCurrentTime)
@@ -39,7 +38,7 @@ import Test.Hspec (Spec, before, describe, expectationFailure, it, shouldBe, sho
 import UnliftIO (newEmptyMVar, putMVar, takeMVar)
 import UnliftIO.Async (wait, withAsync)
 
-import Arbiter.Test.Setup (mkTime, withConn)
+import Arbiter.Test.Setup (mkTime, toQuery, withConn)
 import Arbiter.Worker.TestKit.Backend (TestBackend (..))
 
 -- | 'processCronCatchUp' under a fresh gate store.
@@ -67,7 +66,7 @@ runRequestsAt schema jobs now = do
 
 -- | An UPDATE on the schema's cron table by schedule name, with @?@ holes for the SET values.
 cronUpdate :: Text -> Text -> PG.Query
-cronUpdate schema setClause = fromString . T.unpack $ "UPDATE " <> CS.cronSchedulesTable schema <> " SET " <> setClause <> " WHERE name = ?"
+cronUpdate schema setClause = toQuery $ "UPDATE " <> CS.cronSchedulesTable schema <> " SET " <> setClause <> " WHERE name = ?"
 
 -- | Cron scheduler suite.
 cronSpec

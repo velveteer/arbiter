@@ -6,8 +6,7 @@
 --
 -- Cron SQL templates.
 module Arbiter.Core.Sql.Cron
-  ( allCronColumns
-  , upsertCronDefaultSQL
+  ( upsertCronDefaultSQL
   , listCronSchedulesSQL
   , getCronScheduleByNameSQL
   , updateCronScheduleSQL
@@ -39,14 +38,10 @@ allCronColumns = joinColumns (codecColumns cronScheduleRowCodec)
 
 -- | 'allCronColumns' with an expired @run_requested_at@ read back as NULL.
 cronReadColumns :: Text
-cronReadColumns =
-  [text|
-    name, queue_name, default_expression, default_overlap, default_timezone,
-    override_expression, override_overlap, override_timezone, enabled,
-    last_fired_at, last_checked_at,
-    (CASE WHEN ${cronRunPending} THEN run_requested_at END) AS run_requested_at,
-    last_manual_run_at, created_at, updated_at
-  |]
+cronReadColumns = joinColumns (map readCol (codecColumns cronScheduleRowCodec))
+  where
+    readCol "run_requested_at" = "(CASE WHEN " <> cronRunPending <> " THEN run_requested_at END) AS run_requested_at"
+    readCol name = name
 
 -- | Upsert a cron schedule's default values, preserving @override_*@ columns on conflict.
 -- An unchanged schedule is left alone. @initialEnabled@ applies only to a row this

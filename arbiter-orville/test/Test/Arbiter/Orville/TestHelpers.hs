@@ -1,6 +1,7 @@
 module Test.Arbiter.Orville.TestHelpers
   ( setupOrvilleTest
   , createOrvilleTestEnv
+  , orvillePoolSize
   , destroyOrvilleTestEnv
   , disableOrvilleListener
   , cleanupOrvilleTest
@@ -11,18 +12,17 @@ module Test.Arbiter.Orville.TestHelpers
   ) where
 
 import Arbiter.Core.Listen (Listener)
+import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
 import Arbiter.LibPQ (newLibPQListener)
 import Arbiter.Test.Setup qualified as TestSetup
 import Control.Monad.Trans.Reader (ReaderT, runReaderT)
 import Data.ByteString (ByteString)
 import Data.Text (Text)
-import Data.Text qualified as T
-import Data.Text.Encoding qualified as TE
 import Orville.PostgreSQL qualified as O
 import Orville.PostgreSQL.Raw.Connection (destroyIdleConnections)
 
-import Arbiter.Orville.OrvilleDb (OrvilleDb, OrvilleEnv (..), runOrvilleDb)
+import Arbiter.Orville.OrvilleDb (OrvilleDb, OrvilleEnv (..), runOrvilleDb, toOrvilleConnectionOptions)
 
 -- Test environment combining schema name, table name, and OrvilleState
 data OrvilleTestEnv (registry :: JobPayloadRegistry) = OrvilleTestEnv
@@ -47,15 +47,11 @@ setupOrvilleTest connStr schemaName tableName maxConns = do
 -- schema whose tables already exist. The DDL is the caller's responsibility.
 createOrvilleTestEnv :: ByteString -> Text -> Text -> Int -> IO (OrvilleTestEnv registry)
 createOrvilleTestEnv connStr schemaName tableName maxConns = do
-  let options =
-        O.ConnectionOptions
-          { O.connectionString = T.unpack (TE.decodeUtf8 connStr)
-          , O.connectionNoticeReporting = O.DisableNoticeReporting
-          , O.connectionPoolStripes = O.StripeCount 1
-          , O.connectionPoolLingerTime = 60
-          , O.connectionPoolMaxConnections = O.MaxConnectionsTotal maxConns
-          }
-  orvillePool <- O.createConnectionPool options
+  orvillePool <-
+    O.createConnectionPool $
+      toOrvilleConnectionOptions
+        connStr
+        PoolConfig {poolSize = maxConns, poolIdleTimeout = poolIdleSeconds, poolStripes = Just 1}
   let orvilleState = O.newOrvilleState O.defaultErrorDetailLevel orvillePool
   listen <- newLibPQListener connStr
 
@@ -68,6 +64,14 @@ createOrvilleTestEnv connStr schemaName tableName maxConns = do
       , testPool = orvillePool
       , testListen = Just listen
       }
+
+-- | Pool size for the worker suites.
+orvillePoolSize :: Int
+orvillePoolSize = 10
+
+-- | Seconds an idle pooled connection lingers before it closes.
+poolIdleSeconds :: Int
+poolIdleSeconds = 60
 
 -- | Release the env's Orville connection pool, closing its idle connections.
 destroyOrvilleTestEnv :: OrvilleTestEnv registry -> IO ()

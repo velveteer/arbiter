@@ -1,8 +1,4 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 -- | Property tests for per-job concurrency limits against an exact model.
 module Arbiter.Test.ConcurrencyModel
@@ -32,7 +28,6 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Set qualified as Set
-import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.UUID.Types qualified as UUID
@@ -44,7 +39,7 @@ import Test.Hspec
 import UnliftIO.Async (mapConcurrently)
 
 import Arbiter.Test.ConcurrencyLimit (CLPayload (..), CLReg, concurrencyTable)
-import Arbiter.Test.Setup (execute_, seedConcurrencyPolicySQL)
+import Arbiter.Test.Setup (execute_, seedConcurrencyPolicySQL, toQuery)
 
 -- A worker id that attributes claims.
 worker :: UUID.UUID
@@ -336,7 +331,7 @@ remainingGroups withConn schema =
     rows <-
       PG.query_
         conn
-        (stmt ("SELECT DISTINCT group_key FROM " <> jobQueueTable schema concurrencyTable <> " WHERE group_key IS NOT NULL"))
+        (toQuery ("SELECT DISTINCT group_key FROM " <> jobQueueTable schema concurrencyTable <> " WHERE group_key IS NOT NULL"))
     pure (map PG.fromOnly rows)
 
 groupByKey :: [JobRead CLPayload] -> Map Text [JobRead CLPayload]
@@ -361,8 +356,5 @@ readCounts withConn schema =
     rows <-
       PG.query_
         conn
-        (stmt ("SELECT concurrency_key, in_flight FROM " <> arbiterConcurrencyTable schema))
+        (toQuery ("SELECT concurrency_key, in_flight FROM " <> arbiterConcurrencyTable schema))
     pure (Map.fromList rows)
-
-stmt :: Text -> PG.Query
-stmt = fromString . T.unpack

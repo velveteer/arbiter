@@ -219,9 +219,9 @@ logMessage config level msg = when (level >= minLogLevel config) $ do
 
 runWithDestination :: LogDestination -> [Pair] -> LogLevel -> Text -> IO ()
 runWithDestination dest ctx level msg = case dest of
-  LogStdout -> MLA.runStdoutLoggingT $ MLA.withThreadContext ctx $ logAt level msg
-  LogStderr -> MLA.runStderrLoggingT $ MLA.withThreadContext ctx $ logAt level msg
-  LogFastLogger loggerSet -> MLA.runFastLoggingT loggerSet $ MLA.withThreadContext ctx $ logAt level msg
+  LogStdout -> MLA.runStdoutLoggingT emit
+  LogStderr -> MLA.runStderrLoggingT emit
+  LogFastLogger loggerSet -> MLA.runFastLoggingT loggerSet emit
   LogCallback callback -> do
     threadCtx <- KM.toList <$> MLA.myThreadContext
     callback level msg (threadCtx <> ctx)
@@ -229,6 +229,7 @@ runWithDestination dest ctx level msg = case dest of
     runWithDestination base ctx level msg `finally` runWithDestination extra ctx level msg
   LogDiscard -> pure ()
   where
+    emit = MLA.withThreadContext ctx (logAt level msg)
     logAt :: (ML.MonadLogger m) => LogLevel -> Text -> m ()
     logAt Debug = ML.logDebugN
     logAt Info = ML.logInfoN

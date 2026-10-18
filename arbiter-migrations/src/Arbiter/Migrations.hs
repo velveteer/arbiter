@@ -133,6 +133,7 @@ import Arbiter.Core.RateLimit.Spec
   , registryRateLimitTables
   )
 import Arbiter.Core.SchemaTables (sharedArbiterTables)
+import Arbiter.Core.SqlLiterals (maxIdentifierBytes)
 import Arbiter.Core.Worker
   ( addArchiveForColumnSQL
   , addCancelRequestedAtColumnSQL
@@ -274,11 +275,11 @@ allTableAdmission :: TableAdmission
 allTableAdmission = TableAdmission {tableConcurrency = True, tableRateLimit = True}
 
 -- | The longest queue name whose generated identifiers stay distinct after PostgreSQL
--- truncates them to 63 bytes.
+-- truncates them to 'maxIdentifierBytes'.
 maxQueueNameBytes :: Int
-maxQueueNameBytes = length (takeWhile identifiersDistinct [1 .. 63])
+maxQueueNameBytes = length (takeWhile identifiersDistinct [1 .. maxIdentifierBytes])
   where
-    identifiersDistinct len = null (conflictingPrefixes (T.take 63) id (renderedIdentifiers (T.replicate len "q")))
+    identifiersDistinct len = null (conflictingPrefixes (T.take maxIdentifierBytes) id (renderedIdentifiers (T.replicate len "q")))
 
 -- | All identifiers in a queue's rendered DDL.
 renderedIdentifiers :: TableName -> [Text]
@@ -301,7 +302,8 @@ renderedIdentifiers table =
 validateRegistryNames :: SchemaName -> [TableName] -> Either Text ()
 validateRegistryNames schemaName tables
   | T.null schemaName = Left "Arbiter schema name must not be empty"
-  | byteLength schemaName > 63 = Left "Arbiter schema name exceeds PostgreSQL's 63-byte identifier limit"
+  | byteLength schemaName > maxIdentifierBytes =
+      Left ("Arbiter schema name exceeds PostgreSQL's " <> T.pack (show maxIdentifierBytes) <> "-byte identifier limit")
   | any T.null tables = Left "Arbiter queue name must not be empty"
   | Just table <- find ((> maxQueueNameBytes) . byteLength) tables =
       Left
@@ -403,8 +405,7 @@ migrateSchema conn schemaName tableNames config seeds = do
     LibPQ.disableNoticeReporting libpqConn
 
   -- A failed CREATE is fine when the schema exists.
-  let schemaSQL = Query (encodeUtf8 $ createSchemaSQL schemaName)
-  result <- try $ execute_ conn schemaSQL
+  result <- try $ executeSQL conn (createSchemaSQL schemaName)
   case result of
     Right _ -> pure ()
     Left (createError :: PG.SqlError) -> do
@@ -505,7 +506,7 @@ reconcilePolicyRows label noun prefixOf paramsOf upsertSQL conn schemaName rows
         )
   | otherwise =
       PG.withTransaction conn $
-        traverse_ (\row -> void $ execute_ conn (Query (encodeUtf8 (upsertSQL schemaName row)))) rows
+        traverse_ (executeSQL conn . upsertSQL schemaName) rows
 
 -- | Prefixes declared with more than one distinct parameter set.
 conflictingPrefixes :: (Ord params) => (row -> Text) -> (row -> params) -> [row] -> [Text]
@@ -534,7 +535,7 @@ reconcileRateLimitDurability conn schemaName durability = do
   case rows of
     (Only current : _)
       | current /= target ->
-          void $ execute_ conn (Query (encodeUtf8 (alterRateLimitsDurabilitySQL schemaName durability)))
+          executeSQL conn (alterRateLimitsDurabilitySQL schemaName durability)
     _ -> pure ()
 
 -- | Reconcile optional triggers schema-wide after tracked migrations. Install or drop
@@ -551,7 +552,7 @@ reconcileOptionalTriggers conn schemaName tables config =
       else dropNotifyObjectsExcept []
     if enableEventStreaming config
       then do
-        executeSQL (createEventStreamingFunctionSQL schemaName)
+        executeSQL conn (createEventStreamingFunctionSQL schemaName)
         dropEventTriggersExcept eventTables
         traverse_ installEventStream tables
       else do
@@ -559,20 +560,20 @@ reconcileOptionalTriggers conn schemaName tables config =
         ours <- eventFunctionIsMarked
         -- The function stays while foreign triggers depend on it.
         depended <- eventFunctionHasTriggers
-        when (ours && not depended) $ executeSQL (dropEventStreamingFunctionSQL schemaName)
+        when (ours && not depended) $ executeSQL conn (dropEventStreamingFunctionSQL schemaName)
   where
     -- Functions are replaced in place. That takes no lock on the queue table. Triggers
     -- are rebuilt when their marker is off the current version.
     installNotify table = do
-      executeSQL (createNotifyFunctionSQL schemaName table)
+      executeSQL conn (createNotifyFunctionSQL schemaName table)
       current <- triggerIsCurrent table (notifyTriggerName table) notifyObjectComment
-      unless current $ executeSQL (createNotifyTriggerSQL schemaName table)
+      unless current $ executeSQL conn (createNotifyTriggerSQL schemaName table)
 
     installEventStream table = do
       mainCurrent <- triggerIsCurrent table (eventStreamingTriggerName table) eventStreamingObjectComment
       dlqCurrent <- triggerIsCurrent (table <> "_dlq") (eventStreamingDLQTriggerName table) eventStreamingObjectComment
       unless (mainCurrent && dlqCurrent) $
-        executeSQL (createEventStreamingTriggersSQL schemaName table)
+        executeSQL conn (createEventStreamingTriggersSQL schemaName table)
 
     triggerIsCurrent table trigger marker =
       exists
@@ -672,9 +673,11 @@ reconcileOptionalTriggers conn schemaName tables config =
     executeRendered :: (PG.ToRow params) => Query -> params -> IO ()
     executeRendered sql params = do
       commands <- query conn sql params
-      traverse_ (\(Only command) -> executeSQL command) commands
+      traverse_ (\(Only command) -> executeSQL conn command) commands
 
-    executeSQL = void . execute_ conn . Query . encodeUtf8
+-- | Run one rendered DDL or DML statement.
+executeSQL :: PG.Connection -> Text -> IO ()
+executeSQL conn = void . execute_ conn . Query . encodeUtf8
 
 -- | The catalog joins the trigger sweeps share.
 triggerJoins :: Query
@@ -781,7 +784,7 @@ jobQueueMigrationsForTable schemaName tableName admission =
    in coreMigrations <> concurrencyTriggers <> rateLimitTriggers
 
 -- | Whether a schema exists.
-schemaExists :: PG.Connection -> Text -> IO Bool
+schemaExists :: PG.Connection -> SchemaName -> IO Bool
 schemaExists conn schemaName = do
   rows <- query conn "SELECT 1 FROM pg_namespace WHERE nspname = ?" (Only schemaName) :: IO [Only Int]
   pure (not (null rows))

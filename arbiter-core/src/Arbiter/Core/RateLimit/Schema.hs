@@ -42,12 +42,11 @@ import Arbiter.Core.Job.Schema
   , statementTriggerSQL
   )
 import Arbiter.Core.RateLimit.Spec (Durability (..), RateLimitPolicy (..))
-import Arbiter.Core.SqlLiterals (doubleLiteral, quoteIdentifier, textLiteral)
+import Arbiter.Core.SqlLiterals (doubleLiteral, sharedTable, textLiteral)
 
 -- | Qualified name of the app-global policies table.
 arbiterRateLimitPoliciesTable :: SchemaName -> Text
-arbiterRateLimitPoliciesTable schemaName =
-  quoteIdentifier schemaName <> "." <> arbiterRateLimitPoliciesTableName
+arbiterRateLimitPoliciesTable schemaName = sharedTable schemaName arbiterRateLimitPoliciesTableName
 
 -- | Bare name of the policies table, for catalog lookups by relname.
 arbiterRateLimitPoliciesTableName :: Text
@@ -60,8 +59,7 @@ arbiterRateLimitsTableName = "arbiter_rate_limits"
 -- | Qualified name of the single bucket table. Its WAL durability is a table-level
 -- property reconciled by the migration.
 arbiterRateLimitsTable :: SchemaName -> Text
-arbiterRateLimitsTable schemaName =
-  quoteIdentifier schemaName <> "." <> arbiterRateLimitsTableName
+arbiterRateLimitsTable schemaName = sharedTable schemaName arbiterRateLimitsTableName
 
 -- | DDL for the policies table. @default_*@ is migration-owned. @override_*@ is
 -- management-owned. The effective params are @COALESCE(override, default)@.
@@ -148,12 +146,11 @@ createRateLimitBucketTriggerFunctionsSQL :: SchemaName -> TableName -> Text
 createRateLimitBucketTriggerFunctionsSQL schemaName tableName =
   let buckets = arbiterRateLimitsTable schemaName
       policies = arbiterRateLimitPoliciesTable schemaName
-      baseName = "ensure_" <> tableName <> "_rate_limit_buckets"
+      baseName = bucketTriggerBase tableName
       (funcInsert, _funcDelete, funcUpdate) = maintenanceFunctionNames schemaName baseName
-      dollarQuote = "$$"
    in T.unlines
-        [ bucketInsertFunction funcInsert buckets policies dollarQuote
-        , bucketUpdateFunction funcUpdate buckets policies dollarQuote
+        [ bucketInsertFunction funcInsert buckets policies
+        , bucketUpdateFunction funcUpdate buckets policies
         ]
 
 -- | The seed INSERT shared by the trigger functions and the claim's @rl_seed@ CTE,
@@ -176,8 +173,8 @@ bucketSeedInsert buckets policies source match =
 
 -- | Seed a full bucket for each fresh inserted key whose prefix has a policy. The NOT
 -- EXISTS guard skips the insert for an already-present key.
-bucketInsertFunction :: Text -> Text -> Text -> Text -> Text
-bucketInsertFunction funcName buckets policies dollarQuote =
+bucketInsertFunction :: Text -> Text -> Text -> Text
+bucketInsertFunction funcName buckets policies =
   let seed = bucketSeedInsert buckets policies "new_table n" "n.rate_limit_key IS NOT NULL"
    in [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
@@ -196,8 +193,8 @@ bucketInsertFunction funcName buckets policies dollarQuote =
 
 -- | Seed a bucket for a key a dedup-replace moved onto. A claim or heartbeat
 -- leaves the key unchanged and returns early.
-bucketUpdateFunction :: Text -> Text -> Text -> Text -> Text
-bucketUpdateFunction funcName buckets policies dollarQuote =
+bucketUpdateFunction :: Text -> Text -> Text -> Text
+bucketUpdateFunction funcName buckets policies =
   let seed =
         bucketSeedInsert
           buckets
@@ -228,7 +225,7 @@ bucketUpdateFunction funcName buckets policies dollarQuote =
 createRateLimitBucketTriggersSQL :: SchemaName -> TableName -> Text
 createRateLimitBucketTriggersSQL schemaName tableName =
   let tbl = jobQueueTable schemaName tableName
-      baseName = "ensure_" <> tableName <> "_rate_limit_buckets"
+      baseName = bucketTriggerBase tableName
    in T.intercalate
         "\n\n"
         [ statementTriggerSQL schemaName tbl baseName "_insert" "INSERT" "NEW TABLE AS new_table"
@@ -245,3 +242,11 @@ createThrottledIndexSQL schemaName tableName =
     (jobQueueTable schemaName tableName)
     "rate_limit_prefix, rate_limit_key"
     (Just "throttled_until IS NOT NULL")
+
+-- | Base name of a queue's bucket-seeding trigger functions and triggers.
+bucketTriggerBase :: TableName -> Text
+bucketTriggerBase tableName = "ensure_" <> tableName <> "_rate_limit_buckets"
+
+-- | The plpgsql function-body delimiter.
+dollarQuote :: Text
+dollarQuote = "$$"

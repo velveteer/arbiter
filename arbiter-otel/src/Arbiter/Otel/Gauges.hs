@@ -4,7 +4,6 @@
 module Arbiter.Otel.Gauges
   ( startGauges
   , withGaugeLoop
-  , reachabilityOf
   ) where
 
 import Arbiter.Core.MonadArbiter (MonadArbiter)

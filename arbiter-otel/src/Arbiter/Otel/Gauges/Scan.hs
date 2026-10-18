@@ -1,5 +1,3 @@
-{-# LANGUAGE ScopedTypeVariables #-}
-
 -- | Database scan for one gauge snapshot.
 module Arbiter.Otel.Gauges.Scan
   ( scanSnapshot

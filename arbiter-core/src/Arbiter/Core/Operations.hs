@@ -1,6 +1,4 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# OPTIONS_HADDOCK not-home #-}
@@ -242,10 +240,8 @@ import Control.Monad (foldM, join, unless, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson
   ( FromJSON (..)
-  , Result (..)
   , ToJSON (..)
   , Value
-  , fromJSON
   , object
   , withObject
   , (.!=)
@@ -259,7 +255,6 @@ import Data.Either (fromRight, isLeft, partitionEithers)
 import Data.Foldable (for_, toList, traverse_)
 import Data.Int (Int64)
 import Data.IntMap qualified as IntMap
-import Data.List (groupBy, sortOn)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
@@ -334,6 +329,7 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.Job.Types qualified as JT
 import Arbiter.Core.Job.Types.Internal (JobRecord (..))
+import Arbiter.Core.Json (decodeOrEmpty)
 import Arbiter.Core.MonadArbiter (MonadArbiter, countOr0, countOr0Prepared, withDbTransaction)
 import Arbiter.Core.MonadArbiter qualified as MA
 import Arbiter.Core.Operations.Gates
@@ -906,7 +902,7 @@ getResultsByParent
   -- ^ Table name
   -> Int64
   -- ^ Parent job id
-  -> m (Map.Map Int64 Value)
+  -> m (Map Int64 Value)
 getResultsByParent schemaName tableName parentJobId =
   Map.fromList <$> MA.executeQuery (Tmpl.getResultsByParentSQL schemaName tableName parentJobId)
 
@@ -920,7 +916,7 @@ getDLQChildErrorsByParent
   -- ^ Table name
   -> Int64
   -- ^ Parent job id
-  -> m (Map.Map Int64 Text)
+  -> m (Map Int64 Text)
 getDLQChildErrorsByParent schemaName tableName parentJobId =
   Map.fromList . mapMaybe (\(jid, mErr) -> (jid,) <$> mErr)
     <$> MA.executeQuery (Tmpl.getDLQChildErrorsByParentSQL schemaName tableName parentJobId)
@@ -1043,9 +1039,7 @@ claimJobsBatchedCached statements maxBatches
   | maxBatches < 1 = pure ([], [])
   | otherwise = do
       (jobs, rejected) <- decodeClaimed <$> MA.executeQueryPrepared (claimFor statements maxBatches)
-      let sorted = sortOn groupKey jobs
-          groups = groupBy (\jobA jobB -> groupKey jobA == groupKey jobB) sorted
-      pure (concatMap (chunksOfNE (claimBatchSize statements)) (mapMaybe NE.nonEmpty groups), rejected)
+      pure (concatMap (chunksOfNE (claimBatchSize statements)) (NE.groupAllWith groupKey jobs), rejected)
 
 -- | Split a NonEmpty list into chunks of at most @size@ elements.
 chunksOfNE :: Int -> NonEmpty a -> [NonEmpty a]
@@ -1558,7 +1552,7 @@ dlqJobExists
   -> Int64
   -> m Bool
 dlqJobExists schemaName tableName dlqId =
-  fromMaybe False . listToMaybe <$> MA.executeQuery (Tmpl.dlqJobExistsSQL schemaName tableName dlqId)
+  or <$> MA.executeQuery (Tmpl.dlqJobExistsSQL schemaName tableName dlqId)
 
 -- ---------------------------------------------------------------------------
 -- Filtered Query Operations
@@ -1668,7 +1662,7 @@ countJobsFiltered
   -> [Tmpl.JobFilter]
   -- ^ Composable filters
   -> m Int64
-countJobsFiltered schemaName tableName filters = do
+countJobsFiltered schemaName tableName filters =
   countStrict
     "countJobsFiltered"
     (Tmpl.countJobsFilteredSQL schemaName tableName (buildWhereClause Tmpl.MainTable filters))
@@ -1695,16 +1689,16 @@ listDLQFilteredOrdered
   -> m [DLQ.DLQJob (Stored payload)]
 listDLQFilteredOrdered schemaName tableName filters mSortBy mSortDir limit offset = do
   let orderBy = Tmpl.buildDLQOrderBy mSortBy mSortDir
-  rawRows <-
-    MA.executeQuery $
-      Tmpl.listDLQFilteredSQL
-        schemaName
-        tableName
-        (buildWhereClause Tmpl.DLQTable filters)
-        orderBy
-        (fromIntegral limit)
-        (fromIntegral offset)
-  pure (map toDLQRow rawRows)
+  map toDLQRow
+    <$> MA.executeQuery
+      ( Tmpl.listDLQFilteredSQL
+          schemaName
+          tableName
+          (buildWhereClause Tmpl.DLQTable filters)
+          orderBy
+          (fromIntegral limit)
+          (fromIntegral offset)
+      )
 
 -- | List filtered DLQ jobs, most recently failed first.
 listDLQFiltered
@@ -1762,16 +1756,16 @@ listArchiveFiltered
   -> m [Archive.ArchiveJob (Stored payload)]
 listArchiveFiltered schemaName tableName filters mSortBy mSortDir limit offset = do
   let orderBy = Tmpl.buildArchiveOrderBy mSortBy mSortDir
-  rawRows <-
-    MA.executeQuery $
-      Tmpl.listArchiveFilteredSQL
-        schemaName
-        tableName
-        (buildWhereClause Tmpl.ArchiveTable filters)
-        orderBy
-        (fromIntegral limit)
-        (fromIntegral offset)
-  pure (map toArchiveRow rawRows)
+  map toArchiveRow
+    <$> MA.executeQuery
+      ( Tmpl.listArchiveFilteredSQL
+          schemaName
+          tableName
+          (buildWhereClause Tmpl.ArchiveTable filters)
+          orderBy
+          (fromIntegral limit)
+          (fromIntegral offset)
+      )
 
 -- | List archived jobs (most recent first).
 listArchiveJobs
@@ -2034,7 +2028,7 @@ getJobById
   -> Int64
   -- ^ Job id
   -> m (Maybe (JobRead (Stored payload)))
-getJobById schemaName tableName jobId = do
+getJobById schemaName tableName jobId =
   listToMaybe <$> MA.executeQuery (Tmpl.getJobByIdSQL schemaName tableName jobId)
 
 -- | 'getJobById' that also returns the job's derived status.
@@ -2059,7 +2053,7 @@ getJobByDedupKey
   -> TableName
   -> Text
   -> m (Maybe (JobRead (Stored payload)))
-getJobByDedupKey schemaName tableName key = do
+getJobByDedupKey schemaName tableName key =
   listToMaybe <$> MA.executeQuery (Tmpl.getJobByDedupKeySQL schemaName tableName key)
 
 -- | A page of a group's jobs, newest first.
@@ -2293,11 +2287,7 @@ statsRowCodec =
 
 -- | The @jsonb_object_agg@ rollup as a map.
 decodeKindCounts :: Maybe Value -> Map Text Int64
-decodeKindCounts = foldMap (fromResult . fromJSON)
-  where
-    fromResult = \case
-      Success counts -> counts
-      Error _ -> Map.empty
+decodeKindCounts = foldMap decodeOrEmpty
 
 -- | A queue's per-status counts and backlog ages.
 getQueueStats
@@ -2525,7 +2515,7 @@ countJobsByParent schemaName tableName pid =
 -- are absent.
 countChildrenBatch
   :: (MonadArbiter m)
-  => SchemaName -> TableName -> [Int64] -> m (Map.Map Int64 (Int64, Int64))
+  => SchemaName -> TableName -> [Int64] -> m (Map Int64 (Int64, Int64))
 countChildrenBatch _ _ [] = pure Map.empty
 countChildrenBatch schemaName tableName ids =
   Map.fromList <$> MA.executeQuery (Q.rows parentCountCodec (Tmpl.countChildrenBatchSQL schemaName tableName ids))
@@ -2533,7 +2523,7 @@ countChildrenBatch schemaName tableName ids =
 -- | DLQ child counts per parent id, over a batch. Parents with none are absent.
 countDLQChildrenBatch
   :: (MonadArbiter m)
-  => SchemaName -> TableName -> [Int64] -> m (Map.Map Int64 Int64)
+  => SchemaName -> TableName -> [Int64] -> m (Map Int64 Int64)
 countDLQChildrenBatch _ _ [] = pure Map.empty
 countDLQChildrenBatch schemaName tableName ids =
   Map.fromList <$> MA.executeQuery (Tmpl.countDLQChildrenBatchSQL schemaName tableName ids)
@@ -2766,9 +2756,9 @@ refreshAllGroups
   :: (MonadArbiter m)
   => SchemaName
   -> [TableName]
-  -> Map.Map TableName GroupsCursor
+  -> Map TableName GroupsCursor
   -- ^ Where the previous pass left off, per queue.
-  -> m ((Int64, [Text]), Map.Map TableName GroupsCursor)
+  -> m ((Int64, [Text]), Map TableName GroupsCursor)
 refreshAllGroups schemaName queues cursors = do
   (refreshed, failed) <- sweepEachQueue one schemaName queues
   let rewritten = sum [passRewritten pass | (_, pass) <- refreshed]
@@ -2983,7 +2973,7 @@ tryAcquireCronLeader
   -- ^ Schedule name
   -> m Bool
 tryAcquireCronLeader schemaName queueName scheduleName =
-  fromMaybe False . listToMaybe <$> MA.executeQuery (Tmpl.tryAcquireCronLeaderSQL schemaName queueName scheduleName)
+  or <$> MA.executeQuery (Tmpl.tryAcquireCronLeaderSQL schemaName queueName scheduleName)
 
 -- | Result of a manual run request.
 data RunRequestOutcome
@@ -3107,7 +3097,7 @@ readChildResultsRaw
   -- ^ Table name
   -> Int64
   -- ^ Parent job id
-  -> m (Map.Map Int64 Value, Map.Map Int64 Text, Maybe Value, Map.Map Int64 Text)
+  -> m (Map Int64 Value, Map Int64 Text, Maybe Value, Map Int64 Text)
 readChildResultsRaw schemaName tableName parentJobId = do
   rows <- MA.executeQuery (Tmpl.readChildResultsSQL schemaName tableName parentJobId)
   foldM parseRow (Map.empty, Map.empty, Nothing, Map.empty) rows
@@ -3115,10 +3105,9 @@ readChildResultsRaw schemaName tableName parentJobId = do
     parseRow (!results, !errors, !snap, !dlqFailures) row = case row of
       ("r", Just cid, Just val, _, _) ->
         pure (Map.insert cid val results, errors, snap, dlqFailures)
-      ("e", Just jid, _, Just err, Just dlqPk) ->
-        pure (results, Map.insert jid err errors, snap, Map.insert dlqPk err dlqFailures)
-      ("e", Just jid, _, Nothing, Just dlqPk) ->
-        pure (results, Map.insert jid "" errors, snap, Map.insert dlqPk "" dlqFailures)
+      ("e", Just jid, _, mErr, Just dlqPk) ->
+        let err = fromMaybe "" mErr
+         in pure (results, Map.insert jid err errors, snap, Map.insert dlqPk err dlqFailures)
       ("s", _, Just val, _, _) ->
         pure (results, errors, Just val, dlqFailures)
       _ -> throwParsing $ "readChildResultsRaw: unexpected row: " <> T.pack (show row)
@@ -3139,15 +3128,13 @@ getParentStateSnapshot schemaName tableName jobId =
 
 -- | Merge DLQ errors, child results and the snapshot, left-biased in that order.
 mergeRawChildResults
-  :: Map.Map Int64 Value
-  -> Map.Map Int64 Text
+  :: Map Int64 Value
+  -> Map Int64 Text
   -> Maybe Value
-  -> Map.Map Int64 (Either Text Value)
+  -> Map Int64 (Either Text Value)
 mergeRawChildResults results failures mSnapshot =
   Map.map Left failures
     `Map.union` Map.map Right results
     `Map.union` base
   where
-    base = case mSnapshot of
-      Just val | Success snapshotMap <- fromJSON val -> snapshotMap
-      _ -> Map.empty
+    base = foldMap decodeOrEmpty mSnapshot

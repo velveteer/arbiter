@@ -1,24 +1,12 @@
 -- | Backend-neutral parameters as Hasql encoders.
 module Arbiter.Hasql.Encode
   ( buildEncoder
-  , buildStatementRowCount
-  , encodeSomeParam
-  , colEncoder
   ) where
 
 import Arbiter.Core.Codec (Col (..), ParamType (..), Params, SomeParam (..))
 import Arbiter.Core.Job.Types (storedBytes)
 import Data.Functor.Contravariant (contramap)
-import Data.Int (Int64)
-import Data.Text (Text)
-import Hasql.Decoders qualified as D
 import Hasql.Encoders qualified as E
-import Hasql.Statement qualified as S
-
--- | Unprepared statement over numbered placeholders, returning rows affected.
-buildStatementRowCount :: Text -> Params -> S.Statement () Int64
-buildStatementRowCount numbered params =
-  S.unpreparable numbered (buildEncoder params) D.rowsAffected
 
 -- | A parameter list as one positional encoder.
 buildEncoder :: Params -> E.Params ()
@@ -26,15 +14,13 @@ buildEncoder = mconcat . map encodeSomeParam
 
 -- | Encode one parameter at its declared nullability.
 encodeSomeParam :: SomeParam -> E.Params ()
-encodeSomeParam (SomeParam paramType value) = case paramType of
-  PScalar col -> contramap (const value) $ E.param (E.nonNullable (colEncoder col))
-  PNullable col -> contramap (const value) $ E.param (E.nullable (colEncoder col))
-  PArray col ->
-    contramap (const value) $
-      E.param (E.nonNullable (E.array (E.dimension foldl' (E.element (E.nonNullable (colEncoder col))))))
-  PNullArray col ->
-    contramap (const value) $
-      E.param (E.nonNullable (E.array (E.dimension foldl' (E.element (E.nullable (colEncoder col))))))
+encodeSomeParam (SomeParam paramType value) = contramap (const value) (E.param (paramEncoder paramType))
+
+paramEncoder :: ParamType a -> E.NullableOrNot E.Value a
+paramEncoder (PScalar col) = E.nonNullable (colEncoder col)
+paramEncoder (PNullable col) = E.nullable (colEncoder col)
+paramEncoder (PArray col) = E.nonNullable (E.array (E.dimension foldl' (E.element (E.nonNullable (colEncoder col)))))
+paramEncoder (PNullArray col) = E.nonNullable (E.array (E.dimension foldl' (E.element (E.nullable (colEncoder col)))))
 
 -- | Encoder for a column type.
 colEncoder :: Col a -> E.Value a

@@ -130,7 +130,7 @@ const GROUP_COLS = [
   { key: 'jobs', label: 'Jobs', weight: 9, cls: 'num', title: 'Jobs in the group' },
   { key: 'ready', label: 'Ready', weight: 9, narrow: false, cls: 'num', title: 'Jobs a claim can take now, before the group lets one through' },
   { key: 'head', label: 'Head job', weight: 20, title: 'The job that holds the group, or the job its next claim takes' },
-  { key: 'held', was: 'inflight', label: 'Held', weight: 20, title: 'Time until the head job lets the group go: its lease, backoff or throttle' },
+  { key: 'held', label: 'Held', weight: 20, title: 'Time until the head job lets the group go: its lease, backoff or throttle' },
   { key: 'due', label: 'Next due', weight: 20, narrow: false, title: 'When the earliest scheduled job becomes visible' },
 ];
 

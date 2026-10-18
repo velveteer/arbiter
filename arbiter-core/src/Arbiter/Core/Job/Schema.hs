@@ -89,7 +89,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import NeatInterpolation (text)
 
-import Arbiter.Core.SqlLiterals (defaultMaxAttemptsSQL, quoteIdentifier, textLiteral)
+import Arbiter.Core.SqlLiterals (defaultMaxAttemptsSQL, maxIdentifierBytes, quoteIdentifier, textLiteral)
 
 -- | PostgreSQL schema name, e.g. @"arbiter"@.
 type SchemaName = Text
@@ -114,7 +114,7 @@ pauseNotifyChannelPrefix schemaName = "arbiter_pause_" <> schemaName <> "_"
 -- channel for their own queue.
 pauseNotifyChannel :: SchemaName -> Text -> Text
 pauseNotifyChannel schemaName queueName =
-  T.take 63 $ pauseNotifyChannelPrefix schemaName <> queueName
+  T.take maxIdentifierBytes $ pauseNotifyChannelPrefix schemaName <> queueName
 
 -- | Prefix for per-queue cancel NOTIFY channels. See 'cancelNotifyChannel'.
 cancelNotifyChannelPrefix :: SchemaName -> Text
@@ -124,11 +124,11 @@ cancelNotifyChannelPrefix schemaName = "arbiter_cancel_" <> schemaName <> "_"
 -- the target worker and job. Only the matching worker reacts.
 cancelNotifyChannel :: SchemaName -> Text -> Text
 cancelNotifyChannel schemaName queueName =
-  T.take 63 $ cancelNotifyChannelPrefix schemaName <> queueName
+  T.take maxIdentifierBytes $ cancelNotifyChannelPrefix schemaName <> queueName
 
 -- | Per-schema NOTIFY channel for manual cron run-now requests.
 cronRunNotifyChannel :: SchemaName -> Text
-cronRunNotifyChannel schemaName = T.take 63 $ "arbiter_cron_run_" <> schemaName
+cronRunNotifyChannel schemaName = T.take maxIdentifierBytes $ "arbiter_cron_run_" <> schemaName
 
 -- | Per-table NOTIFY trigger function name.
 notifyFunctionName :: TableName -> Text
@@ -205,16 +205,6 @@ jobQueueDLQTable schemaName tableName = qualifiedTable schemaName (tableName <> 
 jobQueueArchiveTable :: SchemaName -> TableName -> Text
 jobQueueArchiveTable schemaName tableName = qualifiedTable schemaName (tableName <> archiveSuffix)
 
--- | Backfill NULL @max_attempts@ to the default and set the column default.
--- The column stays nullable for rolling deploys.
-setMaxAttemptsDefaultSQL :: SchemaName -> TableName -> Text
-setMaxAttemptsDefaultSQL schemaName tableName =
-  let tbl = jobQueueTable schemaName tableName
-   in [text|
-        UPDATE ${tbl} SET max_attempts = ${defaultMaxAttemptsSQL} WHERE max_attempts IS NULL;
-        ALTER TABLE ${tbl} ALTER COLUMN max_attempts SET DEFAULT ${defaultMaxAttemptsSQL};
-      |]
-
 -- | Qualified results table name: @jobQueueResultsTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_results"@
 jobQueueResultsTable :: SchemaName -> TableName -> Text
 jobQueueResultsTable schemaName tableName = qualifiedTable schemaName (tableName <> resultsSuffix)
@@ -283,6 +273,16 @@ addClaimSeqColumnSQL schemaName tableName =
 addKindColumnSQL :: SchemaName -> TableName -> Text
 addKindColumnSQL schemaName tableName =
   addJobColumnsSQL schemaName tableName ["kind TEXT"]
+
+-- | Backfill NULL @max_attempts@ to the default and set the column default.
+-- The column stays nullable for rolling deploys.
+setMaxAttemptsDefaultSQL :: SchemaName -> TableName -> Text
+setMaxAttemptsDefaultSQL schemaName tableName =
+  let tbl = jobQueueTable schemaName tableName
+   in [text|
+        UPDATE ${tbl} SET max_attempts = ${defaultMaxAttemptsSQL} WHERE max_attempts IS NULL;
+        ALTER TABLE ${tbl} ALTER COLUMN max_attempts SET DEFAULT ${defaultMaxAttemptsSQL};
+      |]
 
 -- | 'jobColumns' for the DLQ table. Its own @id@, @failed_at@ and the original @job_id@
 -- come first.
@@ -422,11 +422,7 @@ createJobQueueUngroupedDueIndexSQL schemaName tableName =
 migrateUngroupedReadySplitIndexesSQL :: SchemaName -> TableName -> Text
 migrateUngroupedReadySplitIndexesSQL schemaName tableName =
   T.unlines
-    [ "DROP INDEX IF EXISTS "
-        <> quoteIdentifier schemaName
-        <> "."
-        <> quoteIdentifier ("idx_" <> tableName <> "_ungrouped_ranking")
-        <> ";"
+    [ "DROP INDEX IF EXISTS " <> qualifiedTable schemaName ("idx_" <> tableName <> "_ungrouped_ranking") <> ";"
     , createJobQueueUngroupedReadyRankingIndexSQL schemaName tableName
     , createJobQueueUngroupedDueIndexSQL schemaName tableName
     ]
@@ -492,13 +488,13 @@ maintenanceFunctionNames :: SchemaName -> Text -> (Text, Text, Text)
 maintenanceFunctionNames schemaName baseName =
   (func "_insert", func "_delete", func "_update")
   where
-    func suffix = quoteIdentifier schemaName <> "." <> quoteIdentifier (baseName <> suffix)
+    func suffix = qualifiedTable schemaName (baseName <> suffix)
 
 -- | One statement-level AFTER trigger. Drops then recreates, wiring the
 -- @\<baseName\>\<suffix\>@ function over @tbl@ with the given event and REFERENCING clause.
 statementTriggerSQL :: SchemaName -> Text -> Text -> Text -> Text -> Text -> Text
 statementTriggerSQL schemaName tbl baseName suffix event referencing =
-  let func = quoteIdentifier schemaName <> "." <> quoteIdentifier (baseName <> suffix)
+  let func = qualifiedTable schemaName (baseName <> suffix)
       trig = quoteIdentifier (baseName <> suffix)
    in T.intercalate
         "\n"
@@ -526,10 +522,10 @@ createMaintenanceTriggersSQL schemaName tbl baseName =
 -- a string literal.
 createNotifyFunctionSQL :: SchemaName -> TableName -> Text
 createNotifyFunctionSQL schemaName tableName =
-  let functionName = notifyFunctionName tableName
+  let func = qualifiedTable schemaName (notifyFunctionName tableName)
       channel = textLiteral (notificationChannelForTable tableName)
    in T.unlines
-        [ "CREATE OR REPLACE FUNCTION " <> quoteIdentifier schemaName <> "." <> quoteIdentifier functionName <> "()"
+        [ "CREATE OR REPLACE FUNCTION " <> func <> "()"
         , "RETURNS TRIGGER AS $$"
         , "BEGIN"
         , "  IF EXISTS (SELECT 1 FROM new_table) THEN"
@@ -538,20 +534,14 @@ createNotifyFunctionSQL schemaName tableName =
         , "  RETURN NULL;"
         , "END;"
         , "$$ LANGUAGE plpgsql;"
-        , "COMMENT ON FUNCTION "
-            <> quoteIdentifier schemaName
-            <> "."
-            <> quoteIdentifier functionName
-            <> "() IS '"
-            <> notifyObjectComment
-            <> "';"
+        , "COMMENT ON FUNCTION " <> func <> "() IS '" <> notifyObjectComment <> "';"
         ]
 
 -- | A table's job-arrival NOTIFY trigger. Statement-level. A batch insert notifies
 -- one time.
 createNotifyTriggerSQL :: SchemaName -> TableName -> Text
 createNotifyTriggerSQL schemaName tableName =
-  let functionName = notifyFunctionName tableName
+  let func = qualifiedTable schemaName (notifyFunctionName tableName)
       trigName = quoteIdentifier (notifyTriggerName tableName)
       tbl = jobQueueTable schemaName tableName
    in T.unlines
@@ -560,7 +550,7 @@ createNotifyTriggerSQL schemaName tableName =
         , "AFTER INSERT ON " <> tbl
         , "REFERENCING NEW TABLE AS new_table"
         , "FOR EACH STATEMENT"
-        , "EXECUTE FUNCTION " <> quoteIdentifier schemaName <> "." <> quoteIdentifier functionName <> "();"
+        , "EXECUTE FUNCTION " <> func <> "();"
         , "COMMENT ON TRIGGER " <> trigName <> " ON " <> tbl <> " IS '" <> notifyObjectComment <> "';"
         ]
 
@@ -573,7 +563,7 @@ createNotifyTriggerSQL schemaName tableName =
 -- reports its original job id. A lease-extend update emits no event.
 createEventStreamingFunctionSQL :: SchemaName -> Text
 createEventStreamingFunctionSQL schemaName =
-  let funcName = quoteIdentifier schemaName <> "." <> quoteIdentifier eventStreamingFunctionName
+  let funcName = qualifiedTable schemaName eventStreamingFunctionName
    in T.unlines
         [ "CREATE OR REPLACE FUNCTION " <> funcName <> "() RETURNS trigger AS $$"
         , "DECLARE"
@@ -626,7 +616,7 @@ createEventStreamingTriggersSQL :: SchemaName -> TableName -> Text
 createEventStreamingTriggersSQL schemaName tableName =
   let tbl = jobQueueTable schemaName tableName
       dlqTbl = jobQueueDLQTable schemaName tableName
-      funcName = quoteIdentifier schemaName <> "." <> quoteIdentifier eventStreamingFunctionName
+      funcName = qualifiedTable schemaName eventStreamingFunctionName
       triggerCall isDLQ =
         "FOR EACH ROW EXECUTE FUNCTION "
           <> funcName
@@ -672,8 +662,4 @@ dropEventStreamingTriggersSQL schemaName tableName =
 -- | Drop the schema-wide event-streaming function after its triggers are detached.
 dropEventStreamingFunctionSQL :: SchemaName -> Text
 dropEventStreamingFunctionSQL schemaName =
-  "DROP FUNCTION IF EXISTS "
-    <> quoteIdentifier schemaName
-    <> "."
-    <> quoteIdentifier eventStreamingFunctionName
-    <> "();"
+  "DROP FUNCTION IF EXISTS " <> qualifiedTable schemaName eventStreamingFunctionName <> "();"

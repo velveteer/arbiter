@@ -2,17 +2,19 @@
 
 -- | Internal to the arbiter packages. Not covered by the PVP.
 --
--- Shared Aeson helpers for triple-state patch decoders. An omitted field leaves
+-- Shared Aeson helpers. Patch decoders are triple-state. An omitted field leaves
 -- the value unchanged. An explicit @null@ clears the override.
 module Arbiter.Core.Json
   ( patchOptions
   , explicitOptionalField
+  , decodeOrEmpty
   ) where
 
-import Data.Aeson (FromJSON, Object, Options (..), defaultOptions, (.:))
+import Data.Aeson (FromJSON, Object, Options (..), Value, defaultOptions, parseJSON, (.:))
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
-import Data.Aeson.Types (Parser)
+import Data.Aeson.Types (Parser, parseMaybe)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 
 -- | Generic options that omit @Nothing@ fields. An unchanged field is absent. A
@@ -28,3 +30,7 @@ explicitOptionalField obj name =
    in if KeyMap.member key obj
         then Just <$> obj .: key
         else pure Nothing
+
+-- | Decode a value, or 'mempty' when it has another shape.
+decodeOrEmpty :: (FromJSON a, Monoid a) => Value -> a
+decodeOrEmpty = fromMaybe mempty . parseMaybe parseJSON

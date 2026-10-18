@@ -20,11 +20,13 @@ module Arbiter.Hasql.Compat
 
 import Arbiter.Core.Exceptions (throwInternal)
 import Arbiter.Core.Listen (ListenConn)
+import Data.Bifunctor (first)
 import Data.ByteString (ByteString)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.Encoding.Error qualified as TE
 import Hasql.Connection qualified as Hasql
+import Hasql.Connection.Settings qualified as Settings
 import Hasql.Session qualified as Session
 
 #if MIN_VERSION_hasql(2,0,0)
@@ -36,12 +38,10 @@ import Arbiter.Core.Listen.Driver
   , execOutcome
   , withDriverListenConn
   )
-import Hasql.Connection.Settings qualified as Settings
 import Pqi qualified as PQ
 #else
 import Arbiter.LibPQ (libPQListenConn, withLibPQListenConn)
 import Database.PostgreSQL.LibPQ qualified as PQ
-import Hasql.Connection.Settings qualified as Settings
 #endif
 
 -- | Run a bare SQL command, such as @BEGIN@ or @COMMIT@.
@@ -64,7 +64,7 @@ toHasqlConnect = HasqlConnect
 
 -- | Open a connection. A failure comes back as its description.
 acquireConnect :: HasqlConnect -> IO (Either String Hasql.Connection)
-acquireConnect (HasqlConnect adapter connStr) = either (Left . show) Right <$> Hasql.acquire adapter (hasqlSettings connStr)
+acquireConnect (HasqlConnect adapter connStr) = first show <$> Hasql.acquire adapter (hasqlSettings connStr)
 
 -- | Run the listener loop on a driver connection of its own.
 withDedicatedListenConn :: HasqlConnect -> (ListenConn -> IO a) -> IO a
@@ -80,7 +80,7 @@ toHasqlConnect = HasqlConnect
 
 -- | Open a connection. A failure comes back as its description.
 acquireConnect :: HasqlConnect -> IO (Either String Hasql.Connection)
-acquireConnect (HasqlConnect connStr) = either (Left . show) Right <$> Hasql.acquire (hasqlSettings connStr)
+acquireConnect (HasqlConnect connStr) = first show <$> Hasql.acquire (hasqlSettings connStr)
 
 -- | Run the listener loop on a driver connection of its own.
 withDedicatedListenConn :: HasqlConnect -> (ListenConn -> IO a) -> IO a

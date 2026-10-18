@@ -15,14 +15,13 @@ function stored(use) {
   }
 }
 
-// Reads JSON, or the raw string a value was saved as before.
 export function load(key, fallback) {
   const raw = stored((s) => s.getItem(key));
   if (raw == null) return fallback;
   try {
     return JSON.parse(raw);
   } catch {
-    return raw;
+    return fallback;
   }
 }
 
@@ -159,7 +158,7 @@ export function toggleTheme() {
   app.theme = app.theme === 'dark' ? 'light' : 'dark';
   document.documentElement.setAttribute('data-bs-theme', app.theme);
   // Raw, since theme-boot.js reads it before any module runs.
-  stored((s) => s.setItem('arbiter-theme', app.theme));
+  stored((s) => s.setItem('arb.theme', app.theme));
 }
 
 // ---- Event stream ----
@@ -331,11 +330,10 @@ function reloadQueues() {
 // A queue in the URL mounts only once the queue set confirms it. Each navigation
 // and each landed queue set asks again.
 async function confirmQueue() {
-  if (!route.queue || app.queuesFailed || app.queues.includes(route.queue)) return;
-  if (!(await loadQueues())) return;
-  if (!route.queue || app.queues.includes(route.queue)) return;
-  if (!(await reloadQueues())) return;
-  if (!route.queue || app.queues.includes(route.queue)) return;
+  const settled = () => !route.queue || app.queues.includes(route.queue);
+  if (app.queuesFailed || settled()) return;
+  if (!(await loadQueues()) || settled()) return;
+  if (!(await reloadQueues()) || settled()) return;
   toast(`Queue "${route.queue}" not found`, 'warning');
   navigate(listUrl(), { replace: true });
 }

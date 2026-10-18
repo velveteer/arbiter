@@ -39,8 +39,9 @@ ensureGateRowSQL schemaName task =
 checkGateSQL :: SchemaName -> Text -> Double -> Query Bool
 checkGateSQL schemaName task intervalSecs =
   let tbl = arbiterGatesTable schemaName
+      intervalAgo = secondsAgo intervalSecs
    in [sql|
-        SELECT (last_run_at < NOW() - (#{intervalSecs :: CFloat8}::double precision * interval '1 second'))
+        SELECT (last_run_at < ${intervalAgo})
           AS @{result :: CBool}
         FROM ${tbl}
         WHERE task_name = #{task :: CText}
@@ -51,10 +52,11 @@ checkGateSQL schemaName task intervalSecs =
 tryClaimGateSQL :: SchemaName -> Text -> Double -> Query (Maybe Value)
 tryClaimGateSQL schemaName task intervalSecs =
   let tbl = arbiterGatesTable schemaName
+      intervalAgo = secondsAgo intervalSecs
    in [sql|
         SELECT metadata -> 'payload' AS @{payload :: Maybe CJsonb} FROM ${tbl}
         WHERE task_name = #{task :: CText}
-          AND last_run_at < NOW() - (#{intervalSecs :: CFloat8}::double precision * interval '1 second')
+          AND last_run_at < ${intervalAgo}
         FOR UPDATE SKIP LOCKED
       |]
 
@@ -67,6 +69,8 @@ claimOrReadGateSQL
   :: SchemaName -> Text -> Double -> Double -> Query (Maybe UTCTime, Maybe UTCTime, Maybe Value, Maybe Double)
 claimOrReadGateSQL schemaName task intervalSecs maxAgeSecs =
   let tbl = arbiterGatesTable schemaName
+      intervalAgo = secondsAgo intervalSecs
+      maxAgeAgo = secondsAgo maxAgeSecs
    in [sql|
         WITH seeded AS (
           INSERT INTO ${tbl} (task_name, last_run_at)
@@ -80,7 +84,7 @@ claimOrReadGateSQL schemaName task intervalSecs maxAgeSecs =
           FROM ${tbl} old
           WHERE gate.task_name = #{task :: CText}
             AND old.task_name = gate.task_name
-            AND gate.last_run_at < NOW() - (#{intervalSecs :: CFloat8}::double precision * interval '1 second')
+            AND gate.last_run_at < ${intervalAgo}
           RETURNING NOW() AS claimed_at, old.last_run_at AS previous_run_at
         ),
         claim AS (
@@ -96,7 +100,7 @@ claimOrReadGateSQL schemaName task intervalSecs maxAgeSecs =
             AND NOT EXISTS (SELECT 1 FROM claim)
             AND metadata -> 'payload' IS NOT NULL
             AND (metadata ->> 'at')::timestamptz
-                > NOW() - (#{maxAgeSecs :: CFloat8}::double precision * interval '1 second')
+                > ${maxAgeAgo}
         )
         SELECT (SELECT claimed_at FROM claim) AS @{claimed_at :: Maybe CTimestamptz},
                (SELECT previous_run_at FROM claim) AS @{previous_run_at :: Maybe CTimestamptz},
@@ -146,3 +150,7 @@ setGateMetadataSQL schemaName metadata claimedAt task =
         WHERE task_name = #{task :: CText}
           AND (metadata ->> 'at' IS NULL OR (metadata ->> 'at')::timestamptz < #{claimedAt :: CTimestamptz})
       |]
+
+-- | The timestamp @secs@ seconds before now.
+secondsAgo :: Double -> Query ()
+secondsAgo secs = [sql|NOW() - (#{secs :: CFloat8}::double precision * interval '1 second')|]

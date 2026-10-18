@@ -1,6 +1,4 @@
-{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 -- | W3C trace context carried on enqueued jobs, and the producer and consumer spans
 -- around them. The OpenTelemetry API is inert until an SDK installs a provider.

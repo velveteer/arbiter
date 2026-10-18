@@ -1,4 +1,3 @@
-{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
@@ -76,7 +75,6 @@ import Data.List (find)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing)
-import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (diffUTCTime, getCurrentTime)
@@ -102,10 +100,10 @@ import Test.Hspec
 import UnliftIO.Async (withAsync)
 import UnliftIO.Async qualified as Async
 
-import Arbiter.Test.Poll (waitUntil, withLinkedAsync)
-import Arbiter.Test.Setup (execStatement, execute_, withConn)
+import Arbiter.Test.Poll (bumpRef, waitUntil, withLinkedAsync)
+import Arbiter.Test.Setup (execStatement, execute_, toQuery, withConn)
 import Arbiter.Worker.TestKit.Backend (TestBackend (..))
-import Arbiter.Worker.TestKit.Rows (reclaimJob)
+import Arbiter.Worker.TestKit.Rows (reclaimJob, updateJob)
 
 -- | Worker lifecycle suite. The queue under test declares @Maybe [Text]@ as its result type.
 lifecycleSpec
@@ -317,7 +315,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         let handler :: JobRead payload -> m ()
             handler _job = liftIO $ writeIORef ranRef True
             idleCron = either error id (cronJob "shutdown-idle" "0 3 1 1 *" AllowOverlap (\_ _ -> defaultJob (mkSimple "cron")))
-            queueTable = schema <> "." <> table
+            queueTable = Schema.jobQueueTable schema table
         void $ runM env $ HL.insertJob (defaultJob (mkSimple "claimed-at-shutdown"))
 
         config :: WorkerConfig m payload <- transactionalWorkerConfig 10 (mkHandler (noResult handler))
@@ -333,7 +331,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
 
         withConn connStr $ \lockConn -> do
           PG.begin lockConn
-          void $ PG.execute_ lockConn (fromString (T.unpack ("LOCK TABLE " <> queueTable <> " IN ACCESS EXCLUSIVE MODE")))
+          execute_ lockConn ("LOCK TABLE " <> queueTable <> " IN ACCESS EXCLUSIVE MODE")
           withLinkedAsync (runM env $ runWorkerPool cfg) $ \worker -> do
             waitUntil 10_000 claimWaiting
             shutdownWorkerPool cfg
@@ -343,7 +341,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
 
         readIORef ranRef `shouldReturn` True
         remaining <- withConn connStr $ \conn ->
-          query conn (fromString (T.unpack ("SELECT count(*) FROM " <> queueTable))) ()
+          query conn (toQuery ("SELECT count(*) FROM " <> queueTable)) ()
         remaining `shouldBe` [Only (0 :: Int64)]
 
     describe "Liveness Probe" $ do
@@ -770,7 +768,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         processedRef <- newIORef (0 :: Int)
         let handler :: JobRead payload -> m ()
             handler _job =
-              liftIO $ atomicModifyIORef' processedRef $ \count -> (count + 1, ())
+              liftIO $ bumpRef processedRef
 
         baseConfig :: WorkerConfig m payload <- transactionalWorkerConfig 2 (mkHandler (noResult handler))
         let config = baseConfig {workerCount = 2, pollInterval = 0.1}
@@ -1057,7 +1055,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         processedRef <- newIORef (0 :: Int)
         let handler :: JobRead payload -> m ()
             handler _job =
-              liftIO $ atomicModifyIORef' processedRef $ \count -> (count + 1, ())
+              liftIO $ bumpRef processedRef
         baseConfig :: WorkerConfig m payload <- transactionalWorkerConfig 1 (mkHandler (noResult handler))
         let config = baseConfig {workerCount = 1, pollInterval = 2.0}
 
@@ -1180,7 +1178,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
             handler _job = do
               liftIO $ writeIORef startedRef True
               let go = do
-                    atomicModifyIORef' counterRef (\count -> (count + 1, ()))
+                    bumpRef counterRef
                     go
               liftIO go
 
@@ -1285,11 +1283,9 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         Just job <- runM env $ HL.insertJob (defaultJob (mkSimple "concurrent-claim"))
         let jid = primaryKey job
             claimSql =
-              fromString . T.unpack $
+              toQuery $
                 "UPDATE "
-                  <> schema
-                  <> "."
-                  <> table
+                  <> Schema.jobQueueTable schema table
                   <> " SET claimed_by = '00000000-0000-0000-0000-000000000abc'::uuid"
                   <> ", not_visible_until = NOW() + interval '60 second', attempts = attempts + 1, claim_seq = claim_seq + 1 WHERE id = ?"
 
@@ -1309,7 +1305,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
           withConn connStr $ \conn ->
             PG.query
               conn
-              ( fromString . T.unpack $
+              ( toQuery $
                   "SELECT cancel_requested_at IS NOT NULL FROM " <> Schema.jobQueueTable schema table <> " WHERE id = ?"
               )
               (Only jid)
@@ -1323,18 +1319,11 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         claimed <- runM env (HL.claimNextVisibleJobsAs 1 60 wid) :: IO [JobRead payload]
         length claimed `shouldBe` 1
 
-        void $
-          withConn connStr $ \conn ->
-            PG.execute
-              conn
-              ( fromString . T.unpack $
-                  "UPDATE " <> Schema.jobQueueTable schema table <> " SET not_visible_until = NOW() - interval '1 second' WHERE id = ?"
-              )
-              (Only jid)
+        updateJob connStr schema table "not_visible_until = NOW() - interval '1 second'" jid
 
         lconn <- PG.connectPostgreSQL connStr
         let chan = Schema.cancelNotifyChannel schema table
-        void $ PG.execute_ lconn (fromString . T.unpack $ "LISTEN \"" <> chan <> "\"")
+        execute_ lconn ("LISTEN \"" <> chan <> "\"")
 
         cancelled <- runM env $ Ops.forceCancelJob schema table jid
         cancelled `shouldBe` 1
@@ -1460,7 +1449,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
                     try
                       ( PG.query
                           conn
-                          (fromString . T.unpack $ "SELECT id FROM " <> Schema.jobQueueTable schema table <> " WHERE id = ? FOR UPDATE NOWAIT")
+                          (toQuery $ "SELECT id FROM " <> Schema.jobQueueTable schema table <> " WHERE id = ? FOR UPDATE NOWAIT")
                           (Only jid)
                           :: IO [Only Int64]
                       )
@@ -1507,7 +1496,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         Just job <- runM env $ HL.insertJob (defaultJob (mkSimple "aba"))
         let jid = primaryKey job
             expire =
-              fromString . T.unpack $
+              toQuery $
                 "UPDATE " <> Schema.jobQueueTable schema table <> " SET not_visible_until = NOW() - interval '1 second' WHERE id = ?"
 
         [stale] <- runM env (HL.claimNextVisibleJobsAs 1 60 staleWorker) :: IO [JobRead payload]
@@ -1704,18 +1693,13 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
             mkHandler (noResult (\job -> liftIO $ atomicModifyIORef' completedRef (\seen -> (payload job : seen, ()))))
         Just poison <- runM env $ HL.insertJob (defaultJob (mkSimple "poison"))
         void $ runM env $ HL.insertJob (defaultJob (mkSimple "sibling"))
-        void $
-          withConn connStr $ \conn ->
-            PG.execute
-              conn
-              (fromString . T.unpack $ "UPDATE " <> Schema.jobQueueTable schema table <> " SET payload = '{\"bogus\": 1}' WHERE id = ?")
-              (Only (primaryKey poison))
+        updateJob connStr schema table "payload = '{\"bogus\": 1}'" (primaryKey poison)
 
         withAsync (runM env $ runWorkerPool config {workerCount = 2, pollInterval = 0.1, visibilityTimeout = 60}) $ \_ -> do
           waitUntil 5_000 $ (== [mkSimple "sibling"]) <$> readIORef completedRef
           dlq <-
             withConn connStr $ \conn ->
-              PG.query_ conn (fromString . T.unpack $ "SELECT job_id, last_error FROM " <> Schema.jobQueueDLQTable schema table)
+              PG.query_ conn (toQuery $ "SELECT job_id, last_error FROM " <> Schema.jobQueueDLQTable schema table)
                 :: IO [(Int64, Text)]
           map fst dlq `shouldBe` [primaryKey poison]
           map snd dlq `shouldSatisfy` all (T.isPrefixOf "Failed to decode job payload")
@@ -1731,7 +1715,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
           withConn connStr $ \conn ->
             PG.execute
               conn
-              ( fromString . T.unpack $
+              ( toQuery $
                   "UPDATE " <> Schema.jobQueueTable schema table <> " SET payload = '{\"bogus\": 1}' WHERE id IN ?"
               )
               (Only (PG.In (map primaryKey (catMaybes poison))))
@@ -1749,7 +1733,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
             void $
               PG.execute
                 conn
-                (fromString . T.unpack $ "UPDATE " <> Schema.jobQueueTable schema table <> " SET payload = '{\"bogus\": 1}' WHERE id = ?")
+                (toQuery $ "UPDATE " <> Schema.jobQueueTable schema table <> " SET payload = '{\"bogus\": 1}' WHERE id = ?")
                 (Only (primaryKey poison))
             execute_ conn ("ALTER TABLE " <> dlqTbl <> " ADD CONSTRAINT reject_poison CHECK (job_id <> " <> poisonId <> ")")
             (runM env (HL.claimNextVisibleJobs 2 60) :: IO [JobRead payload])
@@ -1761,12 +1745,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
 
       it "lists and encodes a row its payload type rejects, decoding only on request" $ \env -> do
         Just poison <- runM env $ HL.insertJob (defaultJob (mkSimple "poison"))
-        void $
-          withConn connStr $ \conn ->
-            PG.execute
-              conn
-              (fromString . T.unpack $ "UPDATE " <> Schema.jobQueueTable schema table <> " SET payload = '{\"bogus\": 1}' WHERE id = ?")
-              (Only (primaryKey poison))
+        updateJob connStr schema table "payload = '{\"bogus\": 1}'" (primaryKey poison)
         moved <- runM env $ Ops.moveToDLQ Ops.TakeLocks schema table "poison" poison
         moved `shouldBe` 1
 
@@ -1804,7 +1783,7 @@ recordOp schema jobId =
 lockJobRow :: Text -> Text -> PG.Connection -> Int64 -> IO (Either SomeException [Only Int64])
 lockJobRow schema table conn jobId = try (PG.query conn lockSql (Only jobId))
   where
-    lockSql = fromString . T.unpack $ "SELECT id FROM " <> Schema.jobQueueTable schema table <> " WHERE id = ? FOR UPDATE"
+    lockSql = toQuery $ "SELECT id FROM " <> Schema.jobQueueTable schema table <> " WHERE id = ? FOR UPDATE"
 
 withTestOpsTable :: ByteString -> Text -> IO a -> IO a
 withTestOpsTable connStr schema action = do
@@ -1822,7 +1801,7 @@ queryOpsCount connStr schema =
     [Only count] <-
       query
         conn
-        (fromString . T.unpack $ "SELECT COUNT(*) FROM " <> opsTable schema <> " WHERE operation = ?")
+        (toQuery $ "SELECT COUNT(*) FROM " <> opsTable schema <> " WHERE operation = ?")
         (Only ("processed" :: Text))
         :: IO [Only Int]
     pure count

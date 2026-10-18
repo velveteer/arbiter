@@ -1,5 +1,4 @@
 {-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 

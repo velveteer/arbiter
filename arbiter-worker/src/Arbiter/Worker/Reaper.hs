@@ -1,6 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_HADDOCK not-home #-}
 
 -- | Internal to the arbiter packages. Not covered by the PVP.
@@ -96,23 +94,23 @@ runMaintenancePass logCfg report pace stmtTimeout = do
   schema <- Arb.getSchema
   let gatedCount operation every work =
         tryReaperOp logCfg schema stmtTimeout (maintenanceOpName operation) every work
-          >>= reportOutcome operation (traverse_ (reaped operation))
+          >>= failedOp operation (traverse_ (reaped operation))
       reportFailed operation =
         traverse_ (\queue -> tryLog logCfg Warning $ maintenanceOpName operation <> " failed for queue: " <> queue)
       reportSwept operation done =
         traverse_ (\(count, failed) -> reaped operation count >> reportFailed operation failed >> when (count > 0) (done count))
       sweep operation every done work =
         tryReaperOp logCfg schema stmtTimeout (maintenanceOpName operation) every work
-          >>= reportOutcome operation (reportSwept operation done)
+          >>= failedOp operation (reportSwept operation done)
       refreshGroups =
-        runReaperStateOp
+        tryReaperStateOp
           logCfg
           schema
           stmtTimeout
           (maintenanceOpName RefreshGroups)
           window
           (Ops.refreshAllGroups schema queues . fold)
-          >>= reportOutcome RefreshGroups (reportSwept RefreshGroups (const (pure ())))
+          >>= failedOp RefreshGroups (reportSwept RefreshGroups (const (pure ())))
   fmap catMaybes . sequence $
     [ refreshGroups
     , gatedCount SweepStaleWorkers window $ Ops.sweepStaleWorkers schema
@@ -138,13 +136,13 @@ runMaintenancePass logCfg report pace stmtTimeout = do
          ]
 
 -- | Name a failed operation. Report a completed one through @emit@.
-reportOutcome
+failedOp
   :: (Monad m)
   => MaintenanceOp
   -> (a -> m ())
   -> Either SomeException a
   -> m (Maybe MaintenanceOp)
-reportOutcome operation emit = either (const (pure (Just operation))) (\ran -> Nothing <$ emit ran)
+failedOp operation emit = either (const (pure (Just operation))) (\ran -> Nothing <$ emit ran)
 
 -- | Run one gated maintenance operation. 'Nothing' when it failed, is running
 -- elsewhere, or its window has not elapsed. Failures are logged.
@@ -177,7 +175,7 @@ tryReaperOp logCfg schema stmtTimeout task every work =
   reaperGate logCfg task $
     Ops.runGatedBounded schema task every stmtTimeout work
 
-runReaperStateOp
+tryReaperStateOp
   :: (FromJSON s, MonadArbiter m, ToJSON s)
   => LogConfig
   -> SchemaName
@@ -186,7 +184,7 @@ runReaperStateOp
   -> NominalDiffTime
   -> (Maybe s -> m (a, s))
   -> m (Either SomeException (Maybe a))
-runReaperStateOp logCfg schema stmtTimeout task every work =
+tryReaperStateOp logCfg schema stmtTimeout task every work =
   reaperGate logCfg task $
     Ops.runGatedStateBounded schema task every stmtTimeout work
 

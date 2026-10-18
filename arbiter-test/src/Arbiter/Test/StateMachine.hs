@@ -1,13 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
 
@@ -21,16 +14,9 @@ module Arbiter.Test.StateMachine
   , installHolDetector
   , holViolations
   , removeHolDetector
-
-    -- * Internal
-
-    -- | Not covered by the PVP.
-  , holViolTbl
-  , holInstallSql
-  , holRemoveSql
   ) where
 
-import Arbiter.Core.Concurrency.Schema (arbiterConcurrencyTable)
+import Arbiter.Core.Concurrency.Schema (arbiterConcurrencyPoliciesTable, arbiterConcurrencyTable)
 import Arbiter.Core.Concurrency.Spec
   ( HasConcurrency (..)
   , concurrencyBy
@@ -38,7 +24,9 @@ import Arbiter.Core.Concurrency.Spec
   , concurrencyPolicy
   , noConcurrency
   )
+import Arbiter.Core.Gates (arbiterGatesTable)
 import Arbiter.Core.HighLevel qualified as HL
+import Arbiter.Core.Job.Schema (jobQueueDLQTable, jobQueueGroupsTable, jobQueueTable)
 import Arbiter.Core.Job.Schema.Groups (inFlightPredicate)
 import Arbiter.Core.Job.Types
   ( DedupKey (..)
@@ -63,7 +51,11 @@ import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (RegistryTables, TableForPayload)
-import Arbiter.Core.RateLimit.Schema (upsertRateLimitPolicyRowSQL)
+import Arbiter.Core.RateLimit.Schema
+  ( arbiterRateLimitPoliciesTable
+  , arbiterRateLimitsTable
+  , upsertRateLimitPolicyRowSQL
+  )
 import Arbiter.Core.RateLimit.Spec
   ( HasRateLimit (..)
   , RateLimitPolicy
@@ -90,7 +82,6 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromJust, isJust, listToMaybe)
 import Data.Set qualified as Set
-import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
@@ -107,7 +98,8 @@ import Test.Hspec
 import UnliftIO (MonadUnliftIO, tryAny)
 import UnliftIO.Async (async, link, mapConcurrently, mapConcurrently_, wait, withAsync)
 
-import Arbiter.Test.Setup (execute_, seedConcurrencyPolicySQL)
+import Arbiter.Test.Poll (bumpRef)
+import Arbiter.Test.Setup (execute_, seedConcurrencyPolicySQL, toQuery)
 
 -- | Constraints the runner of 'stateMachineSpec' must satisfy.
 type ArbiterC m =
@@ -175,13 +167,13 @@ holInstallSql schema table =
       <> "()"
   ]
   where
-    tbl = schema <> "." <> table
+    tbl = jobQueueTable schema table
 
 -- | DDL to remove the HOL detector trigger, function, and violations table.
 holRemoveSql :: Text -> Text -> [Text]
 holRemoveSql schema table =
   [ "SET client_min_messages TO warning"
-  , "DROP TRIGGER IF EXISTS " <> holTrigger schema table <> " ON " <> schema <> "." <> table
+  , "DROP TRIGGER IF EXISTS " <> holTrigger schema table <> " ON " <> jobQueueTable schema table
   , "DROP FUNCTION IF EXISTS " <> holFn schema table <> "()"
   , "DROP TABLE IF EXISTS " <> holViolTbl schema table
   ]
@@ -221,12 +213,12 @@ checkInvariantsL lbl schema table withConn = do
 -- | First @id@ of a query, or Nothing if it returns no rows.
 firstId :: (forall a. (PG.Connection -> IO a) -> IO a) -> Text -> IO (Maybe Int64)
 firstId withConn sql = withConn $ \conn ->
-  listToMaybe . map fromOnly <$> PG.query_ conn (fromString (T.unpack sql))
+  listToMaybe . map fromOnly <$> PG.query_ conn (toQuery sql)
 
 -- | A scalar @count(*)@ query through the raw-connection accessor.
 countQuery :: (forall a. (PG.Connection -> IO a) -> IO a) -> Text -> IO Int64
 countQuery withConn sql = withConn $ \conn -> do
-  [Only count] <- PG.query_ conn (fromString (T.unpack sql))
+  [Only count] <- PG.query_ conn (toQuery sql)
   pure count
 
 -- | Lock one count row @FOR UPDATE@, like a claimer holding the key.
@@ -235,16 +227,14 @@ lockConcurrencyKey conn concTbl key =
   void
     ( PG.query_
         conn
-        (fromString (T.unpack ("SELECT 1 FROM " <> concTbl <> " WHERE concurrency_key = '" <> key <> "' FOR UPDATE")))
+        (toQuery ("SELECT 1 FROM " <> concTbl <> " WHERE concurrency_key = '" <> key <> "' FOR UPDATE"))
         :: IO [Only Int64]
     )
 
 truncateHol :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO ()
 truncateHol schema table withConn = withConn $ \conn ->
-  void $ PG.execute_ conn (fromString (T.unpack ("TRUNCATE " <> holViolTbl schema table)))
+  execute_ conn ("TRUNCATE " <> holViolTbl schema table)
 
--- Test schema and table names are plain lowercase identifiers. The SQL
--- interpolates them unquoted.
 queryViolations :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO [String]
 queryViolations schema table withConn =
   mconcat
@@ -260,15 +250,15 @@ queryViolations schema table withConn =
 --   * each concurrency key's stored @in_flight@ equals a recount of claimed rows
 claimViolations :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO [String]
 claimViolations schema table withConn = withConn $ \conn -> do
-  held <- PG.query_ conn (fromString (T.unpack heldSql))
-  counts <- PG.query_ conn (fromString (T.unpack countSql))
+  held <- PG.query_ conn (toQuery heldSql)
+  counts <- PG.query_ conn (toQuery countSql)
   pure $
     ["suspended job " <> show (jid :: Int64) <> " still names a holder" | Only jid <- held]
       <> [ "concurrency key " <> T.unpack key <> " stores in_flight " <> show stored <> ", recount " <> show live
          | (key, stored, live) <- counts :: [(Text, Int64, Int64)]
          ]
   where
-    tbl = schema <> "." <> table
+    tbl = jobQueueTable schema table
     concTbl = arbiterConcurrencyTable schema
     heldSql = "SELECT id FROM " <> tbl <> " WHERE suspended AND claimed_by IS NOT NULL"
     countSql =
@@ -288,9 +278,8 @@ driftViolations schema table withConn = withConn $ \conn -> do
   rows <- PG.query_ conn (toQuery oracleSql)
   pure ["group " <> T.unpack groupName <> " summary drift: " <> T.unpack cols | (groupName, cols) <- rows]
   where
-    toQuery = fromString . T.unpack
-    tbl = schema <> "." <> table
-    groupsTbl = schema <> "." <> table <> "_groups"
+    tbl = jobQueueTable schema table
+    groupsTbl = jobQueueGroupsTable schema table
     -- NOW() is evaluated once per statement. The recompute filters mirror the
     -- trigger definitions. A past stored in_flight_until reads as free, as in the claim.
     oracleSql =
@@ -333,12 +322,12 @@ driftViolations schema table withConn = withConn $ \conn -> do
 --   * rate-limit integrity: a bucket's tokens outside [0, max]
 exactViolations :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO [String]
 exactViolations schema table withConn = withConn $ \conn -> do
-  serial <- PG.query_ conn (fromString (T.unpack serialSql))
-  over <- PG.query_ conn (fromString (T.unpack overSql))
-  dups <- PG.query_ conn (fromString (T.unpack dupSql))
-  conc <- PG.query_ conn (fromString (T.unpack concSql))
-  overSpent <- PG.query_ conn (fromString (T.unpack rlSql))
-  rlMax <- PG.query_ conn (fromString (T.unpack rlMaxSql))
+  serial <- PG.query_ conn (toQuery serialSql)
+  over <- PG.query_ conn (toQuery overSql)
+  dups <- PG.query_ conn (toQuery dupSql)
+  conc <- PG.query_ conn (toQuery concSql)
+  overSpent <- PG.query_ conn (toQuery rlSql)
+  rlMax <- PG.query_ conn (toQuery rlMaxSql)
   serialMsgs <- traverse (diagnoseSerial conn) [groupName | Only groupName <- serial]
   pure $
     serialMsgs
@@ -348,17 +337,17 @@ exactViolations schema table withConn = withConn $ \conn -> do
       <> ["rate-limit bucket " <> T.unpack key <> " over-spent (negative tokens)" | Only key <- overSpent]
       <> ["rate-limit bucket " <> T.unpack key <> " over-credited (tokens above max)" | Only key <- rlMax]
   where
-    tbl = schema <> "." <> table
-    concPolicies = schema <> ".arbiter_concurrency_policies"
-    rlBuckets = schema <> ".arbiter_rate_limits"
-    rlPolicies = schema <> ".arbiter_rate_limit_policies"
-    groupsTbl = schema <> "." <> table <> "_groups"
+    tbl = jobQueueTable schema table
+    concPolicies = arbiterConcurrencyPoliciesTable schema
+    rlBuckets = arbiterRateLimitsTable schema
+    rlPolicies = arbiterRateLimitPoliciesTable schema
+    groupsTbl = jobQueueGroupsTable schema table
     dma = T.pack (show defaultMaxAttempts)
     -- On a serialization violation, dump the offending group's jobs and summary
     -- row. Timestamps are ms relative to NOW.
     diagnoseSerial conn groupName = do
-      jobs <- PG.query conn (fromString (T.unpack jobsSql)) (Only groupName)
-      summ <- PG.query conn (fromString (T.unpack summSql)) (Only groupName)
+      jobs <- PG.query conn (toQuery jobsSql) (Only groupName)
+      summ <- PG.query conn (toQuery summSql) (Only groupName)
       let jobStr (jid, att, maxAtts, susp, nvu, dedup, upd, att_ms) =
             "{id="
               <> show (jid :: Int64)
@@ -455,10 +444,10 @@ exactViolations schema table withConn = withConn $ \conn -> do
 -- orphan.
 orphanViolations :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO [String]
 orphanViolations schema table withConn = withConn $ \conn -> do
-  orphans <- PG.query_ conn (fromString (T.unpack orphanSql))
+  orphans <- PG.query_ conn (toQuery orphanSql)
   pure ["orphaned child " <> show (jid :: Int64) <> " (parent gone)" | Only jid <- orphans]
   where
-    tbl = schema <> "." <> table
+    tbl = jobQueueTable schema table
     orphanSql =
       "SELECT child.id FROM "
         <> tbl
@@ -549,14 +538,13 @@ instance HasRateLimit SMPayload where
 seedConcurrencyPolicies :: Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO ()
 seedConcurrencyPolicies schema withConn = withConn $ \conn ->
   traverse_
-    ( \(policy, limit) -> traverse_ (void . PG.execute_ conn . fromString . T.unpack) (seedConcurrencyPolicySQL schema policy limit)
-    )
+    (\(policy, limit) -> traverse_ (execute_ conn) (seedConcurrencyPolicySQL schema policy limit))
     smConcSlots
 
 -- | Seed the rate-limit policy. Idempotent.
 seedRateLimitPolicies :: Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO ()
 seedRateLimitPolicies schema withConn = withConn $ \conn ->
-  void $ PG.execute_ conn (fromString (T.unpack (upsertRateLimitPolicyRowSQL schema smBucket)))
+  execute_ conn (upsertRateLimitPolicyRowSQL schema smBucket)
 
 -- | Reset the tables, then re-seed both admission policies.
 resetSeeded :: IO () -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO ()
@@ -643,11 +631,9 @@ cCrash schema table withConn =
 -- | Backdate every live lease, leaving each row's holder in place.
 lapseLeases :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO ()
 lapseLeases schema table withConn = withConn $ \conn ->
-  void . PG.execute_ conn . fromString . T.unpack $
+  execute_ conn $
     "UPDATE "
-      <> schema
-      <> "."
-      <> table
+      <> jobQueueTable schema table
       <> " SET not_visible_until = NOW() - interval '1 second'"
       <> " WHERE claimed_by IS NOT NULL AND NOT suspended AND not_visible_until > NOW()"
 
@@ -720,16 +706,14 @@ mkClaim = do
 isLiveInFlight :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> Int64 -> IO Bool
 isLiveInFlight schema table withConn jid = withConn $ \conn -> do
   rows <-
-    PG.query conn (fromString (T.unpack sql)) (Only jid)
+    PG.query conn (toQuery sql) (Only jid)
   pure $ case rows of
     Only count : _ -> (count :: Int64) > 0
     _ -> False
   where
     sql =
       "SELECT count(*) FROM "
-        <> schema
-        <> "."
-        <> table
+        <> jobQueueTable schema table
         <> " WHERE id = ? AND not_visible_until > NOW() AND NOT suspended AND attempts > 0"
 
 -- | @(leased, suspended, nvu)@ for one row.
@@ -740,27 +724,25 @@ leaseState
   -> Int64
   -> IO (Bool, Bool, Maybe UTCTime)
 leaseState schema table withConn jid = withConn $ \conn -> do
-  rows <- PG.query conn (fromString (T.unpack sql)) (Only jid)
+  rows <- PG.query conn (toQuery sql) (Only jid)
   pure $ case rows of
     row : _ -> row
     _ -> (False, False, Nothing)
   where
     sql =
       "SELECT claimed_by IS NOT NULL AND NOT suspended AND not_visible_until IS NOT NULL AND not_visible_until > NOW(), suspended, not_visible_until FROM "
-        <> schema
-        <> "."
-        <> table
+        <> jobQueueTable schema table
         <> " WHERE id = ?"
 
 -- | True if a row with this id is present in the main table.
 rowExists :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> Int64 -> IO Bool
 rowExists schema table withConn jid = withConn $ \conn -> do
-  rows <- PG.query conn (fromString (T.unpack sql)) (Only jid)
+  rows <- PG.query conn (toQuery sql) (Only jid)
   pure $ case rows of
     Only count : _ -> (count :: Int64) > 0
     _ -> False
   where
-    sql = "SELECT count(*) FROM " <> schema <> "." <> table <> " WHERE id = ?"
+    sql = "SELECT count(*) FROM " <> jobQueueTable schema table <> " WHERE id = ?"
 
 -- | A reference to an existing live job, shared by every id-targeted command.
 newtype JobRef (v :: Type -> Type) = JobRef (Var Int64 v)
@@ -968,17 +950,15 @@ mkFromDLQ dlqId = do
 -- | The id of the DLQ row holding the given original job id.
 lookupDlqId :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> Int64 -> IO Int64
 lookupDlqId schema table withConn jid = withConn $ \conn -> do
-  rows <- PG.query conn (fromString (T.unpack sql)) (Only jid)
+  rows <- PG.query conn (toQuery sql) (Only jid)
   pure $ case rows of
     Only dlqId : _ -> dlqId
     _ -> jid
   where
     sql =
       "SELECT id FROM "
-        <> schema
-        <> "."
-        <> table
-        <> "_dlq WHERE job_id = ? ORDER BY id DESC LIMIT 1"
+        <> jobQueueDLQTable schema table
+        <> " WHERE job_id = ? ORDER BY id DESC LIMIT 1"
 
 -- ---------------------------------------------------------------------------
 -- Batch and dedup commands (statement-level trigger paths)
@@ -1368,7 +1348,7 @@ countingDeadlocks deadlocks act = do
   case outcome of
     Right () -> pure ()
     Left err
-      | isDeadlock err -> atomicModifyIORef' deadlocks (\count -> (count + 1, ()))
+      | isDeadlock err -> bumpRef deadlocks
       | "40001" `isInfixOf` show err -> pure ()
       | otherwise -> throwIO err
 
@@ -1385,7 +1365,7 @@ retryRandomDLQ schema table withConn = do
   traverse_ (\dlqId -> void (HL.retryFromDLQ dlqId :: sm (Maybe (JobRead SMPayload)))) mId
   where
     sql =
-      "SELECT id FROM " <> schema <> "." <> table <> "_dlq ORDER BY random() LIMIT 1"
+      "SELECT id FROM " <> jobQueueDLQTable schema table <> " ORDER BY random() LIMIT 1"
 
 -- | Apply an id-keyed admin op to a random live job, if any.
 onRandomJob
@@ -1400,7 +1380,7 @@ onRandomJob schema table withConn act = do
   mId <- liftIO (firstId withConn sql)
   traverse_ act mId
   where
-    sql = "SELECT id FROM " <> schema <> "." <> table <> " ORDER BY random() LIMIT 1"
+    sql = "SELECT id FROM " <> jobQueueTable schema table <> " ORDER BY random() LIMIT 1"
 
 suspendRandom
   , resumeRandom
@@ -1430,7 +1410,7 @@ onRandomRollupParent schema table withConn act = do
   traverse_ act mId
   where
     sql =
-      "SELECT id FROM " <> schema <> "." <> table <> " WHERE parent_state IS NOT NULL ORDER BY random() LIMIT 1"
+      "SELECT id FROM " <> jobQueueTable schema table <> " WHERE parent_state IS NOT NULL ORDER BY random() LIMIT 1"
 
 -- | Delete a random DLQ row.
 deleteRandomDLQ
@@ -1444,7 +1424,7 @@ deleteRandomDLQ schema table withConn = do
   mId <- liftIO (firstId withConn sql)
   traverse_ (void . HL.deleteDLQJob @SMPayload) mId
   where
-    sql = "SELECT id FROM " <> schema <> "." <> table <> "_dlq ORDER BY random() LIMIT 1"
+    sql = "SELECT id FROM " <> jobQueueDLQTable schema table <> " ORDER BY random() LIMIT 1"
 
 -- | Delete a small random batch of DLQ rows in one statement.
 deleteRandomDLQBatch
@@ -1457,7 +1437,7 @@ deleteRandomDLQBatch
 deleteRandomDLQBatch schema table withConn = do
   ids <- liftIO $ withConn $ \conn -> do
     rows <-
-      PG.query_ conn (fromString (T.unpack ("SELECT id FROM " <> schema <> "." <> table <> "_dlq ORDER BY random() LIMIT 3")))
+      PG.query_ conn (toQuery ("SELECT id FROM " <> jobQueueDLQTable schema table <> " ORDER BY random() LIMIT 3"))
     pure [dlqId | Only dlqId <- rows]
   void (HL.deleteDLQJobsBatch @SMPayload ids)
 
@@ -1485,12 +1465,12 @@ isDeadlock err = "40P01" `isInfixOf` show err
 -- | Install the gap-free HOL violation detector on a raw connection.
 installHolDetector :: PG.Connection -> Text -> Text -> IO ()
 installHolDetector conn schema table =
-  traverse_ (void . PG.execute_ conn . fromString . T.unpack) (holInstallSql schema table)
+  traverse_ (execute_ conn) (holInstallSql schema table)
 
 -- | One message per violation the HOL detector trigger recorded.
 holViolations :: PG.Connection -> Text -> Text -> IO [String]
 holViolations conn schema table = do
-  rows <- PG.query_ conn (fromString (T.unpack ("SELECT group_key, job_id FROM " <> holViolTbl schema table)))
+  rows <- PG.query_ conn (toQuery ("SELECT group_key, job_id FROM " <> holViolTbl schema table))
   pure
     [ "HOL violation: job " <> show (jid :: Int64) <> " claimed while group " <> T.unpack groupName <> " already in-flight"
     | (groupName, jid) <- rows
@@ -1499,7 +1479,7 @@ holViolations conn schema table = do
 -- | Remove the HOL detector trigger, function, and violations table.
 removeHolDetector :: PG.Connection -> Text -> Text -> IO ()
 removeHolDetector conn schema table =
-  traverse_ (void . PG.execute_ conn . fromString . T.unpack) (holRemoveSql schema table)
+  traverse_ (execute_ conn) (holRemoveSql schema table)
 
 -- ---------------------------------------------------------------------------
 -- Property + hspec wiring
@@ -1671,7 +1651,7 @@ crossGroupWakeLockOrderAfter prepare settle run schema table withConn reset = do
         void
           ( PG.query_
               conn
-              (fromString (T.unpack ("SELECT 1 FROM " <> schema <> "." <> table <> "_groups WHERE group_key = 'mm' FOR UPDATE")))
+              (toQuery ("SELECT 1 FROM " <> jobQueueGroupsTable schema table <> " WHERE group_key = 'mm' FOR UPDATE"))
               :: IO [Only Int]
           )
         putMVar held ()
@@ -1712,10 +1692,8 @@ descendingSettleLockOrder settle run schema table withConn reset = do
         void
           ( PG.query_
               conn
-              ( fromString
-                  ( T.unpack
-                      ("SELECT 1 FROM " <> schema <> "." <> table <> " WHERE id = " <> T.pack (show (primaryKey job)) <> " FOR UPDATE")
-                  )
+              ( toQuery
+                  ("SELECT 1 FROM " <> jobQueueTable schema table <> " WHERE id = " <> T.pack (show (primaryKey job)) <> " FOR UPDATE")
               )
               :: IO [Only Int]
           )
@@ -1822,7 +1800,7 @@ respawnDLQDeleteLockOrder run schema table withConn reset = do
         void
           ( PG.query
               conn
-              (fromString (T.unpack ("SELECT 1 FROM " <> schema <> "." <> table <> " WHERE id = ? FOR UPDATE")))
+              (toQuery ("SELECT 1 FROM " <> jobQueueTable schema table <> " WHERE id = ? FOR UPDATE"))
               (Only (primaryKey parent))
               :: IO [Only Int]
           )
@@ -1867,7 +1845,7 @@ retryDLQDeleteLockOrder run schema table withConn reset = do
         void
           ( PG.query_
               conn
-              (fromString (T.unpack ("SELECT 1 FROM " <> schema <> "." <> table <> " WHERE parent_id IS NULL FOR UPDATE")))
+              (toQuery ("SELECT 1 FROM " <> jobQueueTable schema table <> " WHERE parent_id IS NULL FOR UPDATE"))
               :: IO [Only Int]
           )
         putMVar held ()
@@ -1910,7 +1888,7 @@ retryDLQCancelLockOrder run schema table withConn reset = do
   release <- newEmptyMVar
   let holder = withConn $ \conn -> do
         PG.begin conn
-        lockConcurrencyKey conn (schema <> ".arbiter_concurrency") "cap-a:s"
+        lockConcurrencyKey conn (arbiterConcurrencyTable schema) "cap-a:s"
         putMVar held ()
         takeMVar release
         PG.commit conn
@@ -2033,14 +2011,14 @@ exhaustionGuard run schema table withConn reset = do
   exactViolations schema table withConn >>= (`shouldBe` [])
   -- Every exhausted, claimable job lands in the DLQ.
   void (run (Ops.sweepExhaustedJobs schema [table]))
-  let tbl = schema <> "." <> table
+  let tbl = jobQueueTable schema table
   stranded <-
     countQuery withConn $
       "SELECT count(*) FROM "
         <> tbl
         <> " WHERE attempts >= 1 AND NOT suspended"
         <> " AND (not_visible_until IS NULL OR not_visible_until <= NOW())"
-  dlqd <- countQuery withConn ("SELECT count(*) FROM " <> tbl <> "_dlq")
+  dlqd <- countQuery withConn ("SELECT count(*) FROM " <> jobQueueDLQTable schema table)
   stranded `shouldBe` 0
   dlqd `shouldBe` fromIntegral jobCount
 
@@ -2088,7 +2066,7 @@ progressGuard run schema table withConn reset = do
       [1 .. 20 :: Int]
   drainToEmpty @sm run 300
   remaining <- withConn $ \conn -> do
-    [Only count] <- PG.query_ conn (fromString (T.unpack ("SELECT count(*) FROM " <> schema <> "." <> table)))
+    [Only count] <- PG.query_ conn (toQuery ("SELECT count(*) FROM " <> jobQueueTable schema table))
     pure (count :: Int64)
   remaining `shouldBe` 0
 
@@ -2142,9 +2120,9 @@ treeGuard
   -> IO ()
   -> IO ()
 treeGuard run schema table withConn reset = do
-  let tbl = schema <> "." <> table
+  let tbl = jobQueueTable schema table
       mainCount = countQuery withConn ("SELECT count(*) FROM " <> tbl)
-      dlqCount = countQuery withConn ("SELECT count(*) FROM " <> tbl <> "_dlq")
+      dlqCount = countQuery withConn ("SELECT count(*) FROM " <> jobQueueDLQTable schema table)
       mkJob lbl = defaultJob (smPayload lbl)
       twoChildTree = mkJob "tg parent" <~~ (mkJob "tg child 0" :| [mkJob "tg child 1"])
   -- Part 1: acking both children resumes the parent, which then completes.
@@ -2181,7 +2159,7 @@ dedupReplaceStaleLeaseGuard run schema table withConn reset = do
   void (run (HL.insertJob job))
   stale <-
     countQuery withConn $
-      "SELECT count(*) FROM " <> schema <> "." <> table <> " WHERE dedup_key = 'drsl-key' AND claimed_by IS NOT NULL"
+      "SELECT count(*) FROM " <> jobQueueTable schema table <> " WHERE dedup_key = 'drsl-key' AND claimed_by IS NOT NULL"
   stale `shouldBe` 0
 
 -- | Deterministic guard for the rows promote refuses: back in flight on a second
@@ -2280,7 +2258,7 @@ runGatedChecks
 runGatedChecks run schema withConn = do
   let truncateGates =
         withConn $ \conn ->
-          void (PG.execute_ conn (fromString (T.unpack ("TRUNCATE " <> schema <> ".arbiter_gates"))))
+          execute_ conn ("TRUNCATE " <> arbiterGatesTable schema)
   -- A second call within the interval is skipped.
   truncateGates
   firstRun <- run (Ops.runGated schema "sm-gate" 3600 (pure (1 :: Int)))
@@ -2391,9 +2369,9 @@ treeRetryFromDLQGuard
   -> IO ()
   -> IO ()
 treeRetryFromDLQGuard run schema table withConn reset = do
-  let tbl = schema <> "." <> table
+  let tbl = jobQueueTable schema table
       mainCount = countQuery withConn ("SELECT count(*) FROM " <> tbl)
-      dlqCount = countQuery withConn ("SELECT count(*) FROM " <> tbl <> "_dlq")
+      dlqCount = countQuery withConn ("SELECT count(*) FROM " <> jobQueueDLQTable schema table)
       mkJob lbl = defaultJob (smPayload lbl)
       tree = mkJob "trd parent" <~~ (mkJob "trd child 0" :| [mkJob "trd child 1"])
   reset
@@ -2404,7 +2382,10 @@ treeRetryFromDLQGuard run schema table withConn reset = do
   -- Retry the parent's DLQ row. The recursive restore brings the whole tree back.
   dlqId <- withConn $ \conn -> do
     [Only rowId] <-
-      PG.query conn (fromString (T.unpack ("SELECT id FROM " <> tbl <> "_dlq WHERE job_id = ?"))) (Only (primaryKey parent))
+      PG.query
+        conn
+        (toQuery ("SELECT id FROM " <> jobQueueDLQTable schema table <> " WHERE job_id = ?"))
+        (Only (primaryKey parent))
     pure (rowId :: Int64)
   void (run (HL.retryFromDLQ dlqId :: sm (Maybe (JobRead SMPayload))))
   mainCount >>= (`shouldBe` 3)
@@ -2462,8 +2443,8 @@ deferralLockOrderGuard
 deferralLockOrderGuard run schema table withConn reset = do
   resetSeeded reset schema withConn
   let ins conc rate = void (run (mkInsert @sm (applyExtras (Extras conc rate)) Nothing Nothing 0 Nothing))
-      tbl = schema <> "." <> table
-      concTbl = schema <> ".arbiter_concurrency"
+      tbl = jobQueueTable schema table
+      concTbl = arbiterConcurrencyTable schema
   -- The cap-a job is rate-denied on a drained bucket. The claim defers it without
   -- holding cap-a:s. The cap-b:s row parks the ordered scan between cap-a:s and
   -- cap-c:s. The cap-c job is admitted and the claim holds cap-c:s.
@@ -2472,7 +2453,7 @@ deferralLockOrderGuard run schema table withConn reset = do
   withConn $ \conn -> do
     execute_
       conn
-      ("UPDATE " <> schema <> ".arbiter_rate_limits SET tokens = 0, last_refill = NOW() WHERE rate_limit_key = 'smrl:rk-1'")
+      ("UPDATE " <> arbiterRateLimitsTable schema <> " SET tokens = 0, last_refill = NOW() WHERE rate_limit_key = 'smrl:rk-1'")
     execute_
       conn
       ( "INSERT INTO "
@@ -2515,8 +2496,8 @@ deferralClaimedByFlipGuard
 deferralClaimedByFlipGuard run schema table withConn reset = do
   resetSeeded reset schema withConn
   let ins conc rate = void (run (mkInsert @sm (applyExtras (Extras conc rate)) Nothing Nothing 0 Nothing))
-      tbl = schema <> "." <> table
-      concTbl = schema <> ".arbiter_concurrency"
+      tbl = jobQueueTable schema table
+      concTbl = arbiterConcurrencyTable schema
       staleWorker = "00000000-0000-0000-0000-000000000009" :: Text
   -- The cap-a job is a stale lease with a drained bucket. A claim would rate-defer
   -- it with a claimed_by flip. The cap-c job is admissible and the claim holds
@@ -2534,7 +2515,7 @@ deferralClaimedByFlipGuard run schema table withConn reset = do
       )
     execute_
       conn
-      ("UPDATE " <> schema <> ".arbiter_rate_limits SET tokens = 0, last_refill = NOW() WHERE rate_limit_key = 'smrl:rk-1'")
+      ("UPDATE " <> arbiterRateLimitsTable schema <> " SET tokens = 0, last_refill = NOW() WHERE rate_limit_key = 'smrl:rk-1'")
   held <- newEmptyMVar
   -- Hold cap-a:s like a concurrent claimer, then reach for the cap-c:s row the
   -- claim holds.

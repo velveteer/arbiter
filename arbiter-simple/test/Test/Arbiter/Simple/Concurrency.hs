@@ -15,6 +15,7 @@ import Arbiter.Test.Concurrency
   , removeHolDetector
   )
 import Arbiter.Test.Fixtures (TestPayload (..))
+import Arbiter.Test.Poll (bumpRef)
 import Arbiter.Test.Setup (cleanupData, createPoolOf, setupOnce)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM_, replicateM_, void, when)
@@ -45,7 +46,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
     concurrencySpec @TestPayload TestMessage runSimpleDb
     raceConditionSpec @TestPayload TestMessage runSimpleDb
 
-    describe "Group Serialization Race (localConnection)" $ do
+    describe "Group Serialization Race (inTransaction)" $ do
       it "groups trigger serializes concurrent inserts within a group" $ \env -> do
         violationsRef <- newIORef (0 :: Int)
 
@@ -78,7 +79,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
           -- Any claimed job from this group must be Pod 1's job, which has the lower id.
           forM_ allClaimed $ \job ->
             when (groupKey job == Just "serialize" && primaryKey job /= primaryKey jobA) $
-              atomicModifyIORef' violationsRef (\count -> (count + 1, ()))
+              bumpRef violationsRef
 
           forM_ allClaimed $ \job -> void $ runSimpleDb env (HL.ackJob job)
           drainAll

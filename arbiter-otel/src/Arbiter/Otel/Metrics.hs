@@ -1,4 +1,3 @@
-{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Job, admission and maintenance OpenTelemetry instruments, bound through
@@ -26,13 +25,12 @@ import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
 import Arbiter.Worker.Config (MaintenanceOp, maintenanceOpName)
 import Control.Monad (mfilter)
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Data.Fixed (Fixed (MkFixed))
 import Data.Foldable (traverse_)
 import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Data.Time.Clock (diffUTCTime, nominalDiffTimeToSeconds)
+import Data.Time.Clock (diffUTCTime)
 import OpenTelemetry.Attributes (Attributes, toAttribute, unsafeAttributesFromListIgnoringLimits)
 import OpenTelemetry.Metric.Core
   ( AdvisoryParameters (..)
@@ -110,8 +108,7 @@ otelHooks meterSet queue =
     }
   where
     -- A clock stepped backwards records zero.
-    secs start end = case nominalDiffTimeToSeconds (diffUTCTime end start) of
-      MkFixed picos -> max 0 (fromInteger picos / 1e12)
+    secs start end = max 0 (realToFrac (diffUTCTime end start))
     -- The declared labels.
     declared = Set.fromList (kindsFor @payload)
     labelOf job = mfilter (`Set.member` declared) (jobKind (payloadKeys job))

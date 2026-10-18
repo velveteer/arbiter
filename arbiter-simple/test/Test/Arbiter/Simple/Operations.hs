@@ -1,4 +1,3 @@
-{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
@@ -38,14 +37,14 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
   around (\action -> withResource sharedPool (cleanupData testSchema testTable) >> action sharedEnv) $ do
     operationsSpec @TestPayload TestMessage pure runSimpleDb
 
-    describe "Transaction Participation (localConnection)" $ do
+    describe "Transaction Participation (inTransaction)" $ do
       it "commits job insertion within user transaction" $ \env -> do
         let job = setGroupKey (Just "g1") $ defaultJob (TestMessage "InTx")
 
-        -- Start a user transaction and insert a job with localConnection
+        -- Start a user transaction and insert a job with inTransaction
         withResource sharedPool $ \conn -> do
           PG.withTransaction conn $ do
-            -- Insert job using localConnection to share the transaction
+            -- Insert job using inTransaction to share the transaction
             Just _inserted <- inTransaction @SimpleOpsTestRegistry conn testSchema $ HL.insertJob job
             -- Transaction commits here
             pure ()
@@ -62,7 +61,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
         result <-
           ( withResource sharedPool $ \conn -> do
               PG.withTransaction conn $ do
-                -- Insert job using localConnection to share the transaction
+                -- Insert job using inTransaction to share the transaction
                 Just _inserted <- inTransaction @SimpleOpsTestRegistry conn testSchema $ HL.insertJob job
                 -- Force a rollback by throwing an error
                 throwIO (userError "Intentional rollback")

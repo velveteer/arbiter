@@ -1,12 +1,10 @@
-{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE UndecidableInstances #-}
 
 -- | Execution of one worker pool and its job lifecycle. Multi-queue
 -- orchestration lives in "Arbiter.Worker.MultiQueue".
 module Arbiter.Worker.Pool
   ( runWorkerPool
+  , throwIfInvalid
   ) where
 
 import Arbiter.Core.Exceptions (displayEx)
@@ -22,7 +20,7 @@ import Arbiter.Core.QueueRegistry (RegistryTables (..))
 import Arbiter.Core.Trace (ConsumeShape, consumeSpanFor, toConsumeShape)
 import Control.Exception qualified as E
 import Control.Monad (forever, replicateM, unless, void)
-import Control.Monad.IO.Class (liftIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Foldable (traverse_)
@@ -68,6 +66,10 @@ import Arbiter.Worker.WorkQueue (WorkQueue, busyCount, inFlight, newWorkQueue, q
 -- Worker Pool
 -- ---------------------------------------------------------------------------
 
+-- | Throw 'WorkerConfigException' for an invalid config.
+throwIfInvalid :: (MonadIO m) => WorkerConfig n payload -> m ()
+throwIfInvalid = either (liftIO . E.throwIO . WorkerConfigException) pure . validateWorkerConfig
+
 -- | The span shape for claims made by a pool.
 poolSpanShape :: WorkerConfig m payload -> ConsumeShape
 poolSpanShape = toConsumeShape . handlerBatchSize
@@ -93,7 +95,7 @@ runWorkerPool
   => WorkerConfig m payload
   -> m ()
 runWorkerPool config = do
-  either (liftIO . E.throwIO . WorkerConfigException) pure (validateWorkerConfig config)
+  throwIfInvalid config
   let workerCap = workerCount config
       queueName = Arb.queueTable @payload @m
       -- Built once for the pool.

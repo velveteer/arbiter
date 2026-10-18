@@ -1,5 +1,4 @@
 {-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_HADDOCK not-home #-}
 
@@ -31,7 +30,7 @@ import GHC.Generics (Generic)
 
 import Arbiter.Core.Enum (enumFromText)
 import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueDLQTable, jobQueueTable)
-import Arbiter.Core.SqlLiterals (quoteIdentifier)
+import Arbiter.Core.SqlLiterals (quoteIdentifier, sharedTable)
 
 -- | Heartbeat-derived health of a worker. Independent of its 'paused' flag.
 data WorkerHealth
@@ -90,7 +89,7 @@ data WorkerRow = WorkerRow
 
 -- | Qualified table name for the @arbiter_workers@ table.
 arbiterWorkersTable :: SchemaName -> Text
-arbiterWorkersTable schemaName = quoteIdentifier schemaName <> "." <> arbiterWorkersTableName
+arbiterWorkersTable schemaName = sharedTable schemaName arbiterWorkersTableName
 
 -- | Bare name of the workers table, for catalog lookups by relname.
 arbiterWorkersTableName :: Text

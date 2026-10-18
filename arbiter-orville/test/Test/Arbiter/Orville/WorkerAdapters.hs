@@ -15,6 +15,7 @@ import Arbiter.Core.Job.Types
   , primaryKey
   )
 import Arbiter.Core.QueueRegistry (Queue)
+import Arbiter.Test.Fixtures (WorkerTestPayload (..))
 import Arbiter.Test.Poll (waitUntil, withLinkedAsync)
 import Arbiter.Test.Setup qualified as TestSetup
 import Arbiter.Worker (runWorkerPool)
@@ -39,11 +40,11 @@ import Test.Arbiter.Orville.TestHelpers
   , cleanupOrvilleTest
   , createOrvilleTestEnv
   , destroyOrvilleTestEnv
+  , orvillePoolSize
   , runOrvilleTest
   )
-import Test.Arbiter.Orville.Worker (OrvilleWorkerTestPayload (..))
 
-type AdapterRegistry = '[Queue "arbiter_orville_adapter_test" OrvilleWorkerTestPayload]
+type AdapterRegistry = '[Queue "arbiter_orville_adapter_test" WorkerTestPayload]
 
 type Base = ReaderT O.OrvilleState IO
 
@@ -58,7 +59,7 @@ spec :: ByteString -> Spec
 spec connStr =
   beforeAll
     ( TestSetup.setupOnce connStr adapterSchema adapterSchema True
-        >> createOrvilleTestEnv connStr adapterSchema adapterSchema 10
+        >> createOrvilleTestEnv connStr adapterSchema adapterSchema orvillePoolSize
     )
     $ afterAll destroyOrvilleTestEnv
     $ do
@@ -67,10 +68,10 @@ spec connStr =
         successRef <- newIORef []
 
         let
-          handler :: NonEmpty (JobRead OrvilleWorkerTestPayload) -> BatchCallbacks Base OrvilleWorkerTestPayload () -> Base ()
+          handler :: NonEmpty (JobRead WorkerTestPayload) -> BatchCallbacks Base WorkerTestPayload () -> Base ()
           handler jobs callbacks = ackAll callbacks (toList jobs)
 
-          hooks :: ObservabilityHooks Base OrvilleWorkerTestPayload
+          hooks :: ObservabilityHooks Base WorkerTestPayload
           hooks =
             defaultObservabilityHooks
               { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \seen -> (payload job : seen, ())
@@ -82,7 +83,7 @@ spec connStr =
         withLinkedAsync (run env $ runWorkerPool config {pollInterval = 0.05, observabilityHooks = orvilleHooks hooks}) $ \_ -> do
           waitUntil 10_000 $ (== 2) . length <$> readIORef successRef
           readIORef successRef >>= (`shouldMatchList` [SimpleTask "a", SimpleTask "b"])
-          remaining <- run env (HL.countJobs @OrvilleWorkerTestPayload)
+          remaining <- run env (HL.countJobs @WorkerTestPayload)
           remaining `shouldBe` 0
 
       it "runs a callback inside the handler's transaction" $ \env -> do
@@ -90,7 +91,7 @@ spec connStr =
         settled <- newEmptyMVar
 
         let
-          handler :: NonEmpty (JobRead OrvilleWorkerTestPayload) -> BatchCallbacks Base OrvilleWorkerTestPayload () -> Base ()
+          handler :: NonEmpty (JobRead WorkerTestPayload) -> BatchCallbacks Base WorkerTestPayload () -> Base ()
           handler jobs callbacks =
             for_ jobs $ \job -> do
               outcome <- try (O.withTransaction (ack callbacks job *> throwIO RollbackAck))
@@ -102,7 +103,7 @@ spec connStr =
         withLinkedAsync (run env $ runWorkerPool config {pollInterval = 0.05}) $ \_ -> do
           (jobId, rolledBack) <- takeMVar settled
           rolledBack `shouldBe` True
-          stillQueued <- run env (HL.jobExists @OrvilleWorkerTestPayload jobId)
+          stillQueued <- run env (HL.jobExists @WorkerTestPayload jobId)
           stillQueued `shouldBe` True
   where
     run :: OrvilleTestEnv AdapterRegistry -> TestOrville AdapterRegistry a -> IO a

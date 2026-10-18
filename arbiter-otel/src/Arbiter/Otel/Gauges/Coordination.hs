@@ -1,5 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes #-}
 
 -- | Cross-process coordination for database gauge scans.
 module Arbiter.Otel.Gauges.Coordination

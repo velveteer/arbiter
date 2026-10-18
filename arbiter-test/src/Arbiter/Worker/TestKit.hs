@@ -1,4 +1,3 @@
-{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
@@ -34,7 +33,6 @@ import Arbiter.Core.Exceptions
   , throwScopedFailure
   , throwTreeCancel
   )
-import Arbiter.Core.FailureGate qualified as FailureGate
 import Arbiter.Core.HighLevel (QueueOperation, RegistryAdmissionPolicies)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Archive qualified as Archive
@@ -118,8 +116,8 @@ import Test.Hspec
 import UnliftIO (atomically, bracket, newEmptyMVar, putMVar, takeMVar, try)
 import UnliftIO.Async (concurrently_, withAsync)
 
-import Arbiter.Test.Poll (waitUntil)
-import Arbiter.Test.Setup (listenerConnectionCount, terminateBackendsMatching, withConn)
+import Arbiter.Test.Poll (bumpRef, waitUntil)
+import Arbiter.Test.Setup (listenerConnectionCount, quietHubLog, terminateBackendsMatching, withConn)
 import Arbiter.Worker.TestKit.Backend (TestBackend (..))
 import Arbiter.Worker.TestKit.ConnectionRecovery (connectionRecoverySpec)
 import Arbiter.Worker.TestKit.Cron (cronSpec)
@@ -176,7 +174,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
         liftIO $ atomicModifyIORef' maxActiveRef $ \maxN -> (max maxN active, ())
         liftIO $ threadDelay 500_000
         liftIO $ atomicModifyIORef' activeRef $ \count -> (count - 1, ())
-        liftIO $ atomicModifyIORef' completedRef $ \count -> (count + 1, ())
+        liftIO $ bumpRef completedRef
       let jobs =
             map
               (\index -> setGroupKey (Just (T.pack $ "g" <> show index)) $ defaultJob (mkSimple (T.pack $ "Job " <> show @Int index)))
@@ -501,11 +499,11 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       dlqRef <- newIORef (0 :: Int)
       let hooks =
             defaultObservabilityHooks
-              { onJobRetry = \_ _ -> liftIO $ atomicModifyIORef' retryRef (\count -> (count + 1, ()))
-              , onJobFailedAndMovedToDLQ = \_ _ -> liftIO $ atomicModifyIORef' dlqRef (\count -> (count + 1, ()))
+              { onJobRetry = \_ _ -> liftIO $ bumpRef retryRef
+              , onJobFailedAndMovedToDLQ = \_ _ -> liftIO $ bumpRef dlqRef
               }
       config <- mkConfig $ \_job -> do
-        liftIO $ atomicModifyIORef' attemptsRef (\count -> (count + 1, ()))
+        liftIO $ bumpRef attemptsRef
         throwRetryable "always fails"
 
       let job = setMaxAttempts (Just 2) $ setGroupKey (Just "g1") $ defaultJob (mkSimple "Boundary")
@@ -530,8 +528,8 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       dlqCalls <- newIORef (0 :: Int)
       let hooks =
             defaultObservabilityHooks
-              { onJobRetry = \_ _ -> liftIO $ atomicModifyIORef' retryCalls (\count -> (count + 1, ()))
-              , onJobFailedAndMovedToDLQ = \_ _ -> liftIO $ atomicModifyIORef' dlqCalls (\count -> (count + 1, ()))
+              { onJobRetry = \_ _ -> liftIO $ bumpRef retryCalls
+              , onJobFailedAndMovedToDLQ = \_ _ -> liftIO $ bumpRef dlqCalls
               }
       config <- mkConfig $ \_job -> throwPermanent "Unrecoverable error"
 
@@ -790,7 +788,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
             defaultObservabilityHooks
               { onJobFailure = \job _err startTime endTime ->
                   liftIO $ atomicModifyIORef' failureRef $ \results -> ((primaryKey job, startTime, endTime) : results, ())
-              , onJobSuccess = \_ _ _ -> liftIO $ atomicModifyIORef' successRef (\count -> (count + 1, ()))
+              , onJobSuccess = \_ _ _ -> liftIO $ bumpRef successRef
               }
       config <- mkConfig $ \_job -> do
         liftIO $ threadDelay 200_000
@@ -814,7 +812,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       let hooks =
             defaultObservabilityHooks
               { onJobHeartbeat = \_ _currentTime _startTime ->
-                  liftIO $ atomicModifyIORef' heartbeatRef $ \count -> (count + 1, ())
+                  liftIO $ bumpRef heartbeatRef
               }
       config <- mkConfig $ \_job -> liftIO $ threadDelay 3_000_000
       let configWithHooks =
@@ -1185,7 +1183,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
     it "failRetry callback retries a job and DLQs it at its maxAttempts" $ \env -> do
       callsRef <- newIORef (0 :: Int)
       let batchHandler jobs cbs = do
-            liftIO $ atomicModifyIORef' callsRef (\count -> (count + 1, ()))
+            liftIO $ bumpRef callsRef
             traverse_ (\job -> failRetry cbs job "transient") (toList jobs)
       let jobs = [setMaxAttempts (Just 2) $ setGroupKey (Just "fr") $ defaultJob (mkSimple "fr-job")]
       runM env $ traverse_ HL.insertJob jobs
@@ -1274,7 +1272,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
               }
       let isNacked job = payload job == mkSimple "hb-nacked"
           batchHandler jobs cbs = do
-            liftIO $ atomicModifyIORef' callsRef (\count -> (count + 1, ()))
+            liftIO $ bumpRef callsRef
             traverse_ (nack cbs) (filter isNacked (toList jobs))
             -- Outlast a heartbeat tick. The tick reads the nack's given-back attempt as a steal.
             liftIO $ threadDelay 1_500_000
@@ -1512,7 +1510,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       let hooks =
             defaultObservabilityHooks
               { onJobSuccess = \_ _ _ ->
-                  liftIO $ atomicModifyIORef' successesRef (\count -> (count + 1, ()))
+                  liftIO $ bumpRef successesRef
               }
           batchHandler jobs cbs = do
             call <- liftIO $ atomicModifyIORef' callsRef (\count -> (count + 1, count + 1))
@@ -2290,16 +2288,6 @@ withSharedListener :: IO (Maybe Listen.Listener) -> (Listen.Listener -> IO ()) -
 withSharedListener getShared continue =
   getShared >>= maybe (expectationFailure "expected a shared listener, got poll-only") continue
 
--- | A hub logger that swallows warn and error output.
-quietHubLog :: Listen.HubLog
-quietHubLog =
-  Listen.HubLog
-    { Listen.hubRecovered = const (pure ())
-    , Listen.hubWarn = const (pure ())
-    , Listen.hubError = const (pure ())
-    , Listen.hubRepeatInterval = FailureGate.defaultFailureRepeatInterval
-    }
-
 -- | Channel handler that ignores the notification.
 ignoreNotif :: Listen.Notification -> IO ()
 ignoreNotif = const (pure ())
@@ -2307,9 +2295,6 @@ ignoreNotif = const (pure ())
 -- | Channel handler that bumps a counter.
 bumpNotif :: IORef Int -> Listen.Notification -> IO ()
 bumpNotif ref = const (bumpRef ref)
-
-bumpRef :: IORef Int -> IO ()
-bumpRef ref = atomicModifyIORef' ref (\count -> (count + 1, ()))
 
 -- | Job action that bumps a counter.
 bumping :: (MonadIO m) => IORef Int -> JobRead p -> m ()

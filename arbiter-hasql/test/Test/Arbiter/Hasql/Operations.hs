@@ -92,18 +92,12 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
       it "rolls back job insertion when user transaction fails" $ \env -> do
         let job = defaultJob (TestMessage "RollbackTest")
 
-        result <-
-          ( withResource sharedPool $ \conn -> do
-              Compat.runSQL conn "BEGIN"
-              inTransaction @HasqlOpsTestRegistry conn testSchema $ do
-                _ <- HL.insertJob job
-                pure ()
-              Compat.runSQL conn "ROLLBACK"
-              pure ("rolled back" :: String)
-          )
-            `catch` \(exception :: SomeException) -> pure (show exception)
-
-        result `shouldContain` "rolled back"
+        withResource sharedPool $ \conn -> do
+          Compat.runSQL conn "BEGIN"
+          inTransaction @HasqlOpsTestRegistry conn testSchema $ do
+            _ <- HL.insertJob job
+            pure ()
+          Compat.runSQL conn "ROLLBACK"
 
         claimed <- runHasqlDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]
         length claimed `shouldBe` 0

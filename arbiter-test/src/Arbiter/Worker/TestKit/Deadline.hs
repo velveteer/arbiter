@@ -1,4 +1,3 @@
-{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 
@@ -55,7 +54,7 @@ import Test.Hspec (Spec, before, describe, it, shouldBe, shouldReturn, shouldSat
 import UnliftIO (MonadUnliftIO, finally, mask_, tryAny, withRunInIO)
 import UnliftIO.Async (async, poll, waitCatch, withAsync)
 
-import Arbiter.Test.Poll (waitUntil)
+import Arbiter.Test.Poll (bumpRef, waitUntil)
 import Arbiter.Worker.TestKit.Backend (TestBackend (..))
 import Arbiter.Worker.TestKit.Rows (flagCancelled, holdRowLock, reclaimJob, releaseRow, rowCount, takeClaimHolder)
 
@@ -154,11 +153,11 @@ deadlineSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, mkHandler, ru
       it "interrupts a blocked claim hook at the duration deadline before the handler starts" $ \env -> do
         handlerCalls <- newIORef (0 :: Int)
         hookCalls <- newIORef (0 :: Int)
-        let handler = mkHandler $ \_ -> liftIO $ atomicModifyIORef' handlerCalls (\n -> (n + 1, ()))
+        let handler = mkHandler $ \_ -> liftIO $ bumpRef handlerCalls
             hooks =
               defaultObservabilityHooks
                 { onJobClaimed = \_ _ -> liftIO $ do
-                    atomicModifyIORef' hookCalls (\n -> (n + 1, ()))
+                    bumpRef hookCalls
                     threadDelay 30_000_000
                 }
         void (insertedId env)
@@ -302,7 +301,7 @@ deadlineSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, mkHandler, ru
               when (payload job == mkSimple "slow") $ do
                 void (HL.insertJob (setGroupKey (Just "shared") (defaultJob (mkSimple "child"))))
                 liftIO (threadDelay groupedHandlerMicros)
-                liftIO (atomicModifyIORef' finishedRef (\count -> (count + 1, ())))
+                liftIO (bumpRef finishedRef)
             capture _level msg _ctx = atomicModifyIORef' loggedRef (\messages -> (msg : messages, ()))
         parent <- inserted env (setGroupKey (Just "shared") (setMaxAttempts (Just 1) (defaultJob (mkSimple "slow"))))
         config :: WorkerConfig m payload <- transactionalWorkerConfig 1 handler
@@ -328,9 +327,9 @@ deadlineSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, mkHandler, ru
         finishedRef <- newIORef (0 :: Int)
         let handler :: JobHandler m payload ()
             handler = mkHandler $ \_job -> liftIO $ do
-              atomicModifyIORef' startedRef (\count -> (count + 1, ()))
+              bumpRef startedRef
               threadDelay handlerSleepMicros
-              atomicModifyIORef' finishedRef (\count -> (count + 1, ()))
+              bumpRef finishedRef
 
         void (insertedId env)
 
@@ -401,7 +400,7 @@ deadlineSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, mkHandler, ru
               ackAll callbacks (toList jobs)
               liftIO $ do
                 threadDelay handlerSleepMicros
-                atomicModifyIORef' finishedRef (\count -> (count + 1, ()))
+                bumpRef finishedRef
             capture _level msg _ctx = atomicModifyIORef' loggedRef (\messages -> (msg : messages, ()))
 
         void (insertedPlainId env)
@@ -431,7 +430,7 @@ deadlineSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, mkHandler, ru
               getMonotonicTime >>= writeIORef startedRef . Just
               uninterruptibleMask_ (threadDelay maskedMicros)
               threadDelay handlerSleepMicros
-              atomicModifyIORef' finishedRef (\count -> (count + 1, ()))
+              bumpRef finishedRef
             hooks :: ObservabilityHooks m payload
             hooks = defaultObservabilityHooks {onJobHeartbeat = \_ _ _ -> recordBeat beatsRef}
 
@@ -463,9 +462,9 @@ deadlineSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, mkHandler, ru
         finishedRef <- newIORef (0 :: Int)
         let handler :: JobHandler m payload ()
             handler = mkHandler $ \_job -> liftIO $ do
-              atomicModifyIORef' startedRef (\count -> (count + 1, ()))
+              bumpRef startedRef
               void (tryAny (threadDelay handlerSleepMicros))
-              atomicModifyIORef' finishedRef (\count -> (count + 1, ()))
+              bumpRef finishedRef
 
         void (insertedId env)
 
@@ -495,7 +494,7 @@ deadlineSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, mkHandler, ru
                 ( do
                     getMonotonicTime >>= writeIORef startedRef . Just
                     threadDelay handlerSleepMicros
-                    atomicModifyIORef' finishedRef (\count -> (count + 1, ()))
+                    bumpRef finishedRef
                 )
                 `finally` liftIO (threadDelay unwindMicros)
             hooks :: ObservabilityHooks m payload
@@ -541,9 +540,9 @@ deadlineSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, mkHandler, ru
         reasonsRef <- newIORef ([] :: [Text])
         let handler :: JobHandler m payload ()
             handler = mkHandler $ \_job -> liftIO $ do
-              atomicModifyIORef' startedRef (\count -> (count + 1, ()))
+              bumpRef startedRef
               threadDelay handlerSleepMicros
-              atomicModifyIORef' finishedRef (\count -> (count + 1, ()))
+              bumpRef finishedRef
             hooks :: ObservabilityHooks m payload
             hooks =
               defaultObservabilityHooks

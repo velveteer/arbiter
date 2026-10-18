@@ -63,15 +63,15 @@ test-suite arbiter-servant-openapi-tests
   hs-source-dirs: test
   main-is:        Spec.hs
   build-depends:
-    , aeson        >=2.2 && <2.3
-    , arbiter-core >=0.1 && <0.2
-    , arbiter-servant >=0.1 && <0.2
+    , aeson                      >=2.2  && <2.3
+    , arbiter-core               >=0.1  && <0.2
+    , arbiter-servant            >=0.1  && <0.2
     , arbiter-servant-openapi
-    , base >=4.20 && <5
-    , containers   >=0.6 && <0.9
-    , insert-ordered-containers >=0.2 && <0.3
-    , openapi3     >=3.2 && <3.3
-    , tasty                    >=1.4  && <1.6
-    , text         >=1.2 && <2.2
-    , time         >=1.12 && <1.16
-    , tasty-hunit              >=0.10 && <0.11
+    , base                       >=4.20 && <5
+    , containers                 >=0.6  && <0.9
+    , insert-ordered-containers  >=0.2  && <0.3
+    , openapi3                   >=3.2  && <3.3
+    , tasty                      >=1.4  && <1.6
+    , tasty-hunit                >=0.10 && <0.11
+    , text                       >=1.2  && <2.2
+    , time                       >=1.12 && <1.16

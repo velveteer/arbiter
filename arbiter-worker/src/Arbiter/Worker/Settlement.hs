@@ -1,5 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeFamilies #-}
 
 -- | The pool's side of a batch's lifecycle: the statements and hooks
 -- "Arbiter.Worker.Batch" drives, unlifted to IO.
@@ -104,7 +103,7 @@ poolEffects config statements consumeSpan = do
                     Ops.lockJobRootsAndParents
                       schemaName
                       queue
-                      [fromMaybe (Job.primaryKey job) (Job.parentId job) | job <- unhandled <> unowned]
+                      (map branchRoot (unhandled <> unowned))
                   else Ops.lockJobParents schemaName queue (map Job.parentId unhandled)
                 held <- lockTrees schemaName queue (map Job.primaryKey (unhandled <> unowned))
                 outcomes <-
@@ -231,6 +230,10 @@ fireCancelled config job errorMsg = do
   jobHook (logConfig config) job "onJobCancelled" $
     Job.onJobCancelled (observabilityHooks config) job errorMsg
 
+-- | The job's parent, or the job when it has none.
+branchRoot :: Job.JobRead payload -> Job.JobId
+branchRoot job = fromMaybe (Job.primaryKey job) (Job.parentId job)
+
 -- | Delete what a tree or branch cancel names, returning the ids deleted.
 cancelJobFor
   :: (MonadArbiter m)
@@ -241,7 +244,7 @@ cancelJobFor kind job = do
   schemaName <- getSchema
   case kind of
     BranchCancelFailure ->
-      Ops.cancelJobCascade schemaName (Job.queueName job) (fromMaybe (Job.primaryKey job) (Job.parentId job))
+      Ops.cancelJobCascade schemaName (Job.queueName job) (branchRoot job)
     _ -> Ops.cancelJobTree schemaName (Job.queueName job) (Job.primaryKey job)
 
 -- | Write a single job's failure (retry or move to DLQ), for the caller to report

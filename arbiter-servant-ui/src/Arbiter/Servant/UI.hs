@@ -1,7 +1,5 @@
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE TypeOperators #-}
 
 -- | Embedded admin dashboard. Bootstrap 5 CSS and Vue 3, compiled in.
 --

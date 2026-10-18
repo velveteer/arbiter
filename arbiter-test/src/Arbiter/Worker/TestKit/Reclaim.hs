@@ -1,4 +1,3 @@
-{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 
@@ -26,7 +25,7 @@ import Data.Foldable (traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Test.Hspec
 
-import Arbiter.Test.Poll (waitUntil, withLinkedAsync)
+import Arbiter.Test.Poll (bumpRef, waitUntil, withLinkedAsync)
 import Arbiter.Worker.TestKit.Backend (TestBackend (..))
 import Arbiter.Worker.TestKit.Rows (reclaimJob)
 
@@ -57,9 +56,9 @@ reclaimSpec TestBackend {schema, table, connStr, mkSimple, mkFailing, mkEnv, mkH
 
         let hooks =
               defaultObservabilityHooks
-                { onJobSuccess = \_ _ _ -> liftIO $ atomicModifyIORef' successCalls (\count -> (count + 1, ()))
-                , onJobFailure = \_ _ _ _ -> liftIO $ atomicModifyIORef' failureCalls (\count -> (count + 1, ()))
-                , onJobUnavailable = \_ _ -> liftIO $ atomicModifyIORef' unavailableCalls (\count -> (count + 1, ()))
+                { onJobSuccess = \_ _ _ -> liftIO $ bumpRef successCalls
+                , onJobFailure = \_ _ _ _ -> liftIO $ bumpRef failureCalls
+                , onJobUnavailable = \_ _ -> liftIO $ bumpRef unavailableCalls
                 }
 
         Just inserted <- runM env $ HL.insertJob (defaultJob (mkSimple "slow"))
@@ -99,8 +98,8 @@ reclaimSpec TestBackend {schema, table, connStr, mkSimple, mkFailing, mkEnv, mkH
 
         let hooks =
               defaultObservabilityHooks
-                { onJobSuccess = \_ _ _ -> liftIO $ atomicModifyIORef' successCalls (\count -> (count + 1, ()))
-                , onJobFailure = \_ _ _ _ -> liftIO $ atomicModifyIORef' failureCalls (\count -> (count + 1, ()))
+                { onJobSuccess = \_ _ _ -> liftIO $ bumpRef successCalls
+                , onJobFailure = \_ _ _ _ -> liftIO $ bumpRef failureCalls
                 }
 
         void
@@ -133,7 +132,7 @@ reclaimSpec TestBackend {schema, table, connStr, mkSimple, mkFailing, mkEnv, mkH
 
         let hooks =
               defaultObservabilityHooks
-                { onJobUnavailable = \_ _ -> liftIO $ atomicModifyIORef' unavailableCalls (\count -> (count + 1, ()))
+                { onJobUnavailable = \_ _ -> liftIO $ bumpRef unavailableCalls
                 }
 
         Just inserted <- runM env $ HL.insertJob (defaultJob (mkSimple "slow"))
@@ -170,8 +169,8 @@ reclaimSpec TestBackend {schema, table, connStr, mkSimple, mkFailing, mkEnv, mkH
 
         let hooks =
               defaultObservabilityHooks
-                { onJobSuccess = \_ _ _ -> liftIO $ atomicModifyIORef' processedCount (\count -> (count + 1, ()))
-                , onJobFailure = \_ _ _ _ -> liftIO $ atomicModifyIORef' processedCount (\count -> (count + 1, ()))
+                { onJobSuccess = \_ _ _ -> liftIO $ bumpRef processedCount
+                , onJobFailure = \_ _ _ _ -> liftIO $ bumpRef processedCount
                 }
 
         runM env $

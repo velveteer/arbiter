@@ -288,7 +288,6 @@ export function useView({ noun, load: body, empty = () => true, key, mode = '5s'
       v.pending = Math.max(0, v.pending - pendingAtStart);
     } catch (e) {
       if (stale()) return;
-      console.error(`Could not load ${noun}:`, e);
       const first = !v.errored;
       v.errored = true;
       v.error = e.message;
@@ -634,13 +633,11 @@ export function useTable({ view, tab, filters, sorts, extra = {}, pageKey, ids, 
 }
 
 // Persisted column visibility. autoHide hides an unfilled column. narrow: false hides it on a phone.
-// was names a column's earlier key, so its saved choice carries over.
 const autoMemo = {};
 
 export function useColumns(defs, key) {
   const saved = load(key, {}) || {};
-  const savedKey = (d) => (d.key in saved ? d.key : d.was in saved ? d.was : null);
-  const vis = reactive(Object.fromEntries(defs.filter(savedKey).map((d) => [d.key, saved[savedKey(d)] !== false])));
+  const vis = reactive(Object.fromEntries(defs.filter((d) => d.key in saved).map((d) => [d.key, saved[d.key] !== false])));
   // The last queue's measure stands until this one's first, so columns hold still.
   const auto = reactive({ ...autoMemo[key] });
   const seen = {};

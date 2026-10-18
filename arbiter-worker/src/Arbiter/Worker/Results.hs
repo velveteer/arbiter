@@ -1,5 +1,3 @@
-{-# LANGUAGE TypeFamilies #-}
-
 -- | Reading, combining, and storing the results of a rollup job's children.
 module Arbiter.Worker.Results
   ( childResults
@@ -18,7 +16,7 @@ import Arbiter.Core.Operations qualified as Ops
 import Control.Monad (void)
 import Data.Aeson (FromJSON, Value)
 import Data.Either (partitionEithers)
-import Data.Foldable (fold, foldMap')
+import Data.Foldable (fold, foldMap', for_)
 import Data.Int (Int64)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -73,13 +71,10 @@ storeEncodedResult
   -> m ()
 storeEncodedResult job mVal = do
   schemaName <- getSchema
-  case (parentId job, mVal) of
-    (Just pid, Just val) ->
-      void $ Ops.insertResult schemaName (queueName job) pid (primaryKey job) val
-    (Nothing, Just val)
-      | Ops.archivesOnAck job ->
-          void $ Ops.updateArchiveResult schemaName (queueName job) (primaryKey job) val
-    _ -> pure ()
+  for_ (resultRow (job, mVal)) $
+    either
+      (\(pid, cid, val) -> void $ Ops.insertResult schemaName (queueName job) pid cid val)
+      (\(cid, val) -> void $ Ops.updateArchiveResult schemaName (queueName job) cid val)
 
 -- | 'storeEncodedResult' over a batch from one queue. One statement stores the
 -- child results and one the archived roots.
@@ -94,11 +89,14 @@ storeEncodedResults schemaName pairs@((firstJob, _) : _) = do
       queue = queueName firstJob
   void $ Ops.insertResultsBatch schemaName queue childRows
   void $ Ops.updateArchiveResultsBatch schemaName queue rootRows
-  where
-    resultRow (job, mVal) = do
-      val <- mVal
-      case parentId job of
-        Just pid -> Just (Left (pid, primaryKey job, val))
-        Nothing
-          | Ops.archivesOnAck job -> Just (Right (primaryKey job, val))
-          | otherwise -> Nothing
+
+-- | Where a result goes: the results table for a child, the archive entry for an
+-- archived root, nowhere otherwise.
+resultRow :: (JobRead payload, Maybe Value) -> Maybe (Either (Int64, Int64, Value) (Int64, Value))
+resultRow (job, mVal) = do
+  val <- mVal
+  case parentId job of
+    Just pid -> Just (Left (pid, primaryKey job, val))
+    Nothing
+      | Ops.archivesOnAck job -> Just (Right (primaryKey job, val))
+      | otherwise -> Nothing

@@ -1,5 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeFamilies #-}
 
 -- | The worker thread: takes batches off the queue and runs each through
 -- "Arbiter.Worker.Batch".

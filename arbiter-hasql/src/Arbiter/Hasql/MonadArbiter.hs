@@ -41,11 +41,12 @@ module Arbiter.Hasql.MonadArbiter
 import Arbiter.Core.Backend (HasPoolState, pinConnection, withConn, withSavepointTransaction)
 import Arbiter.Core.Exceptions (throwInternal)
 import Arbiter.Core.MonadArbiter (Query (..))
-import Control.Monad (when)
+import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Int (Int64)
 import Data.Text qualified as T
 import Hasql.Connection qualified as Hasql
+import Hasql.Decoders qualified as D
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as S
 import UnliftIO (MonadUnliftIO, mask, onException)
@@ -64,7 +65,7 @@ hasqlExecuteQuery
   :: (HasPoolState Hasql.Connection m, MonadUnliftIO m)
   => Query a
   -> m [a]
-hasqlExecuteQuery query = withConn $ \conn -> liftIO (runQueryStatement False conn query)
+hasqlExecuteQuery = hasqlExecuteQueryPrepared False
 
 -- | 'hasqlExecuteQuery', prepared once per connection when the flag is on.
 hasqlExecuteQueryPrepared
@@ -72,34 +73,31 @@ hasqlExecuteQueryPrepared
   => Bool
   -> Query a
   -> m [a]
-hasqlExecuteQueryPrepared prepare query = withConn $ \conn -> liftIO (runQueryStatement prepare conn query)
-
-runQueryStatement :: Bool -> Hasql.Connection -> Query a -> IO [a]
-runQueryStatement prepare conn query = do
-  let mkStatement = if prepare then S.preparable else S.unpreparable
-      stmt = mkStatement (qPositional query) (Encode.buildEncoder (qParams query)) (Decode.hasqlRowDecoder (qDecode query))
-  result <- Hasql.use conn (Session.statement () stmt)
-  case result of
-    Right rows -> pure rows
-    Left err -> throwInternal $ "hasql query error: " <> T.pack (show err)
+hasqlExecuteQueryPrepared prepare query = withConn $ \conn ->
+  liftIO . runStatement "query" conn $
+    mkStatement (qPositional query) (Encode.buildEncoder (qParams query)) (Decode.hasqlRowDecoder (qDecode query))
+  where
+    mkStatement = if prepare then S.preparable else S.unpreparable
 
 -- | Run a statement unprepared, returning rows affected.
 hasqlExecuteStatement
   :: (HasPoolState Hasql.Connection m, MonadUnliftIO m)
   => Query a
   -> m Int64
-hasqlExecuteStatement query = withConn $ \conn -> liftIO $ do
-  let stmt = Encode.buildStatementRowCount (qPositional query) (qParams query)
-  result <- Hasql.use conn (Session.statement () stmt)
-  case result of
-    Right rowCount -> pure rowCount
-    Left err -> throwInternal $ "hasql statement error: " <> T.pack (show err)
+hasqlExecuteStatement query = withConn $ \conn ->
+  liftIO . runStatement "statement" conn $
+    S.unpreparable (qPositional query) (Encode.buildEncoder (qParams query)) D.rowsAffected
+
+runStatement :: T.Text -> Hasql.Connection -> S.Statement () r -> IO r
+runStatement label conn stmt =
+  Hasql.use conn (Session.statement () stmt)
+    >>= either (\err -> throwInternal ("hasql " <> label <> " error: " <> T.pack (show err))) pure
 
 -- | Transaction bracket. Nests via savepoints.
 hasqlWithDbTransaction :: (HasPoolState Hasql.Connection m, MonadUnliftIO m) => m a -> m a
 hasqlWithDbTransaction = withSavepointTransaction runSQL beginCommitOrRollback
 
-beginCommitOrRollback :: forall a. Hasql.Connection -> IO a -> IO a
+beginCommitOrRollback :: Hasql.Connection -> IO a -> IO a
 beginCommitOrRollback conn action = mask $ \restore -> do
   runSQL conn "BEGIN"
   result <- restore action `onException` rollbackSafely
@@ -109,9 +107,7 @@ beginCommitOrRollback conn action = mask $ \restore -> do
     rollbackSafely :: IO ()
     rollbackSafely = do
       inTx <- connectionInTransaction conn
-      when inTx $ do
-        _ <- try (runSQL conn "ROLLBACK") :: IO (Either SomeException ())
-        pure ()
+      when inTx $ void (try (runSQL conn "ROLLBACK") :: IO (Either SomeException ()))
 
 -- | Run a handler on the pinned connection, or on a borrowed pool connection when none
 -- is pinned.

@@ -1,5 +1,4 @@
 {-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 

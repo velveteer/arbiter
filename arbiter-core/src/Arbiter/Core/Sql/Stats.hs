@@ -32,6 +32,7 @@ import Arbiter.Core.Sql.Jobs (claimablePred, jobStatusCaseSQL, unionAllOverQueue
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, rawRows, rows)
 import Arbiter.Core.Sql.RateLimit (refilledBucketTokens)
+import Arbiter.Core.Sql.Workers (workerStaleSQL)
 import Arbiter.Core.SqlLiterals (textLiteral)
 import Arbiter.Core.Worker (arbiterWorkersTable)
 
@@ -192,7 +193,7 @@ allQueueStatsSQL codec schema queueKinds =
             SELECT COUNT(*)::int8 AS workers_live, COUNT(*) FILTER (WHERE paused)::int8 AS workers_paused
             FROM ${workersTbl}
             WHERE queue_name = '${tableName}'
-              AND last_heartbeat >= NOW() - stale_threshold_secs * interval '1 second'
+              AND NOT (${workerStaleSQL})
               AND NOT shutting_down
           ) worker_counts
         |]

@@ -4,7 +4,9 @@
 module Test.Arbiter.Worker.Cron (spec) where
 
 import Arbiter.Core.Job.Types (defaultJob)
+import Data.Either (isLeft, isRight)
 import Data.List (find)
+import Data.Maybe (isJust)
 import Data.Time
   ( UTCTime (..)
   , addUTCTime
@@ -45,21 +47,15 @@ spec = do
   describe "cronJob smart constructor" $ do
     it "accepts a valid 5-field cron expression" $ do
       let result = cronJob "test" "0 3 * * *" SkipOverlap (\_ _ -> defaultJob (SimpleTask "x"))
-      case result of
-        Right _ -> pure ()
-        Left err -> expectationFailure $ "Expected Right, got Left: " <> show err
+      isRight result `shouldBe` True
 
     it "rejects an invalid cron expression" $ do
       let result = cronJob "test" "bad cron" SkipOverlap (\_ _ -> defaultJob (SimpleTask "x"))
-      case result of
-        Left _ -> pure ()
-        Right _ -> expectationFailure "Expected Left (parse error), got Right"
+      isLeft result `shouldBe` True
 
     it "accepts every-minute expression" $ do
       let result = cronJob "test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "x"))
-      case result of
-        Right _ -> pure ()
-        Left err -> expectationFailure $ "Expected Right, got Left: " <> show err
+      isRight result `shouldBe` True
 
   describe "truncateToMinute" $ do
     it "zeroes out seconds" $ do
@@ -104,9 +100,7 @@ spec = do
               "0 3 * * *"
               SkipOverlap
               (\_ _ -> defaultJob (SimpleTask "x"))
-      case result of
-        Left _ -> pure ()
-        Right _ -> expectationFailure "Expected Left for invalid timezone"
+      isLeft result `shouldBe` True
 
     it "cronJobInTimezone accepts a real Olson name and sets the field" $ do
       let result =
@@ -121,12 +115,8 @@ spec = do
         Left err -> expectationFailure $ "Expected Right, got: " <> err
 
     it "resolveTZ knows UTC and Etc/UTC" $ do
-      case resolveTZ "UTC" of
-        Just _ -> pure ()
-        Nothing -> expectationFailure "Expected UTC to resolve"
-      case resolveTZ "Etc/UTC" of
-        Just _ -> pure ()
-        Nothing -> expectationFailure "Expected Etc/UTC to resolve"
+      isJust (resolveTZ "UTC") `shouldBe` True
+      isJust (resolveTZ "Etc/UTC") `shouldBe` True
 
     it "matchesInTimezone with Nothing == scheduleMatches in UTC" $ do
       let Right sched = parseCronSchedule "0 3 * * *"

@@ -40,8 +40,9 @@ import Arbiter.Core.Job.Schema
   , jobQueueGroupsTable
   , jobQueueTable
   , maintenanceFunctionNames
+  , qualifiedTable
   )
-import Arbiter.Core.SqlLiterals (attemptsLeftSQL, quoteIdentifier)
+import Arbiter.Core.SqlLiterals (attemptsLeftSQL, lockGroupKeyOnConflictSQL, quoteIdentifier)
 
 -- | Partial index over @(group_key, priority, id)@, read by the claim's LATERAL
 -- subqueries and by the maintenance triggers recomputing a group's minima.
@@ -122,7 +123,7 @@ migrateGroupsReadyRankingSQL schemaName tableName =
         , "    MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended) AS nd"
         , "  FROM " <> tbl <> " WHERE group_key IS NOT NULL GROUP BY group_key"
         , ") sub WHERE g.group_key = sub.group_key;"
-        , "DROP INDEX IF EXISTS " <> quoteIdentifier schemaName <> "." <> qidx "_groups_ranking" <> ";"
+        , "DROP INDEX IF EXISTS " <> qualifiedTable schemaName ("idx_" <> tableName <> "_groups_ranking") <> ";"
         , "CREATE INDEX IF NOT EXISTS "
             <> qidx "_groups_ranking"
             <> " ON "
@@ -176,11 +177,11 @@ groupsCreateLock groupsTbl keys =
   [text|
     INSERT INTO ${groupsTbl} (group_key)
     SELECT DISTINCT group_key FROM (${keys}) created ORDER BY group_key
-    ON CONFLICT (group_key) DO UPDATE SET group_key = EXCLUDED.group_key WHERE FALSE;
+    ${lockGroupKeyOnConflictSQL};
   |]
 
-groupsInsertFunction :: Text -> Text -> Text -> Text
-groupsInsertFunction funcName groupsTbl dollarQuote =
+groupsInsertFunction :: Text -> Text -> Text
+groupsInsertFunction funcName groupsTbl =
   let mergeSet = groupsMergeSet groupsTbl
       aggs = groupAggregates ""
       lockRows = groupsCreateLock groupsTbl "SELECT group_key FROM new_table WHERE group_key IS NOT NULL"
@@ -227,21 +228,20 @@ groupAggregates col =
 
 -- | Whether a job counts toward its group's ready total. @col@ prefixes each column.
 readyPredicate :: Text -> Text
-readyPredicate col =
-  col
-    <> "not_visible_until IS NULL AND NOT "
-    <> col
-    <> "suspended AND "
-    <> col
-    <> "cancel_requested_at IS NULL AND "
-    <> attemptsLeftSQL col
+readyPredicate = summaryPredicate "IS NULL"
 
 -- | Whether a job's deadline counts toward its group's next due time. @col@ prefixes
 -- each column.
 scheduledPredicate :: Text -> Text
-scheduledPredicate col =
+scheduledPredicate = summaryPredicate "IS NOT NULL"
+
+-- | A live, unsuspended job with attempts left whose @not_visible_until@ passes @visibility@.
+summaryPredicate :: Text -> Text -> Text
+summaryPredicate visibility col =
   col
-    <> "not_visible_until IS NOT NULL AND NOT "
+    <> "not_visible_until "
+    <> visibility
+    <> " AND NOT "
     <> col
     <> "suspended AND "
     <> col
@@ -324,8 +324,8 @@ groupsSnapshotUpdate groupsTbl tbl deltaRows =
   |]
 
 -- | Removed rows leave their group summary.
-groupsDeleteFunction :: Text -> Text -> Text -> Text -> Text
-groupsDeleteFunction funcName groupsTbl tbl dollarQuote =
+groupsDeleteFunction :: Text -> Text -> Text -> Text
+groupsDeleteFunction funcName groupsTbl tbl =
   let ready = readyPredicate ""
       lockRows = groupsLock groupsTbl "SELECT group_key FROM old_table WHERE group_key IS NOT NULL"
       removeUpdate =
@@ -355,8 +355,8 @@ groupsDeleteFunction funcName groupsTbl tbl dollarQuote =
 -- | Updated rows keep their group unless a dedup replace moved them. A moved row
 -- leaves the old summary and merges into the new one. Counts come from the
 -- transition tables. Everything else comes from the snapshot lookups.
-groupsUpdateFunction :: Text -> Text -> Text -> Text -> Text
-groupsUpdateFunction funcName groupsTbl tbl dollarQuote =
+groupsUpdateFunction :: Text -> Text -> Text -> Text
+groupsUpdateFunction funcName groupsTbl tbl =
   let valueChanged = summaryValueChanged
       changed = "n.group_key IS DISTINCT FROM o.group_key OR " <> valueChanged
       readyOld = readyPredicate "o."
@@ -456,17 +456,24 @@ createGroupsTriggerFunctionsSQL :: SchemaName -> TableName -> Text
 createGroupsTriggerFunctionsSQL schemaName tableName =
   let groupsTbl = jobQueueGroupsTable schemaName tableName
       tbl = jobQueueTable schemaName tableName
-      baseName = "maintain_" <> tableName <> "_groups"
+      baseName = groupsTriggerBase tableName
       (funcInsert, funcDelete, funcUpdate) = maintenanceFunctionNames schemaName baseName
-      dollarQuote = "$$"
    in T.unlines
-        [ groupsInsertFunction funcInsert groupsTbl dollarQuote
-        , groupsDeleteFunction funcDelete groupsTbl tbl dollarQuote
-        , groupsUpdateFunction funcUpdate groupsTbl tbl dollarQuote
+        [ groupsInsertFunction funcInsert groupsTbl
+        , groupsDeleteFunction funcDelete groupsTbl tbl
+        , groupsUpdateFunction funcUpdate groupsTbl tbl
         ]
 
 -- | The three statement-level AFTER triggers calling a queue's groups maintenance
 -- functions, each handed its affected rows through a transition table.
 createGroupsTriggersSQL :: SchemaName -> TableName -> Text
 createGroupsTriggersSQL schemaName tableName =
-  createMaintenanceTriggersSQL schemaName (jobQueueTable schemaName tableName) ("maintain_" <> tableName <> "_groups")
+  createMaintenanceTriggersSQL schemaName (jobQueueTable schemaName tableName) (groupsTriggerBase tableName)
+
+-- | Base name of a queue's groups trigger functions and triggers.
+groupsTriggerBase :: TableName -> Text
+groupsTriggerBase tableName = "maintain_" <> tableName <> "_groups"
+
+-- | The plpgsql function-body delimiter.
+dollarQuote :: Text
+dollarQuote = "$$"

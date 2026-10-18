@@ -65,13 +65,12 @@ spec connStr = beforeAll (setupOrvilleTest connStr testSchema testTable 5) $ bef
 
     it "shares transaction with user's database operations" $ \env -> do
       let job = setGroupKey (Just "g1") $ defaultJob (TestMessage "SharedTx")
-      let testDLQJob =
-            setGroupKey (Just "g2") $ defaultJob (TestMessage "TestDLQ")
+      let job2 = setGroupKey (Just "g2") $ defaultJob (TestMessage "SharedTx2")
 
       -- Start transaction with both user operation and job insertion
       runOrvilleTest env $ do
         O.withTransaction $ do
-          _ <- HL.insertJob testDLQJob
+          _ <- HL.insertJob job2
           _ <- HL.insertJob job
           pure ()
 
@@ -79,8 +78,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr testSchema testTable 5) $ bef
       claimed <- runOrvilleTest env (HL.claimNextVisibleJobs 2 60) :: IO [JobRead TestPayload]
       length claimed `shouldBe` 2
 
-      -- Both the DLQ marker and the main job were inserted.
-      map payload claimed `shouldMatchList` [TestMessage "SharedTx", TestMessage "TestDLQ"]
+      map payload claimed `shouldMatchList` [TestMessage "SharedTx", TestMessage "SharedTx2"]
 
     it "rolls back both user operations and job when transaction fails" $ \env -> do
       let job1 = setGroupKey (Just "g1") $ defaultJob (TestMessage "FirstJob")

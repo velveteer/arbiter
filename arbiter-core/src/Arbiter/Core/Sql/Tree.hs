@@ -41,7 +41,6 @@ module Arbiter.Core.Sql.Tree
 import Data.Aeson (Value)
 import Data.Int (Int64)
 import Data.Text (Text)
-import Data.Text qualified as T
 import Data.UUID.Types (UUID)
 
 import Arbiter.Core.Job.Schema
@@ -55,7 +54,7 @@ import Arbiter.Core.Job.Schema
   )
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query)
-import Arbiter.Core.SqlLiterals (textLiteral)
+import Arbiter.Core.SqlLiterals (intLiteral, textLiteral)
 
 -- | Suspend every unsuspended visible job in a parent's subtree, lapsed leases included.
 -- Jobs with a future visibility (delayed, backoff, throttled, leased) are skipped.
@@ -339,7 +338,7 @@ deleteLockedSQL tbl locked =
 selectCancelledReapableJobsSQL :: SchemaName -> TableName -> Int -> Query Int64
 selectCancelledReapableJobsSQL schema tableName limit =
   let tbl = jobQueueTable schema tableName
-      lim = T.pack (show limit)
+      lim = intLiteral limit
    in [sql|
         SELECT @{id :: CInt8}
         FROM ${tbl}

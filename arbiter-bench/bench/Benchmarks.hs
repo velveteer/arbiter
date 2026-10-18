@@ -38,7 +38,7 @@ import Arbiter.Worker
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently_, race, race_)
 import Control.Concurrent.MVar (modifyMVar, newMVar)
-import Control.Exception (finally)
+import Control.Exception (bracket, finally)
 import Control.Monad (replicateM, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Reader (ReaderT, runReaderT)
@@ -738,18 +738,20 @@ countProcessedN counter delta = liftIO $ atomicModifyIORef' counter (\count -> (
 
 -- Setup
 
+-- | Run an action on a fresh connection that is closed afterwards.
+withBenchConn :: (Connection -> IO a) -> IO a
+withBenchConn = bracket (connectPostgreSQL benchConnStr) close
+
 execute_ :: Connection -> Text -> IO ()
 execute_ conn sql = void $ execute conn (fromString (T.unpack sql) :: Query) ()
 
 setupSchema :: IO ()
-setupSchema = do
-  conn <- connectPostgreSQL benchConnStr
+setupSchema = withBenchConn $ \conn -> do
   execute_ conn $ "DROP SCHEMA IF EXISTS " <> benchSchema <> " CASCADE"
   res <- runMigrationsForRegistry (Proxy @BenchRegistry) benchConnStr benchSchema defaultMigrationConfig
   case res of
     MigrationSuccess -> pure ()
     MigrationError err -> die $ "Migration failed: " <> err
-  close conn
 
 cleanupData :: Connection -> IO ()
 cleanupData conn = do
@@ -760,21 +762,16 @@ cleanupData conn = do
 
 -- | Truncate on a fresh connection that is closed afterwards.
 cleanupFresh :: IO ()
-cleanupFresh = do
-  conn <- connectPostgreSQL benchConnStr
-  cleanupData conn
-  close conn
+cleanupFresh = withBenchConn cleanupData
 
 -- | Settle the database before a measurement group. Clears the dead-tuple debt
 -- earlier suites left behind and flushes checkpoint work.
 quietBenchDb :: IO ()
-quietBenchDb = do
-  conn <- connectPostgreSQL benchConnStr
+quietBenchDb = withBenchConn $ \conn -> do
   execute_ conn "SET client_min_messages = WARNING"
   tables <- PG.query conn "SELECT tablename FROM pg_tables WHERE schemaname = ?" (Only benchSchema)
   traverse_ (\(Only table) -> execute_ conn ("VACUUM ANALYZE " <> benchSchema <> "." <> table)) (tables :: [Only Text])
   execute_ conn "CHECKPOINT"
-  close conn
 
 -- | Defer an action to the first time the returned trigger runs, then reuse its result.
 once :: IO a -> IO (IO a)
@@ -786,8 +783,7 @@ once action = do
 
 -- | Truncate a gated queue's tables and the shared bucket/count tables.
 cleanupGatedFresh :: Text -> IO ()
-cleanupGatedFresh table = do
-  conn <- connectPostgreSQL benchConnStr
+cleanupGatedFresh table = withBenchConn $ \conn -> do
   execute_ conn "SET client_min_messages = WARNING"
   execute_ conn $
     "TRUNCATE "
@@ -803,7 +799,6 @@ cleanupGatedFresh table = do
       <> ".arbiter_rate_limits, "
       <> benchSchema
       <> ".arbiter_concurrency CASCADE"
-  close conn
 
 -- | WAL plus churn on the shared count and bucket tables over one window.
 data GatedResult = GatedResult
@@ -974,8 +969,7 @@ gatingBenches settle trial =
               (trial benchMode pools table mkJob trialDurationUs)
 
 setupQueue :: SimpleEnv BenchRegistry -> Int -> QueueFlavor -> IO ()
-setupQueue simpleEnv totalJobs flavor = do
-  conn <- connectPostgreSQL benchConnStr
+setupQueue simpleEnv totalJobs flavor = withBenchConn $ \conn -> do
   cleanupData conn
   now <- getCurrentTime
 
@@ -994,7 +988,6 @@ setupQueue simpleEnv totalJobs flavor = do
 
   execute_ conn ("ANALYZE " <> benchSchema <> ".bench_queue")
   execute_ conn ("ANALYZE " <> benchSchema <> ".bench_queue_groups")
-  close conn
 
 -- Benchmark suites
 

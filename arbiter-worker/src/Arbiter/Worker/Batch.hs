@@ -318,7 +318,9 @@ runBatch effects guard mode handoff jobs = do
   effectSpan effects $ \inherit -> (`catch` onForceCancel) $ do
     result <-
       trySync $
-        guardBatch guard (Batch jobs (pendingJobs handoff jobs) startTime inherit) $ do
+        guardBatch
+          guard
+          Batch {batchJobs = jobs, batchPending = pendingJobs handoff jobs, batchStart = startTime, batchInherit = inherit} $ do
           traverse_ (reportClaimed run) jobs
           case mode of
             -- The commit stays interruptible. The transaction contains the handler.

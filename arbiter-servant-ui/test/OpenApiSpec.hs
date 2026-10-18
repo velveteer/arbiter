@@ -1,4 +1,3 @@
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- Pins the dashboard's OpenAPI document. Regenerate with --accept, then npm run types.

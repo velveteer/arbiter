@@ -167,7 +167,14 @@ issue guard woke leased due = do
   atomically $ do
     writeTVar
       (guardInFlight guard)
-      (Just (InFlight issued (addTime bound issued) (Set.fromList (map guardedToken due)) False))
+      ( Just
+          InFlight
+            { issuedAt = issued
+            , givesUp = addTime bound issued
+            , carries = Set.fromList (map guardedToken due)
+            , landed = False
+            }
+      )
     traverse_ (\entry -> modifyTVar' (guardedStatus entry) (\status -> status {recheckAsked = False})) due
   void . forkIO $ (extend guard issued bound due `finally` finish guard issued) >>= traverse_ (report guard due)
   where

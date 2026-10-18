@@ -1,4 +1,3 @@
-{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
@@ -37,6 +36,7 @@ import GHC.TypeLits (KnownSymbol)
 import Test.Hspec
 import UnliftIO.Async (mapConcurrently, replicateConcurrently_, withAsync)
 
+import Arbiter.Test.Poll (bumpRef)
 import Arbiter.Test.StateMachine (holViolations, installHolDetector, removeHolDetector)
 
 -- | Claim and ack jobs in a loop until no more are available.
@@ -296,7 +296,7 @@ concurrencySpec mkMessage runM = do
         -- insert trigger holds the groups row lock.
         let totalClaimed = sum (map length results)
         when (totalClaimed > 1) $
-          atomicModifyIORef' violationRef (\count -> (count + 1, ()))
+          bumpRef violationRef
 
         -- Ack the racy claims, then drain the rest, recording every processed id.
         let record job = atomicModifyIORef' processedRef (\acc -> (Set.insert (primaryKey job) acc, ()))

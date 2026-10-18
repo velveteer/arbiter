@@ -24,6 +24,7 @@ import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueGroupsTable, jobQ
 import Arbiter.Core.Job.Schema.Groups (groupAggregates, inFlightPredicate)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query)
+import Arbiter.Core.SqlLiterals (lockGroupKeyOnConflictSQL)
 
 -- | A @group_locks@ CTE over the group rows of the @deleted@ and @updated@ CTEs, in key
 -- order, taken only when an @updated@ CTE changed a row. The DELETE trigger and the
@@ -47,7 +48,7 @@ settleGroupLocksCte schema tableName deleted updated =
 lockGroupKeysSQL :: SchemaName -> TableName -> [Text] -> Query ()
 lockGroupKeysSQL schema tableName keys =
   let groupsTbl = jobQueueGroupsTable schema tableName
-   in [sql|INSERT INTO ${groupsTbl} (group_key) SELECT DISTINCT unnest(#{keys :: [CText]}::text[]) AS group_key ORDER BY group_key ON CONFLICT (group_key) DO UPDATE SET group_key = EXCLUDED.group_key WHERE FALSE|]
+   in [sql|INSERT INTO ${groupsTbl} (group_key) SELECT DISTINCT unnest(#{keys :: [CText]}::text[]) AS group_key ORDER BY group_key ${lockGroupKeyOnConflictSQL}|]
 
 -- | At most @limit@ group keys past @cursor@, in the database's key order, unlocked.
 -- Its last key is the caller's resume cursor.

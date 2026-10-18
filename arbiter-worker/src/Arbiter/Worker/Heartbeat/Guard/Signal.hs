@@ -80,7 +80,14 @@ guardBatch guard batch action =
             }
       atomically $ do
         token <- stateTVar (guardNextToken guard) (\next -> (next, next + 1))
-        let entry = Guarded token batch handler deadline status
+        let entry =
+              Guarded
+                { guardedToken = token
+                , guardedBatch = batch
+                , guardedHandler = handler
+                , guardedDeadline = deadline
+                , guardedStatus = status
+                }
         modifyTVar' (guardEntries guard) (Map.insert token entry)
         wakeFor guard (minimum (leaseUntil : firstBeat : maybeToList deadline))
         pure entry

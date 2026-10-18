@@ -53,7 +53,6 @@ runNotificationConsumer readState pollDelay notifVar wakeTrigger action = do
             consumeNotification
               `STM.orElse` timerExpired delayVar
               `STM.orElse` (TimerExpired <$ wakeTrigger)
-              `STM.orElse` watchStateChange
 
     awaitUnpause =
       STM.atomically $ do
@@ -74,13 +73,6 @@ runNotificationConsumer readState pollDelay notifVar wakeTrigger action = do
     timerExpired delayVar = do
       isExpired <- STM.readTVar delayVar
       if isExpired then pure TimerExpired else STM.retrySTM
-
-    watchStateChange = do
-      state <- readState
-      case state of
-        ShuttingDown -> pure Halt
-        Paused -> pure PauseCmd
-        Running -> STM.retrySTM
 
 data Command
   = Halt

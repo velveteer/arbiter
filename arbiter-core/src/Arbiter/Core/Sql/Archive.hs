@@ -14,13 +14,11 @@ module Arbiter.Core.Sql.Archive
   , countArchiveFilteredSQL
   , deleteArchiveJobsBatchSQL
   , reEnqueueFromArchiveSQL
-  , allArchiveColumns
   ) where
 
 import Data.Aeson (Value)
 import Data.Int (Int64)
 import Data.Text (Text)
-import Data.Text qualified as T
 import Data.Time (UTCTime)
 import NeatInterpolation (text)
 
@@ -31,6 +29,7 @@ import Arbiter.Core.Sql.Insert (RowEdit (..), editJoin)
 import Arbiter.Core.Sql.Jobs (enqueuedAgainCols, enqueuedAgainValsEditing, jobColsExceptId, jobColumns)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, rows)
+import Arbiter.Core.SqlLiterals (intLiteral)
 
 -- | The archive read columns, in codec order. The archive uses @job_id@ for the
 -- main-table @id@.
@@ -80,7 +79,7 @@ archivePurgeBatch = 10000
 purgeArchiveSQL :: SchemaName -> TableName -> Text
 purgeArchiveSQL schema tableName =
   let archiveTbl = jobQueueArchiveTable schema tableName
-      lim = T.pack (show archivePurgeBatch)
+      lim = intLiteral archivePurgeBatch
    in [text|
         DELETE FROM ${archiveTbl}
         WHERE ctid IN (

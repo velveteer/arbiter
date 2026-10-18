@@ -136,11 +136,10 @@ smartAckJobsBatchSQL archiveEnabled schema tableName =
 setVisibilityTimeoutSQL :: SchemaName -> TableName -> Double -> Int64 -> Int64 -> Query ()
 setVisibilityTimeoutSQL schema tableName secs jobId cseq =
   let tbl = jobQueueTable schema tableName
+      leaseUntil = leaseDeadline secs
    in [sql|
         UPDATE ${tbl}
-        SET not_visible_until = CASE WHEN #{secs :: CFloat8}::double precision <= 0
-                                     THEN NULL
-                                     ELSE NOW() + (#{secs :: CFloat8}::double precision * interval '1 second') END,
+        SET not_visible_until = ${leaseUntil},
             updated_at = NOW()
         WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8} AND NOT suspended
       |]
@@ -156,6 +155,7 @@ setVisibilityTimeoutBatchSQL :: SchemaName -> TableName -> Query () -> [Int64] -
 setVisibilityTimeoutBatchSQL schema tableName valuesFrag ids secs =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
+      leaseUntil = leaseDeadline secs
    in [sql|
         WITH input_jobs AS (
           SELECT input_values.id::bigint AS id,
@@ -188,9 +188,7 @@ setVisibilityTimeoutBatchSQL schema tableName valuesFrag ids secs =
         ),
         updated AS (
           UPDATE ${tbl} job
-          SET not_visible_until = CASE WHEN #{secs :: CFloat8}::double precision <= 0
-                                       THEN NULL
-                                       ELSE NOW() + (#{secs :: CFloat8}::double precision * interval '1 second') END,
+          SET not_visible_until = ${leaseUntil},
               updated_at = NOW()
           FROM input_jobs input_job
           WHERE job.id = input_job.id AND job.id IN (SELECT id FROM locked)
@@ -295,3 +293,8 @@ rescheduleJobSQL schema tableName jobId runAt =
           AND cancel_requested_at IS NULL
           AND ${attemptsLeft}
       |]
+
+-- | The lease deadline @secs@ from now, or NULL when @secs@ is at or below 0.
+leaseDeadline :: Double -> Query ()
+leaseDeadline secs =
+  [sql|CASE WHEN #{secs :: CFloat8}::double precision <= 0 THEN NULL ELSE NOW() + (#{secs :: CFloat8}::double precision * interval '1 second') END|]

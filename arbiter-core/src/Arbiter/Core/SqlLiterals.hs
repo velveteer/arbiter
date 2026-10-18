@@ -12,6 +12,9 @@ module Arbiter.Core.SqlLiterals
   , defaultMaxAttemptsSQL
   , attemptsLeftSQL
   , minMaxAttemptsSQL
+  , maxIdentifierBytes
+  , sharedTable
+  , lockGroupKeyOnConflictSQL
   ) where
 
 import Data.Text (Text)
@@ -39,7 +42,7 @@ intLiteral value = T.pack (show (toInteger value))
 
 -- | 'defaultMaxAttempts' as a SQL literal.
 defaultMaxAttemptsSQL :: Text
-defaultMaxAttemptsSQL = T.pack (show defaultMaxAttempts)
+defaultMaxAttemptsSQL = intLiteral defaultMaxAttempts
 
 -- | Whether a row has attempts left. @col@ prefixes each column.
 attemptsLeftSQL :: Text -> Text
@@ -47,4 +50,17 @@ attemptsLeftSQL col = col <> "attempts < COALESCE(" <> col <> "max_attempts, " <
 
 -- | 'minMaxAttempts' as a SQL literal.
 minMaxAttemptsSQL :: Text
-minMaxAttemptsSQL = T.pack (show minMaxAttempts)
+minMaxAttemptsSQL = intLiteral minMaxAttempts
+
+-- | The PostgreSQL identifier limit in bytes (@NAMEDATALEN - 1@).
+maxIdentifierBytes :: Int
+maxIdentifierBytes = 63
+
+-- | A schema-qualified shared table. The table name stays unquoted.
+sharedTable :: Text -> Text -> Text
+sharedTable schemaName tableName = quoteIdentifier schemaName <> "." <> tableName
+
+-- | An ON CONFLICT clause that row-locks an existing group key and writes nothing.
+-- @DO UPDATE@ takes the lock. @WHERE FALSE@ skips the write.
+lockGroupKeyOnConflictSQL :: Text
+lockGroupKeyOnConflictSQL = "ON CONFLICT (group_key) DO UPDATE SET group_key = EXCLUDED.group_key WHERE FALSE"

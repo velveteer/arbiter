@@ -46,7 +46,7 @@ import GHC.Generics (Generic)
 
 import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.Json (explicitOptionalField, patchOptions)
-import Arbiter.Core.SqlLiterals (quoteIdentifier)
+import Arbiter.Core.SqlLiterals (sharedTable)
 
 -- | A row from the @cron_schedules@ table.
 data CronScheduleRow = CronScheduleRow
@@ -132,7 +132,7 @@ instance FromJSON CronScheduleUpdate where
 
 -- | Qualified table name for the @cron_schedules@ table.
 cronSchedulesTable :: SchemaName -> Text
-cronSchedulesTable schemaName = quoteIdentifier schemaName <> "." <> cronSchedulesTableName
+cronSchedulesTable schemaName = sharedTable schemaName cronSchedulesTableName
 
 -- | Bare name of the cron table, for catalog lookups by relname.
 cronSchedulesTableName :: Text

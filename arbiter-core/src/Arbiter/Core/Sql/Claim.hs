@@ -26,7 +26,7 @@ import Arbiter.Core.Sql.Jobs (claimablePred, jobColumns)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen)
 import Arbiter.Core.Sql.RateLimit (defaultThrottleWaitSeconds, refilledExpr)
-import Arbiter.Core.SqlLiterals (attemptsLeftSQL)
+import Arbiter.Core.SqlLiterals (attemptsLeftSQL, doubleLiteral, intLiteral)
 
 -- | Which admission filters the claim SQL renders. A payload type that declares
 -- no policy of a kind gets no filter for it.
@@ -467,7 +467,7 @@ judgedCte admission rlPolicies concJoin rlJoin =
 -- this claim does not hold stays visible for a later cycle.
 rlSpendCtes :: ClaimAdmission -> Text -> Text
 rlSpendCtes admission buckets =
-  let fallback = T.pack (show defaultThrottleWaitSeconds)
+  let fallback = doubleLiteral defaultThrottleWaitSeconds
       admit = admitExpr admission
       deferGuard = mwhen (admitConcurrent admission) " AND (claimed_by IS NULL OR concurrency_key IS NULL OR pool_held)"
       -- Time to accrue the token deficit when the policy refills, else one
@@ -600,6 +600,10 @@ claimedCte admission tbl timeout claimant
     decisionIds = idsIn "job" "decision"
     admittedIds = idsIn "job" "admitted"
 
+-- | Group candidates fetched per batch of budget, ahead of the admission filters.
+groupOverfetchFactor :: Int
+groupOverfetchFactor = 10
+
 -- | The single-CTE batched claim, which at batch size 1 is the single-job claim. Takes
 -- any unsuspended, uncancelled, visible job within its attempt budget, rollup children
 -- and woken rollup parents included. Each gate's CTEs render from the 'ClaimAdmission' flags.
@@ -612,11 +616,11 @@ claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSecon
       concTbl = arbiterConcurrencyTable schema
       concPolicies = arbiterConcurrencyPoliciesTable schema
       rlPolicies = arbiterRateLimitPoliciesTable schema
-      batchLimit = T.pack (show batchSize)
-      batchBudget = T.pack (show maxBatches)
-      timeout = T.pack (show (realToFrac timeoutSeconds :: Double))
-      ungroupedLimit = T.pack (show (maxBatches * batchSize))
-      overfetch = T.pack (show (maxBatches * 10))
+      batchLimit = intLiteral batchSize
+      batchBudget = intLiteral maxBatches
+      timeout = doubleLiteral (realToFrac timeoutSeconds)
+      ungroupedLimit = intLiteral (maxBatches * batchSize)
+      overfetch = intLiteral (maxBatches * groupOverfetchFactor)
       hasRateLimit = admitRateLimited admission
       hasConcurrency = admitConcurrent admission
       jobHeadroom = concHeadroomPred concTbl concPolicies "job"

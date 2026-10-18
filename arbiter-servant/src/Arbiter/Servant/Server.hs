@@ -1,8 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 -- | REST API server for the Arbiter job queue, over any 'MonadArbiter' backend.
@@ -43,7 +41,12 @@ import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
 import Arbiter.Core.Sql.Jobs (ArchiveSortColumn, DLQSortColumn, JobFilter (..), JobSortColumn, SortDir)
 import Arbiter.Core.Trace (withPublishSpan)
 import Arbiter.Worker (MaintenancePace (..), runMaintenancePass, storeEncodedResult)
-import Arbiter.Worker.Config (maintenanceOpName)
+import Arbiter.Worker.Config
+  ( defaultMaintenanceBucketIdle
+  , defaultMaintenanceSparseInterval
+  , defaultMaintenanceTimeout
+  , maintenanceOpName
+  )
 import Arbiter.Worker.Cron (nextRunFromExpression, updateCronScheduleChecked)
 import Arbiter.Worker.Logger
   ( FailureGates
@@ -80,7 +83,7 @@ import Data.Int (Int64)
 import Data.Kind (Type)
 import Data.List (genericLength)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Ord (clamp)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -398,12 +401,9 @@ getJobHandler
   -> ArbiterServerConfig m registry
   -> Int64
   -> Handler (JobResponse (ApiJobWithStatus (Job.Stored payload)))
-getJobHandler tableName config jobId = do
-  let schemaName = serverSchema config
-  mJob <- runDb config $ Ops.getJobByIdWithStatus schemaName tableName jobId
-  case mJob of
-    Nothing -> throwError err404 {errBody = jobNotFound}
-    Just (found, jobStatus) -> pure $ JobResponse {job = ApiJobWithStatus found jobStatus}
+getJobHandler tableName config jobId =
+  (\(found, jobStatus) -> JobResponse {job = ApiJobWithStatus found jobStatus})
+    <$> orNotFound config (Ops.getJobByIdWithStatus (serverSchema config) tableName jobId) jobNotFound
 
 -- | Cancel a job (delete it from the queue).
 cancelJobHandler
@@ -689,12 +689,8 @@ reEnqueueArchiveHandler
 reEnqueueArchiveHandler tableName config archiveId edit = do
   let schemaName = serverSchema config
       reEnqueue = Ops.reEnqueueFromArchiveWithPayload schemaName tableName archiveId (editPayload <$> edit)
-  mJob <-
-    runDb config $
-      withDbTransaction (reEnqueue >>= traverse (Ops.typedRow @payload))
-  case mJob of
-    Just _ -> pure NoContent
-    Nothing -> throwError err404 {errBody = "Archived job not found"}
+  NoContent
+    <$ orNotFound config (withDbTransaction (reEnqueue >>= traverse (Ops.typedRow @payload))) "Archived job not found"
 
 -- | Purge one archived job by its archive primary key.
 deleteArchiveHandler
@@ -1236,19 +1232,6 @@ defaultStatsCacheTtl = 0
 defaultMaintenanceInterval :: NominalDiffTime
 defaultMaintenanceInterval = 0
 
--- | Gap the bucket prune and the concurrency reconcile-and-prune keep, matching
--- a worker pool's reaper.
-defaultMaintenanceSparseInterval :: NominalDiffTime
-defaultMaintenanceSparseInterval = 3600
-
--- | Bucket idle age, matching a worker pool's reaper.
-defaultMaintenanceBucketIdle :: NominalDiffTime
-defaultMaintenanceBucketIdle = 300
-
--- | Statement timeout for one maintenance operation.
-defaultMaintenanceTimeout :: NominalDiffTime
-defaultMaintenanceTimeout = 300
-
 -- | Keyed TTL cache. 'createArbiterServer' creates each cell.
 data CacheCell a = CacheCell
   { cacheEntries :: TVar (Word, Map.Map Text (UTCTime, a))
@@ -1318,19 +1301,31 @@ listRateLimitBucketsHandler
   -> Maybe KeyPageLimit
   -> Maybe Int
   -> Handler RateLimitBucketsResponse
-listRateLimitBucketsHandler config prefix mLimit mOffset = do
-  let (limit, offset) = validatePagination mLimit mOffset
-  rows <- runDb config (HL.listRateLimitBuckets prefix limit offset)
-  pure Items {items = rows}
+listRateLimitBucketsHandler config prefix = keyPage config (HL.listRateLimitBuckets prefix)
 
-updateThenView
+-- | Read one page of keys at a limit and offset.
+keyPage
+  :: ArbiterServerConfig m registry
+  -> (Int -> Int -> m [a])
+  -> Maybe KeyPageLimit
+  -> Maybe Int
+  -> Handler (Items a)
+keyPage config page mLimit mOffset =
+  let (limit, offset) = validatePagination mLimit mOffset
+   in (\rows -> Items {items = rows}) <$> runDb config (page limit offset)
+
+-- | Run an action. 'Nothing' is a 404 with the given body.
+orNotFound
   :: ArbiterServerConfig m registry
   -> m (Maybe a)
   -> LBS.ByteString
   -> Handler a
-updateThenView config action notFound = do
-  mView <- runDb config action
-  maybe (throwError err404 {errBody = notFound}) pure mView
+orNotFound config action notFound =
+  runDb config action >>= maybe (throwError err404 {errBody = notFound}) pure
+
+-- | 404 body for a rate-limit prefix that matches no policy.
+rateLimitPolicyNotFound :: LBS.ByteString
+rateLimitPolicyNotFound = "Rate-limit policy not found"
 
 -- | Set or clear a policy's override params, then return the updated view.
 updateRateLimitPolicyHandler
@@ -1348,11 +1343,9 @@ updateRateLimitPolicyHandler config prefix upd@(RateLimitPolicyUpdate mMax mRefi
         | otherwise = Nothing
   traverse_ (\msg -> throwError err400 {errBody = msg}) invalid
   -- An all-absent patch reads the view without rewriting the row.
-  let update = case (mMax, mRefill, mInterval) of
-        (Nothing, Nothing, Nothing) -> pure ()
-        _ -> void $ HL.updateRateLimitPolicyOverrides prefix upd
+  let update = when (any isJust [mMax, mRefill, mInterval]) (void (HL.updateRateLimitPolicyOverrides prefix upd))
   invalidating (rateLimitPoliciesCache config) $
-    updateThenView config (update >> HL.getRateLimitPolicy prefix) "Rate-limit policy not found"
+    orNotFound config (update >> HL.getRateLimitPolicy prefix) rateLimitPolicyNotFound
 
 -- | Refill every bucket for a prefix to full. Returns the number reset. 404s an unknown prefix.
 resetRateLimitBucketsHandler
@@ -1364,7 +1357,7 @@ resetRateLimitBucketsHandler
 resetRateLimitBucketsHandler config prefix =
   invalidating (rateLimitPoliciesCache config) $
     RateLimitResetResponse
-      <$> updateThenView config (onRateLimitPolicy prefix (HL.resetRateLimitBuckets prefix)) "Rate-limit policy not found"
+      <$> orNotFound config (onRateLimitPolicy prefix (HL.resetRateLimitBuckets prefix)) rateLimitPolicyNotFound
 
 -- | Run an action for a rate-limit policy. 'Nothing' for an unknown prefix.
 onRateLimitPolicy :: (MonadArbiter m) => Text -> m a -> m (Maybe a)
@@ -1390,7 +1383,7 @@ addRateLimitTokensHandler config prefix key request = do
       (T.stripPrefix (prefix <> ":") key)
   let grant = HL.addRateLimitTokens RateLimitKey {rlkPrefix = prefix, rlkSuffix = suffix} (addedTokens request)
   invalidating (rateLimitPoliciesCache config) $
-    AddTokensResponse <$> updateThenView config (onRateLimitPolicy prefix grant) "Rate-limit policy not found"
+    AddTokensResponse <$> orNotFound config (onRateLimitPolicy prefix grant) rateLimitPolicyNotFound
 
 -- | Delete full buckets idle for @idle@ seconds, the maintenance idle age by default.
 pruneRateLimitBucketsHandler
@@ -1440,10 +1433,7 @@ listConcurrencyKeysHandler
   -> Maybe KeyPageLimit
   -> Maybe Int
   -> Handler ConcurrencyKeysResponse
-listConcurrencyKeysHandler config prefix mLimit mOffset = do
-  let (limit, offset) = validatePagination mLimit mOffset
-  rows <- runDb config (HL.listConcurrencyKeys prefix limit offset)
-  pure Items {items = rows}
+listConcurrencyKeysHandler config prefix = keyPage config (HL.listConcurrencyKeys prefix)
 
 -- | Set or clear a concurrency policy's override limit, then return the updated view.
 updateConcurrencyPolicyHandler
@@ -1456,11 +1446,9 @@ updateConcurrencyPolicyHandler
 updateConcurrencyPolicyHandler config prefix upd@(ConcurrencyPolicyUpdate mLimit) = do
   when (any (< 0) (join mLimit)) $ throwError err400 {errBody = "override limit must be >= 0"}
   -- An absent overrideLimit reads the view without rewriting the row.
-  let action = case mLimit of
-        Nothing -> HL.getConcurrencyPolicy prefix
-        Just _ -> HL.updateConcurrencyPolicyOverrides prefix upd >> HL.getConcurrencyPolicy prefix
+  let action = traverse_ (\_ -> HL.updateConcurrencyPolicyOverrides prefix upd) mLimit >> HL.getConcurrencyPolicy prefix
   invalidating (concurrencyPoliciesCache config) $
-    updateThenView config action "Concurrency policy not found"
+    orNotFound config action "Concurrency policy not found"
 
 -- | Recompute every key's in-flight count from live jobs. Returns rows repaired.
 reconcileConcurrencyHandler

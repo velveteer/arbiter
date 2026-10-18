@@ -6,8 +6,7 @@
 --
 -- Queues SQL templates.
 module Arbiter.Core.Sql.Queues
-  ( queueColumnList
-  , ensureQueueSQL
+  ( ensureQueueSQL
   , setQueuePausedSQL
   , getQueueSQL
   , listQueuesSQL
@@ -21,7 +20,7 @@ import Arbiter.Core.Job.Schema (SchemaName, pauseNotifyChannelPrefix)
 import Arbiter.Core.Queues (QueueRow, arbiterQueuesTable)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, rows)
-import Arbiter.Core.SqlLiterals (textLiteral)
+import Arbiter.Core.SqlLiterals (intLiteral, maxIdentifierBytes, textLiteral)
 import Arbiter.Core.Worker (arbiterWorkersTable)
 
 -- | The @arbiter_queues@ read columns, in codec order.
@@ -44,6 +43,7 @@ setQueuePausedSQL schemaName queue paused =
   let tbl = arbiterQueuesTable schemaName
       workersTbl = arbiterWorkersTable schemaName
       chanPrefix = textLiteral (pauseNotifyChannelPrefix schemaName)
+      maxIdent = intLiteral maxIdentifierBytes
    in [sql|
         WITH upsert AS (
           INSERT INTO ${tbl} (queue_name, paused, paused_at)
@@ -61,7 +61,7 @@ setQueuePausedSQL schemaName queue paused =
         ),
         notif AS (
           SELECT pg_notify(
-            LEFT(${chanPrefix} || worker.queue_name, 63),
+            LEFT(${chanPrefix} || worker.queue_name, ${maxIdent}),
             json_build_object(
               'worker_id', worker.worker_id,
               'paused', worker.paused OR upserted.paused

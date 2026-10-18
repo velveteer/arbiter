@@ -1,7 +1,5 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE UndecidableInstances #-}
 
 -- | Naming, sizing, and coordinated lifecycle for multiple worker pools.
 module Arbiter.Worker.MultiQueue
@@ -39,13 +37,11 @@ import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.Config
   ( WorkerConfig (..)
-  , WorkerConfigException (..)
-  , validateWorkerConfig
   , workerStateVar
   )
 import Arbiter.Worker.EnabledQueues (getEnabledQueues, requestedQueues)
 import Arbiter.Worker.Logger (LogConfig (..), (.=))
-import Arbiter.Worker.Pool (runWorkerPool)
+import Arbiter.Worker.Pool (runWorkerPool, throwIfInvalid)
 import Arbiter.Worker.WorkerState (WorkerState (ShuttingDown))
 
 -- | A requested queue has no configured pool, or selection is empty.
@@ -78,7 +74,7 @@ namedWorkerPool
      )
   => WorkerConfig m payload
   -> NamedWorkerPool m
-namedWorkerPool cfg = NamedWorkerPool (Arb.queueTable @payload @m) cfg
+namedWorkerPool cfg = NamedWorkerPool {workerPoolName = Arb.queueTable @payload @m, workerPoolConfig = cfg}
 
 -- | Run the pools selected by @ARBITER_ENABLED_QUEUES@, or every configured
 -- pool when it is unset or blank. Throws 'Arbiter.Core.Exceptions.InternalException'
@@ -149,7 +145,7 @@ listenerConnections = 1
 
 -- | A single-stripe connection pool sized at twice the enabled pools' thread count plus one
 -- for the listener, with a minimum size of three. Unset or blank
--- @ARBITER_ENABLED_QUEUES@ enables all queues. Throws 'WorkerConfigException' for an
+-- @ARBITER_ENABLED_QUEUES@ enables all queues. Throws 'Arbiter.Worker.Config.WorkerConfigException' for an
 -- invalid enabled pool config, and 'Arbiter.Core.Exceptions.InternalException' when
 -- @ARBITER_ENABLED_QUEUES@ has an unknown name or names no queues.
 poolConfigForWorkers
@@ -167,4 +163,4 @@ poolConfigForWorkers pools = do
     validateSelected :: [Text] -> NamedWorkerPool m -> IO ()
     validateSelected enabled (NamedWorkerPool name cfg)
       | name `notElem` enabled = pure ()
-      | otherwise = either (E.throwIO . WorkerConfigException) pure (validateWorkerConfig cfg)
+      | otherwise = throwIfInvalid cfg

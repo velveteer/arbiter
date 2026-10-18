@@ -1,4 +1,3 @@
-{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 
@@ -7,12 +6,11 @@
 module Test.Arbiter.Orville.Listener (listenerSpec, multiQueueSpec) where
 
 import Arbiter.Core.QueueRegistry (Queue)
+import Arbiter.Test.Fixtures (QueueAPayload (..), QueueBPayload (..), WorkerTestPayload)
 import Arbiter.Test.Setup (addQueueTable, cleanupOnce, setupOnce)
 import Arbiter.Worker.TestKit qualified as TestKit
-import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
 import Data.Text (Text, pack)
-import GHC.Generics (Generic)
 import Test.Hspec (Spec, beforeAll)
 
 import Test.Arbiter.Orville.TestHelpers
@@ -21,15 +19,16 @@ import Test.Arbiter.Orville.TestHelpers
   , createOrvilleTestEnv
   , destroyOrvilleTestEnv
   , disableOrvilleListener
+  , orvillePoolSize
   , orvilleTestHandler
   , runOrvilleTest
   )
-import Test.Arbiter.Orville.Worker (OrvilleWorkerTestPayload, withOrvilleBackend)
+import Test.Arbiter.Orville.Worker (withOrvilleBackend)
 
 listenSchema :: Text
 listenSchema = "arbiter_orville_listen_test"
 
-type OrvilleListenRegistry = '[Queue "arbiter_orville_listen_test" OrvilleWorkerTestPayload]
+type OrvilleListenRegistry = '[Queue "arbiter_orville_listen_test" WorkerTestPayload]
 
 listenerSpec :: ByteString -> Spec
 listenerSpec connStr = withOrvilleBackend @OrvilleListenRegistry connStr listenSchema TestKit.listenerSpec
@@ -43,32 +42,24 @@ mqTableA = "mqo_listen_a"
 mqTableB :: Text
 mqTableB = "mqo_listen_b"
 
-newtype MqAPayload = MqAPayload Text
-  deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
-
-newtype MqBPayload = MqBPayload Text
-  deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
-
 type OrvilleMultiQRegistry =
-  '[ Queue "mqo_listen_a" MqAPayload
-   , Queue "mqo_listen_b" MqBPayload
+  '[ Queue "mqo_listen_a" QueueAPayload
+   , Queue "mqo_listen_b" QueueBPayload
    ]
 
 multiQueueSpec :: ByteString -> Spec
 multiQueueSpec connStr =
   beforeAll (setupOnce connStr mqSchema mqTableA True >> addQueueTable connStr mqSchema mqTableB True) $
-    TestKit.multiQueueListenerSpec backend mqTableB MqBPayload (orvilleTestHandler mqSchema)
+    TestKit.multiQueueListenerSpec backend mqTableB QueueBPayload (orvilleTestHandler mqSchema)
   where
-    backend :: TestKit.TestBackend MqAPayload (TestOrville OrvilleMultiQRegistry) (OrvilleTestEnv OrvilleMultiQRegistry)
+    backend :: TestKit.TestBackend QueueAPayload (TestOrville OrvilleMultiQRegistry) (OrvilleTestEnv OrvilleMultiQRegistry)
     backend =
       TestKit.TestBackend
         { schema = mqSchema
         , table = mqTableA
         , connStr
-        , mkSimple = MqAPayload
-        , mkFailing = MqAPayload . pack . show
+        , mkSimple = QueueAPayload
+        , mkFailing = QueueAPayload . pack . show
         , mkEnv = freshEnv
         , pollOnly = disableOrvilleListener
         , mkFreshEnv = freshEnv
@@ -80,4 +71,4 @@ multiQueueSpec connStr =
     freshEnv = do
       cleanupOnce connStr mqSchema mqTableA
       cleanupOnce connStr mqSchema mqTableB
-      createOrvilleTestEnv connStr mqSchema mqTableA 10
+      createOrvilleTestEnv connStr mqSchema mqTableA orvillePoolSize

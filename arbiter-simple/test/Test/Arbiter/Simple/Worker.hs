@@ -1,5 +1,3 @@
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 
@@ -18,8 +16,8 @@ import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (defaultJob, setGroupKey)
 import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
-import Arbiter.Test.Fixtures (WorkerTestPayload (..))
-import Arbiter.Test.Poll (waitUntil, withLinkedAsync)
+import Arbiter.Test.Fixtures (QueueAPayload (..), QueueBPayload (..), WorkerTestPayload (..))
+import Arbiter.Test.Poll (bumpRef, waitUntil, withLinkedAsync)
 import Arbiter.Test.Setup (addQueueTable, cleanupData, cleanupOnce, createPoolOf, createSharedPool, setupOnce)
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
@@ -28,14 +26,12 @@ import Arbiter.Worker.TestKit qualified as TestKit
 import Control.Concurrent (threadDelay)
 import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
-import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (newIORef, readIORef)
 import Data.Pool (Pool, withResource)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text, pack)
 import Database.PostgreSQL.Simple (Connection)
-import GHC.Generics (Generic)
 import Test.Hspec (Spec, afterAll_, beforeAll, describe, it, runIO, shouldBe)
 
 import Arbiter.Simple
@@ -115,7 +111,7 @@ dedicatedListenerSpec connStr =
       env <- useDedicatedListener connStr =<< createSimpleEnvWithPool (Proxy @ListenTestRegistry) pool listenSchema
       ref <- newIORef (0 :: Int)
       let handler :: JobHandler (SimpleDb ListenTestRegistry IO) WorkerTestPayload ()
-          handler _conn _job = liftIO $ atomicModifyIORef' ref $ \count -> (count + 1, ())
+          handler _conn _job = liftIO $ bumpRef ref
       config <- transactionalWorkerConfig 1 handler
       let workerConfig = config {workerCount = 1, pollInterval = 300, jitter = NoJitter}
       withLinkedAsync (runSimpleDb env $ runWorkerPool workerConfig) $ \_ -> do
@@ -128,14 +124,6 @@ dedicatedListenerSpec connStr =
         waitUntil 5_000 $ (== 1) <$> readIORef ref
         readIORef ref >>= (`shouldBe` 1)
       destroySimpleEnv env
-
-newtype QueueAPayload = QueueAPayload Text
-  deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
-
-newtype QueueBPayload = QueueBPayload Text
-  deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
 
 type MultiQRegistry =
   '[ Queue "mq_listen_a" QueueAPayload

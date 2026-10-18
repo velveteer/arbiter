@@ -1,4 +1,3 @@
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Test.Arbiter.Servant.Client (spec, apiClient) where

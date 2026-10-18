@@ -261,18 +261,15 @@ connectionLoop hub conn onReady = do
       case mNotify of
         Just notification -> dispatch hub notification >> loop desired
         Nothing -> do
-          mfd <- listenSocket conn
-          case mfd of
-            Nothing -> throwInternal "connection has no socket"
-            Just socketFd -> do
-              changed <-
-                bracket (threadWaitReadSTM socketFd) snd $ \(waitRead, _) ->
-                  atomically $
-                    (False <$ waitRead)
-                      `orElse` (readTVar (hubHandlers hub) >>= \handlers -> True <$ check (Map.keysSet handlers /= desired))
-              consumed <- listenConsumeInput conn
-              unless consumed $ throwInternal "consumeInput failed"
-              if changed then reconcile hub conn >>= loop else loop desired
+          socketFd <- listenSocket conn >>= maybe (throwInternal "connection has no socket") pure
+          changed <-
+            bracket (threadWaitReadSTM socketFd) snd $ \(waitRead, _) ->
+              atomically $
+                (False <$ waitRead)
+                  `orElse` (readTVar (hubHandlers hub) >>= \handlers -> True <$ check (Map.keysSet handlers /= desired))
+          consumed <- listenConsumeInput conn
+          unless consumed $ throwInternal "consumeInput failed"
+          if changed then reconcile hub conn >>= loop else loop desired
 
 -- | Synchronize wire subscriptions with registered channels.
 reconcile :: RunningHub -> ListenConn -> IO (Set ByteString)

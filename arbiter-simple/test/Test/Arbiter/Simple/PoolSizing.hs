@@ -1,4 +1,3 @@
-{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 
@@ -11,7 +10,7 @@ import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.PoolConfig (poolSize)
 import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Test.Fixtures (WorkerTestPayload (..))
-import Arbiter.Test.Poll (waitUntil)
+import Arbiter.Test.Poll (bumpRef, waitUntil)
 import Arbiter.Test.Setup (cleanupOnce, setupOnce)
 import Arbiter.Worker (namedWorkerPool, poolConfigForWorkers, runWorkerPools)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
@@ -25,7 +24,7 @@ import Control.Monad (forM_, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
 import Data.Either (isLeft)
-import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (newIORef, readIORef)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -72,7 +71,7 @@ spec connStr = do
         cleanupOnce connStr testSchema testSchema
         ref <- newIORef (0 :: Int)
         let handler :: JobHandler (SimpleDb SizingTestRegistry IO) WorkerTestPayload ()
-            handler _conn _job = liftIO $ atomicModifyIORef' ref $ \count -> (count + 1, ())
+            handler _conn _job = liftIO $ bumpRef ref
         config <- transactionalWorkerConfig 3 handler
         let pools = [namedWorkerPool config {pollInterval = 0.2, jitter = NoJitter}]
         poolCfg <- poolConfigForWorkers pools

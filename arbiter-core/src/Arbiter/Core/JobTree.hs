@@ -115,6 +115,9 @@ insertJobTree schemaName tableName tree =
     treeWrites (Leaf job) = [job]
     treeWrites (Finalizer job children) = job : foldMap treeWrites children
 
+    orFail :: Text -> Maybe a -> m a
+    orFail msg = maybe (UE.throwIO (TreeInsertFailed msg)) pure
+
     go
       :: Ops.TraceStamp payload
       -> Maybe Int64
@@ -124,17 +127,16 @@ insertJobTree schemaName tableName tree =
       -> JobTree payload
       -> m (NonEmpty (JobRead payload))
     go stamp mParentId susp (Leaf jobW) = do
-      mInserted <- Ops.insertJobTreeNodeStamped schemaName tableName stamp mParentId Nothing susp jobW
-      case mInserted of
-        Nothing -> UE.throwIO $ TreeInsertFailed "insertJobTree: job insert failed (dedup conflict)"
-        Just inserted -> pure (inserted :| [])
+      inserted <-
+        Ops.insertJobTreeNodeStamped schemaName tableName stamp mParentId Nothing susp jobW
+          >>= orFail "insertJobTree: job insert failed (dedup conflict)"
+      pure (inserted :| [])
     go stamp mParentId susp (Finalizer jobW children) = do
-      mInserted <- Ops.insertJobTreeNodeStamped schemaName tableName stamp mParentId (Just emptyState) susp jobW
-      case mInserted of
-        Nothing -> UE.throwIO $ TreeInsertFailed "insertJobTree: parent insert failed (dedup conflict)"
-        Just inserted -> do
-          descendants <- insertChildren (primaryKey inserted) (NE.toList children)
-          pure (inserted :| descendants)
+      inserted <-
+        Ops.insertJobTreeNodeStamped schemaName tableName stamp mParentId (Just emptyState) susp jobW
+          >>= orFail "insertJobTree: parent insert failed (dedup conflict)"
+      descendants <- insertChildren (primaryKey inserted) (NE.toList children)
+      pure (inserted :| descendants)
       where
         -- Batch adjacent leaves. Nested trees keep their position.
         insertChildren _ [] = pure []

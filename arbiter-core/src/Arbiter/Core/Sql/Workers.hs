@@ -15,6 +15,7 @@ module Arbiter.Core.Sql.Workers
   , workerRegisteredSQL
   , listWorkersSQL
   , deleteStaleWorkersSQL
+  , workerStaleSQL
   ) where
 
 import Data.Aeson (Value)
@@ -23,28 +24,30 @@ import Data.Text (Text)
 import Data.UUID.Types (UUID)
 import NeatInterpolation (text)
 
-import Arbiter.Core.Codec (workerRowWithHealthCodec)
+import Arbiter.Core.Codec (codecColumns, joinColumns, workerRowWithHealthCodec)
 import Arbiter.Core.Job.Schema (SchemaName, pauseNotifyChannelPrefix)
 import Arbiter.Core.Queues (arbiterQueuesTable)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, rows)
-import Arbiter.Core.SqlLiterals (textLiteral)
+import Arbiter.Core.SqlLiterals (intLiteral, maxIdentifierBytes, textLiteral)
 import Arbiter.Core.Worker (WorkerRow, arbiterWorkersTable)
 
 -- | The worker read columns, in codec order, with @health@ derived from the heartbeat.
 workerColumnList :: Text
-workerColumnList =
-  [text|
-    worker_id, queue_name, host_name, worker_count, started_at, last_heartbeat,
-    shutting_down, paused, stale_threshold_secs, metadata,
-    ${workerHealthCaseSQL} AS health
-  |]
+workerColumnList = joinColumns (map readCol (codecColumns workerRowWithHealthCodec))
+  where
+    readCol "health" = workerHealthCaseSQL <> " AS health"
+    readCol name = name
+
+-- | Whether a worker's last heartbeat is older than its own @stale_threshold_secs@.
+workerStaleSQL :: Text
+workerStaleSQL = "last_heartbeat < NOW() - stale_threshold_secs * interval '1 second'"
 
 -- | Heartbeat-derived health, computed against the DB clock.
 workerHealthCaseSQL :: Text
 workerHealthCaseSQL =
   [text|
-    CASE WHEN last_heartbeat < NOW() - stale_threshold_secs * interval '1 second' THEN 'stale'
+    CASE WHEN ${workerStaleSQL} THEN 'stale'
          WHEN shutting_down THEN 'draining'
          ELSE 'live'
     END
@@ -107,6 +110,7 @@ setWorkerPausedSQL schemaName paused workerId =
   let tbl = arbiterWorkersTable schemaName
       queuesTbl = arbiterQueuesTable schemaName
       chanPrefix = textLiteral (pauseNotifyChannelPrefix schemaName)
+      maxIdent = intLiteral maxIdentifierBytes
    in [sql|
         WITH updated AS (
           UPDATE ${tbl} SET paused = #{paused :: CBool} WHERE worker_id = #{workerId :: CUuid}
@@ -114,7 +118,7 @@ setWorkerPausedSQL schemaName paused workerId =
         ),
         notif AS (
           SELECT pg_notify(
-            LEFT(${chanPrefix} || updated.queue_name, 63),
+            LEFT(${chanPrefix} || updated.queue_name, ${maxIdent}),
             json_build_object(
               'worker_id', updated.worker_id,
               'paused', updated.paused OR COALESCE(queue_row.paused, FALSE)
@@ -162,5 +166,5 @@ deleteStaleWorkersSQL schemaName =
   let tbl = arbiterWorkersTable schemaName
    in [sql|
         DELETE FROM ${tbl}
-        WHERE last_heartbeat < NOW() - (stale_threshold_secs * interval '1 second')
+        WHERE ${workerStaleSQL}
       |]

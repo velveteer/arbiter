@@ -20,7 +20,7 @@ import Data.Time (UTCTime)
 import GHC.Generics (Generic)
 
 import Arbiter.Core.Job.Schema (SchemaName)
-import Arbiter.Core.SqlLiterals (quoteIdentifier)
+import Arbiter.Core.SqlLiterals (sharedTable)
 
 -- | A row of the @arbiter_queues@ pause/resume table.
 data QueueRow = QueueRow
@@ -42,7 +42,7 @@ data QueueRow = QueueRow
 
 -- | Qualified table name for the @arbiter_queues@ table.
 arbiterQueuesTable :: SchemaName -> Text
-arbiterQueuesTable schemaName = quoteIdentifier schemaName <> "." <> arbiterQueuesTableName
+arbiterQueuesTable schemaName = sharedTable schemaName arbiterQueuesTableName
 
 -- | Bare name of the queues table, for catalog lookups by relname.
 arbiterQueuesTableName :: Text

@@ -15,6 +15,7 @@ import {
   mapLimit,
   parseOptionalInt,
   parsePayload,
+  pluralize,
   toIsoInstant,
   toLocalInput,
 } from '../format.js';
@@ -88,7 +89,12 @@ const blankInsert = () => ({
 // Row actions, shared by the row menu and the drawer header.
 const JobMenu = {
   props: { job: Object, close: Function },
-  setup: (props) => ({ ...inject('jobs'), parent: computed(() => props.job._childCount > 0) }),
+  setup: (props) => ({
+    ...inject('jobs'),
+    parent: computed(() => props.job._childCount > 0),
+    // A confirm label, with the descendant count a cascade also takes.
+    withDescendants: (label, job) => label + (job._childCount ? ' (+' + job._childCount + ' ' + pluralize(job._childCount, 'child', 'children') + ')' : ''),
+  }),
   template: /* html */ `
     <button v-if="job.status === 'scheduled' || job.status === 'backoff'" type="button" class="dropdown-item" @click="act(job, 'promote'); close()">Promote</button>
     <button v-if="canReschedule(job)" type="button" class="dropdown-item" @click="openReschedule(job); close()">Reschedule</button>
@@ -98,11 +104,11 @@ const JobMenu = {
     <button v-else-if="job.status === 'suspended'" type="button" class="dropdown-item" @click="act(job, 'resume'); close()">Resume</button>
     <hr class="dropdown-divider">
     <arm-button :arm="arm" :k="'cancel:' + job.primaryKey" cls="dropdown-item" on="text-warning fw-semibold" label="Cancel"
-      :confirm="'Confirm cancel' + (job._childCount ? ' (+' + job._childCount + ' ' + pluralize(job._childCount, 'child', 'children') + ')' : '')" @fire="remove(job, 'cancel'); close()"/>
+      :confirm="withDescendants('Confirm cancel', job)" @fire="remove(job, 'cancel'); close()"/>
     <arm-button v-if="job.status === 'in_flight'" :arm="arm" :k="'fcancel:' + job.primaryKey" cls="dropdown-item" on="text-warning fw-semibold" label="Force cancel"
       confirm="Confirm force cancel (interrupts handler)" @fire="remove(job, 'force-cancel'); close()"/>
     <arm-button :arm="arm" :k="'movedlq:' + job.primaryKey" cls="dropdown-item" on="text-warning fw-semibold" label="Move to DLQ"
-      :confirm="'Confirm move to DLQ' + (job._childCount ? ' (+' + job._childCount + ' ' + pluralize(job._childCount, 'child', 'children') + ')' : '')" @fire="remove(job, 'move-to-dlq'); close()"/>`,
+      :confirm="withDescendants('Confirm move to DLQ', job)" @fire="remove(job, 'move-to-dlq'); close()"/>`,
 };
 
 export const JobsTab = {
@@ -124,7 +130,7 @@ export const JobsTab = {
     const insert = reactive(blankInsert());
     const arm = useArm();
     const busy = useBusy();
-    const cols = useColumns(COLS, 'arb.jobCols.v2');
+    const cols = useColumns(COLS, 'arb.jobCols');
 
     const collapse = () => {
       for (const k of Object.keys(expanded)) delete expanded[k];

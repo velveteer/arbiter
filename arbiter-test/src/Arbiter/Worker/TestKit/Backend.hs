@@ -1,5 +1,3 @@
-{-# LANGUAGE RankNTypes #-}
-
 -- | The backend record the worker suites run over.
 module Arbiter.Worker.TestKit.Backend (TestBackend (..)) where
 

@@ -1,10 +1,6 @@
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 
 module Main (main) where
@@ -67,7 +63,7 @@ import Data.Proxy (Proxy (..))
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (NominalDiffTime, UTCTime, addUTCTime, diffTimeToPicoseconds, getCurrentTime, utctDayTime)
+import Data.Time (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.Generics (Generic)
 import Network.Wai.Handler.Warp
@@ -90,6 +86,7 @@ import System.Environment (lookupEnv)
 import System.Exit (die)
 import System.Posix.Signals qualified as Signals
 import System.Random (randomRIO)
+import Text.Read (readMaybe)
 
 -- ---------------------------------------------------------------------------
 -- Payload types
@@ -202,9 +199,8 @@ runDemo tel = do
     maybe "host=localhost port=5432 user=postgres password=master dbname=postgres" BS.pack
       <$> lookupEnv "DATABASE_URL"
   schemaStr <- fromMaybe "arbiter_demo" <$> lookupEnv "SCHEMA"
-  portStr <- fromMaybe "8080" <$> lookupEnv "PORT"
+  port <- envOr "PORT" (8080 :: Int)
   let schema = T.pack schemaStr
-      port = read portStr :: Int
   -- Drop and recreate schema for a clean demo
   putStrLn "Resetting schema..."
   conn <- PG.connectPostgreSQL connStr
@@ -285,7 +281,7 @@ runDemo tel = do
   -- Self-restart watchdog. After RESET_INTERVAL_MINUTES, raise SIGTERM. The
   -- handler above exits the process and the container's restart policy reseeds
   -- a clean demo. A value of 0 disables it.
-  resetMin <- maybe 20 read <$> lookupEnv "RESET_INTERVAL_MINUTES"
+  resetMin <- envOr "RESET_INTERVAL_MINUTES" 20
   when (resetMin > 0) $ void $ forkIO $ do
     threadDelay (resetMin * 60 * 1_000_000)
     putStrLn $ "[reset] " <> show resetMin <> "m elapsed, restarting for a clean demo"
@@ -293,18 +289,18 @@ runDemo tel = do
 
   -- Background load generator. Pulse a few jobs on an interval. A value of 0
   -- disables it.
-  pulseSec <- maybe 5 read <$> lookupEnv "LOAD_PULSE_SECONDS"
+  pulseSec <- envOr "LOAD_PULSE_SECONDS" 5
   when (pulseSec > 0) $ void $ forkIO $ loadPulse producerEnv pulseSec
 
   -- Emit a small archivable pipeline on an interval. A value of 0 disables it.
-  pipeSec <- maybe 2 read <$> lookupEnv "PIPELINE_PULSE_SECONDS"
+  pipeSec <- envOr "PIPELINE_PULSE_SECONDS" 2
   when (pipeSec > 0) $ void $ forkIO $ pipelinePulse producerEnv schema pipeSec
 
   -- Bursty batch inserts into bulk_queue. A spike of multi-row inserts on a
   -- jittered interval. Either value at 0 disables it.
-  burstSec <- maybe 10 read <$> lookupEnv "BURST_INTERVAL_SECONDS"
-  burstSize <- maybe 1000 read <$> lookupEnv "BURST_SIZE"
-  burstGroups <- maybe 8 read <$> lookupEnv "BURST_GROUPS"
+  burstSec <- envOr "BURST_INTERVAL_SECONDS" 10
+  burstSize <- envOr "BURST_SIZE" 1000
+  burstGroups <- envOr "BURST_GROUPS" 8
   when (burstSec > 0 && burstSize > 0) $ do
     putStrLn $ "Burst load: ~" <> show burstSize <> " jobs every ~" <> show burstSec <> "s into bulk_queue"
     void $ forkIO $ burstPulse producerEnv burstSec burstSize burstGroups
@@ -375,8 +371,8 @@ notifBroadcast =
 -- handler. Sized by BURST_WORKERS and BURST_BATCH.
 mkBulkWorker :: IO (WorkerConfig DemoM BulkPayload)
 mkBulkWorker = do
-  count <- maybe 6 read <$> lookupEnv "BURST_WORKERS"
-  batch <- maybe 25 read <$> lookupEnv "BURST_BATCH"
+  count <- envOr "BURST_WORKERS" 6
+  batch <- envOr "BURST_BATCH" 25
   cfg <- batchedWorkerConfig count batch handler
   pure cfg {pollInterval = 1, livenessFile = Nothing}
   where
@@ -594,9 +590,8 @@ pipelinePulse env schemaName sec = go 0
     go :: Int -> IO ()
     go tick = do
       threadDelay (sec * 1_000_000)
-      now <- getCurrentTime
-      let seed = fromInteger (diffTimeToPicoseconds (utctDayTime now)) :: Int
-          chosen = quickChunkSets !! (seed `mod` length quickChunkSets)
+      pick <- randomRIO (0, length quickChunkSets - 1)
+      let chosen = quickChunkSets !! pick
           root = setArchiveFor (Just 3600) $ defaultJob (AggregateResults ("quick-report-" <> tshow tick))
           leaves = NE.fromList (map (JT.leaf . defaultJob . ProcessChunk) chosen)
       runSimpleDb env $ void $ JT.insertJobTree schemaName "pipeline" (JT.rollup root leaves)
@@ -606,6 +601,12 @@ demoTracer :: (MonadIO m) => m Trace.Tracer
 demoTracer = do
   provider <- Trace.getGlobalTracerProvider
   pure (Trace.makeTracer provider "arbiter-demo" Trace.tracerOptions)
+
+-- | Read an environment variable, or the default when unset.
+envOr :: (Read a) => String -> a -> IO a
+envOr name fallback = lookupEnv name >>= maybe (pure fallback) parse
+  where
+    parse raw = maybe (die (name <> ": cannot parse " <> show raw)) pure (readMaybe raw)
 
 tshow :: (Show a) => a -> Text
 tshow = T.pack . show

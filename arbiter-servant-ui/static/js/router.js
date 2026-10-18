@@ -86,16 +86,17 @@ export function go(e, url) {
   if (plainClick(e)) navigate(url);
 }
 
-// An in-app link to a queue view, bound with v-bind.
+// An in-app link, bound with v-bind.
+const link = (href) => ({ href, onClick: (e) => go(e, href) });
+
+// An in-app link to a queue view.
 export function queueLink(queue, tab, extra) {
-  const href = queueUrl(queue, tab, extra);
-  return { href, onClick: (e) => go(e, href) };
+  return link(queueUrl(queue, tab, extra));
 }
 
-// An in-app link to a policy page, bound with v-bind.
+// An in-app link to a policy page.
 export function policyLink(view, prefix) {
-  const href = viewUrl(view, { prefix });
-  return { href, onClick: (e) => go(e, href) };
+  return link(viewUrl(view, { prefix }));
 }
 
 window.addEventListener('popstate', (e) => {

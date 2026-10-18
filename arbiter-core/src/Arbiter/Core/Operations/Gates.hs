@@ -1,4 +1,3 @@
-{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 
@@ -33,6 +32,7 @@ import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.MonadArbiter qualified as MA
 import Arbiter.Core.Sql.Gates qualified as Sql
 import Arbiter.Core.Sql.QQ qualified as QQ
+import Arbiter.Core.SqlLiterals (intLiteral)
 
 -- ---------------------------------------------------------------------------
 -- Global Gate Operations
@@ -43,7 +43,7 @@ import Arbiter.Core.Sql.QQ qualified as QQ
 setLocalStatementTimeout :: (MonadArbiter m) => NominalDiffTime -> m ()
 setLocalStatementTimeout limit =
   let millis = ceiling (realToFrac limit * 1000 :: Double) :: Int
-      millisText = T.pack (show millis)
+      millisText = intLiteral millis
    in void $
         MA.executeQuery
           [QQ.sql|SELECT set_config('statement_timeout', '${millisText}', true) AS @{set_config :: CText}|]

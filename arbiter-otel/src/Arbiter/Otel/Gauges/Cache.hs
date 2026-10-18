@@ -113,8 +113,8 @@ type SeriesKey = (Text, [(Text, Text)])
 
 -- | The scan a counter series was last counted from, and the total it stood at.
 data Baseline = Baseline
-  { countedFrom :: !Double
-  , countedTotal :: !Double
+  { countedFrom :: Double
+  , countedTotal :: Double
   }
 
 -- | What a scanned total adds to its series.

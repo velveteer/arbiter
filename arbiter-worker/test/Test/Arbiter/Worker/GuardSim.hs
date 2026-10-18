@@ -138,7 +138,16 @@ data Setup = Setup
 
 -- | A setup whose rows carry no lease of their own.
 plainSetup :: DiffTime -> DiffTime -> Maybe DiffTime -> [Reply] -> Setup
-plainSetup every timeout duration answers = Setup every timeout duration answers [] [] False
+plainSetup every timeout duration answers =
+  Setup
+    { interval = every
+    , leaseTimeout = timeout
+    , maxDuration = duration
+    , replies = answers
+    , rowLeases = []
+    , settleLags = []
+    , logBlocks = False
+    }
 
 -- | The guard under test and the scenario's event recorder.
 data World s = World
@@ -232,14 +241,24 @@ guarded :: World s -> (IOSim s () -> IOSim s ()) -> JobId -> DiffTime -> IOSim s
 guarded w under job elapsed pending body = do
   start <- addUTCTime (negate (realToFrac elapsed)) <$> getCurrentTime
   record w (Registered job)
-  outcome <- try (under (guardBatch (worldGuard w) (Batch (job :| []) pending start id) body))
+  outcome <-
+    try
+      ( under
+          ( guardBatch
+              (worldGuard w)
+              Batch {batchJobs = job :| [], batchPending = pending, batchStart = start, batchInherit = id}
+              body
+          )
+      )
   record w (Ended job (classify outcome))
 
 -- | Register a multi-job batch and record the complete force-cancel payload.
 guardedBatch :: World s -> NonEmpty JobId -> IOSim s [JobId] -> IOSim s () -> IOSim s ()
 guardedBatch w jobs@(first :| _) pending body = do
   start <- getCurrentTime
-  outcome <- try (guardBatch (worldGuard w) (Batch jobs pending start id) body)
+  outcome <-
+    try
+      (guardBatch (worldGuard w) Batch {batchJobs = jobs, batchPending = pending, batchStart = start, batchInherit = id} body)
   case outcome of
     Left exc -> case fromException exc of
       Just (JobForceCancelled cancelled unavailable) -> record w (CancelledIds cancelled unavailable)

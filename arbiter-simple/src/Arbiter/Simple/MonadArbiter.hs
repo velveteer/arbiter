@@ -47,7 +47,7 @@ import Database.PostgreSQL.Simple (Connection)
 import Database.PostgreSQL.Simple qualified as PG
 import Database.PostgreSQL.Simple.FromField (FromField (..), ResultError (..), returnError, typeOid)
 import Database.PostgreSQL.Simple.FromRow (RowParser, field)
-import Database.PostgreSQL.Simple.ToField (Action (..), ToField (..), toField, toJSONField)
+import Database.PostgreSQL.Simple.ToField (Action (..), ToField (..), toField)
 import Database.PostgreSQL.Simple.TypeInfo.Static qualified as TI
 import Database.PostgreSQL.Simple.Types (PGArray (..), Query (..))
 import UnliftIO (MonadUnliftIO)
@@ -82,30 +82,8 @@ simpleExecuteStatement query = do
     _ -> PG.execute conn sql (map someParamToAction params)
 
 interpretNullCol :: NullCol a -> RowParser a
-interpretNullCol (NotNull _ col) = colField col
-interpretNullCol (Nullable _ col) = colFieldNullable col
-
-colField :: Col a -> RowParser a
-colField CInt4 = field
-colField CInt8 = field
-colField CText = field
-colField CBool = field
-colField CTimestamptz = field
-colField CJsonb = field
-colField CStored = storedJson <$> field
-colField CFloat8 = field
-colField CUuid = field
-
-colFieldNullable :: Col a -> RowParser (Maybe a)
-colFieldNullable CInt4 = field
-colFieldNullable CInt8 = field
-colFieldNullable CText = field
-colFieldNullable CBool = field
-colFieldNullable CTimestamptz = field
-colFieldNullable CJsonb = field
-colFieldNullable CStored = fmap storedJson <$> field
-colFieldNullable CFloat8 = field
-colFieldNullable CUuid = field
+interpretNullCol (NotNull _ col) = withColField col (\from _ -> from <$> field)
+interpretNullCol (Nullable _ col) = withColField col (\from _ -> fmap from <$> field)
 
 -- | Transaction bracket. Nests via savepoints.
 simpleWithDbTransaction
@@ -125,24 +103,22 @@ simpleRunHandlerWithConnection handler job =
   withConn $ \conn -> handler conn job
 
 someParamToAction :: SomeParam -> Action
-someParamToAction (SomeParam (PScalar CJsonb) value) = toJSONField value
-someParamToAction (SomeParam (PScalar col) value) = withColToField col (\wrap -> toField (wrap value))
-someParamToAction (SomeParam (PNullable CJsonb) value) = maybe (toField (Nothing :: Maybe Int)) toJSONField value
-someParamToAction (SomeParam (PNullable col) value) = withColToField col (\wrap -> toField (wrap <$> value))
-someParamToAction (SomeParam (PArray col) value) = withColToField col (\wrap -> toField (PGArray (map wrap value)))
-someParamToAction (SomeParam (PNullArray col) value) = withColToField col (\wrap -> toField (PGArray (map (fmap wrap) value)))
+someParamToAction (SomeParam (PScalar col) value) = withColField col (\_ to -> toField (to value))
+someParamToAction (SomeParam (PNullable col) value) = withColField col (\_ to -> toField (to <$> value))
+someParamToAction (SomeParam (PArray col) value) = withColField col (\_ to -> toField (PGArray (map to value)))
+someParamToAction (SomeParam (PNullArray col) value) = withColField col (\_ to -> toField (PGArray (map (fmap to) value)))
 
--- | The 'ToField' instance for a column, with raw JSON wrapped in 'RawJson'.
-withColToField :: Col a -> (forall b. (ToField b) => (a -> b) -> r) -> r
-withColToField CInt4 k = k id
-withColToField CInt8 k = k id
-withColToField CText k = k id
-withColToField CBool k = k id
-withColToField CTimestamptz k = k id
-withColToField CJsonb k = k id
-withColToField CStored k = k (RawJson . storedBytes)
-withColToField CFloat8 k = k id
-withColToField CUuid k = k id
+-- | The field instances for a column, with raw JSON carried as 'RawJson'.
+withColField :: Col a -> (forall b. (FromField b, ToField b) => (b -> a) -> (a -> b) -> r) -> r
+withColField CInt4 k = k id id
+withColField CInt8 k = k id id
+withColField CText k = k id id
+withColField CBool k = k id id
+withColField CTimestamptz k = k id id
+withColField CJsonb k = k id id
+withColField CStored k = k storedJson (RawJson . storedBytes)
+withColField CFloat8 k = k id id
+withColField CUuid k = k id id
 
 -- | JSON bytes passed through a @json@ or @jsonb@ column without parsing.
 newtype RawJson = RawJson ByteString

@@ -62,9 +62,8 @@ orvilleExecuteQuery
   => Query a
   -> m [a]
 orvilleExecuteQuery query = O.withConnection $ \conn -> do
-  pgParams <- encodeParams (qParams query)
-  result <- liftIO $ Conn.executeRaw conn (TE.encodeUtf8 (qPositional query)) pgParams
-  let marshaller = O.annotateSqlMarshallerEmptyAnnotation (O.marshallReadOnly (runCodec orvilleCol (qDecode query)))
+  result <- runRaw conn query
+  let marshaller = O.annotateSqlMarshallerEmptyAnnotation (runCodec orvilleCol (qDecode query))
   decoded <- liftIO $ O.marshallResultFromSql O.defaultErrorDetailLevel marshaller result
   case decoded of
     Right rows -> pure rows
@@ -75,10 +74,12 @@ orvilleExecuteStatement
   :: (O.MonadOrville m)
   => Query a
   -> m Int64
-orvilleExecuteStatement query = O.withConnection $ \conn -> do
+orvilleExecuteStatement query = O.withConnection $ \conn -> runRaw conn query >>= liftIO . readRowCount
+
+runRaw :: (MonadIO m) => Conn.Connection -> Query a -> m LibPQ.Result
+runRaw conn query = do
   pgParams <- encodeParams (qParams query)
-  result <- liftIO $ Conn.executeRaw conn (TE.encodeUtf8 (qPositional query)) pgParams
-  liftIO $ readRowCount result
+  liftIO $ Conn.executeRaw conn (TE.encodeUtf8 (qPositional query)) pgParams
 
 -- | Transaction bracket. Nests via savepoints.
 orvilleWithDbTransaction :: (O.MonadOrville m) => m a -> m a
@@ -129,8 +130,8 @@ encodeParams = traverse toPgParam
       Right pgValue -> pure pgValue
 
 orvilleCol :: NullCol a -> O.SqlMarshaller () a
-orvilleCol (NotNull name col) = O.marshallReadOnly $ O.marshallField id (colFieldDef name col)
-orvilleCol (Nullable name col) = O.marshallReadOnly $ O.marshallField id (O.nullableField (colFieldDef name col))
+orvilleCol (NotNull name col) = O.marshallReadOnlyField (colFieldDef name col)
+orvilleCol (Nullable name col) = O.marshallReadOnlyField (O.nullableField (colFieldDef name col))
 
 colFieldDef :: Text -> Col a -> O.FieldDefinition O.NotNull a
 colFieldDef name CInt4 = O.integerField (T.unpack name)
