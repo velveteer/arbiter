@@ -610,6 +610,25 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       successes <- readIORef successRef
       length successes `shouldBe` 0
 
+    it "failing a job acked elsewhere skips without firing onJobRetry" $ \env -> do
+      retryRef <- newIORef ([] :: [Int64])
+      let handler (job :| _) _cbs = do
+            void $ HL.ackJob job
+            throwRetryable "failed after the job was gone"
+          hooks =
+            defaultObservabilityHooks
+              { onJobRetry = \job _ -> liftIO $ atomicModifyIORef' retryRef $ \seen -> (primaryKey job : seen, ())
+              }
+      void $ runM env $ HL.insertJob (setMaxAttempts (Just 5) $ defaultJob (mkSimple "FailedAfterGone"))
+      config <- mkBatchedConfig 1 1 handler
+      let manualConfig = config {pollInterval = 0.1, observabilityHooks = hooks}
+
+      withAsync (runM env $ runWorkerPool manualConfig) $ \_ -> do
+        waitUntil 10_000 $ (== 0) <$> runM env (HL.countJobs @payload)
+        threadDelay 200_000
+
+      readIORef retryRef `shouldReturn` []
+
     it "ackWith and ackAllWith store each job's result on its archive row" $ \env -> do
       let handler jobs cbs = do
             let (single, batch) = partition ((== mkSimple "aw-1") . payload) (toList jobs)
@@ -629,6 +648,67 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       resultFor "aw-1" `shouldBe` Just (toJSON ["first" :: Text])
       resultFor "aw-2" `shouldBe` Just (toJSON ["rest" :: Text])
       resultFor "aw-3" `shouldBe` Just (toJSON ["rest" :: Text])
+
+    it "ackWith stores each result only on its own job's archive row" $ \env -> do
+      let resultOf job = Just [T.pack (show (primaryKey job))]
+          handler jobs cbs = traverse_ (\job -> ackWith cbs job (resultOf job)) (toList jobs)
+      runM env $
+        traverse_
+          (\name -> void $ HL.insertJob (setArchiveFor (Just dayRetention) $ setGroupKey (Just "ow") $ defaultJob (mkSimple name)))
+          ["ow-1", "ow-2", "ow-3"]
+      config <- mkBatchedConfig 1 3 handler
+
+      withAsync (runM env $ runWorkerPool config {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
+        waitUntil 10_000 $ (== 0) <$> runM env (HL.countJobs @payload)
+
+      arch <- archived env
+      length arch `shouldBe` 3
+      for_ arch $ \row ->
+        Archive.archivedResult row `shouldBe` Just (toJSON (resultOf (Archive.jobSnapshot row)))
+
+    it "a batch ack archives only the jobs with a positive archiveFor" $ \env -> do
+      runM env $
+        traverse_
+          (\(name, window) -> void $ HL.insertJob (setArchiveFor window $ setGroupKey (Just "pw") $ defaultJob (mkSimple name)))
+          [("pw-kept", Just dayRetention), ("pw-zero", Just 0), ("pw-unset", Nothing)]
+      config <- mkBatchedConfig 1 3 (\jobs cbs -> ackAll cbs (toList jobs))
+
+      withAsync (runM env $ runWorkerPool config {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
+        waitUntil 10_000 $ (== 0) <$> runM env (HL.countJobs @payload)
+
+      arch <- archived env
+      map (payload . Archive.jobSnapshot) arch `shouldBe` [mkSimple "pw-kept"]
+
+    it "re-enqueues only the named archive row" $ \env -> do
+      config <- mkConfig $ \_job -> pure ()
+      runM env $
+        traverse_
+          (\name -> void $ HL.insertJob (setArchiveFor (Just dayRetention) $ setGroupKey (Just name) $ defaultJob (mkSimple name)))
+          ["one-a", "one-b"]
+
+      withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ ->
+        waitUntil 10_000 $ (== 2) . length <$> archived env
+
+      Just row <- archivedNamed env "one-a"
+      void $ runM env $ HL.reEnqueueFromArchive @payload (Archive.archivePrimaryKey row)
+      queued <- runM env $ HL.listJobs @payload 100 0
+      map payload queued `shouldBe` [mkSimple "one-a"]
+
+    it "bulk-purges only the named archive rows" $ \env -> do
+      config <- mkConfig $ \_job -> pure ()
+      runM env $
+        traverse_
+          (\name -> void $ HL.insertJob (setArchiveFor (Just dayRetention) $ setGroupKey (Just name) $ defaultJob (mkSimple name)))
+          ["bn-gone", "bn-kept"]
+
+      withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ ->
+        waitUntil 10_000 $ (== 2) . length <$> archived env
+
+      Just row <- archivedNamed env "bn-gone"
+      deleted <- runM env $ HL.deleteArchiveJobsBatch @payload [Archive.archivePrimaryKey row]
+      deleted `shouldBe` 1
+      arch <- archived env
+      map (payload . Archive.jobSnapshot) arch `shouldBe` [mkSimple "bn-kept"]
 
   describe "Group Ordering" $ do
     it "processes jobs in the same group serially" $ \env -> do

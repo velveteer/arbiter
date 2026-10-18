@@ -311,6 +311,13 @@ concurrencyLimitSpec runM = do
     claimed <- claimAs env
     length claimed `shouldBe` 4
 
+  it "a re-run seed refreshes a policy's declared default" $ \env -> do
+    seed env 1
+    seed env 3
+    enqueue env (replicate 5 (job "reseed" "a"))
+    claimed <- claimAs env
+    length claimed `shouldBe` 3
+
   it "a policy override lowers the cap live" $ \env -> do
     seed env 3
     enqueue env (replicate 5 (job "ovlo" "a"))
@@ -355,6 +362,34 @@ concurrencyLimitSpec runM = do
     inFlight env (fullKey "track" "a") `shouldReturn` Just 4
     ackAll env (take 3 claimed)
     inFlight env (fullKey "track" "a") `shouldReturn` Just 1
+
+  it "deleting an unclaimed keyed job leaves in_flight alone" $ \env -> do
+    seed env 1
+    enqueue env [job "delkey" "a"]
+    claimed <- claimAs env
+    length claimed `shouldBe` 1
+    waiting <- runM env (HL.insertJobsBatch [job "delkey" "a"]) :: IO [JobRead CLPayload]
+    runM env (HL.cancelJobsBatch @CLPayload (map primaryKey waiting)) `shouldReturn` 1
+    inFlight env (fullKey "delkey" "a") `shouldReturn` Just 1
+    -- One statement deletes a claimed and an unclaimed row of the key.
+    Right (root NE.:| _) <-
+      runM env (HL.insertJobTree (job "delroot" "r" <~~ (job "delkey" "a" NE.:| [job "delkey" "a"])))
+    seed env 2
+    more <- claimAs env
+    length more `shouldBe` 1
+    inFlight env (fullKey "delkey" "a") `shouldReturn` Just 2
+    void $ runM env (HL.cancelJobCascade @CLPayload (primaryKey root))
+    inFlight env (fullKey "delkey" "a") `shouldReturn` Just 1
+
+  it "a dedup replace onto a busy key keeps that key's in_flight" $ \env -> do
+    seed env 2
+    enqueue env [job "movebusy" "busy"]
+    claimed <- claimAs env
+    length claimed `shouldBe` 1
+    let mover suffix = setDedupKey (Just (ReplaceDuplicate "busymove")) $ job "movebusy" suffix
+    enqueue env [mover "idle"]
+    enqueue env [mover "busy"]
+    inFlight env (fullKey "movebusy" "busy") `shouldReturn` Just 1
 
   it "floors in_flight at zero when a decrement would underflow a drifted count" $ \env -> do
     -- Drift can leave a count row below its live claimed jobs. Acking one clamps

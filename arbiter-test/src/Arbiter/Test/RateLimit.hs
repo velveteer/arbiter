@@ -427,6 +427,24 @@ rateLimitSpec runM = do
     afterReset <- claim env
     length afterReset `shouldBe` 3
 
+  it "a top-up wakes only its own key's deferred jobs" $ \env -> do
+    enqueue env (replicate 5 (job "wake-a") <> replicate 5 (job "wake-b"))
+    admitted <- claim env
+    length admitted `shouldBe` 6
+    void $ runM env (HL.addRateLimitTokens (RateLimitKey "rl" "wake-a") 3)
+    runM env (HL.countJobsFiltered @RLPayload [HL.FilterStatus Throttled]) `shouldReturn` 2
+
+  it "a reset refills only its own policy's buckets" $ \env -> do
+    flip finally (clearOverride env) $ do
+      setOverride env 3 0
+      deleteBuckets env
+      enqueue env (replicate 3 (job "resetscope"))
+      kept <- claim env
+      length kept `shouldBe` 3
+      _ <- runM env (HL.resetRateLimitBuckets "other")
+      remaining <- listToMaybe . map tokens <$> runM env (HL.listRateLimitBuckets "rl" 100 0)
+      remaining `shouldBe` Just 0
+
   it "clears a stale throttle marker on claim so a wake cannot double-claim it" $ \env -> do
     enqueue env [job "claimclears"]
     -- A ready job with a stale marker. Claiming clears it.

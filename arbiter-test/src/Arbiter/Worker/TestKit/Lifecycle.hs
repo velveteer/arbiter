@@ -10,7 +10,7 @@ module Arbiter.Worker.TestKit.Lifecycle
 
 import Arbiter.Core.Codec (Col (..), pval)
 import Arbiter.Core.CronSchedule qualified as CS
-import Arbiter.Core.Exceptions (throwBranchCancel, throwRetryable)
+import Arbiter.Core.Exceptions (throwBranchCancel, throwRetryable, throwTreeCancel)
 import Arbiter.Core.HighLevel (QueueOperation, RegistryAdmissionPolicies)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ qualified as DLQ
@@ -405,6 +405,21 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
           successes <- readIORef successRef
           -- onJobSuccess fired only for the survivors. The reclaimed job was skipped.
           successes `shouldMatchList` [mkSimple "ca-keep1", mkSimple "ca-keep2"]
+
+      it "a tree cancel after a bulk ack also cancels the job the ack found held elsewhere" $ \env -> do
+        let batchHandler jobs cbs = do
+              let stolen = filter ((== mkSimple "tc-stolen") . payload) (toList jobs)
+              liftIO $ traverse_ (reclaimJob connStr schema table . primaryKey) stolen
+              ackAll cbs stolen
+              throwTreeCancel "cancel the batch's trees"
+        let jobs =
+              [ setGroupKey (Just "tc") $ defaultJob (mkSimple "tc-other")
+              , setGroupKey (Just "tc") $ defaultJob (mkSimple "tc-stolen")
+              ]
+        void $ runM env $ HL.insertJobsBatch jobs
+        config :: WorkerConfig m payload <- batchedWorkerConfig 1 10 batchHandler
+        withLinkedAsync (runM env $ runWorkerPool (config {pollInterval = 0.05})) $ \_ ->
+          waitUntil 10_000 $ (== 0) <$> runM env (HL.countJobs @payload)
 
       it "rollup ackAllWith stores each job's result for the parent" $ \env -> do
         finalRef <- newIORef ([] :: [Text])
@@ -814,6 +829,38 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
           waitUntil 5_000 $ do
             rows <- runM env $ Ops.listWorkers schema (Just table) Nothing
             pure $ wid `elem` map WR.workerId rows
+
+      it "does not re-register a swept row while it drains" $ \env -> do
+        startedRef <- newIORef False
+        let handler :: JobRead payload -> m ()
+            handler _job = do
+              liftIO $ writeIORef startedRef True
+              liftIO $ threadDelay 2_500_000
+
+        baseConfig :: WorkerConfig m payload <- transactionalWorkerConfig 1 (mkHandler (noResult handler))
+        let config =
+              baseConfig
+                { workerCount = 1
+                , pollInterval = 0.1
+                , jobHeartbeatInterval = 0.2
+                , workerHeartbeatInterval = 0.2
+                , gracefulShutdownTimeout = Just 10
+                }
+            wid = workerId config
+            registered = do
+              rows <- runM env $ Ops.listWorkers schema (Just table) Nothing
+              pure $ wid `elem` map WR.workerId rows
+
+        void $ runM env $ HL.insertJob (defaultJob (mkSimple "draining"))
+        withLinkedAsync (runM env $ runWorkerPool config) $ \worker -> do
+          waitUntil 10_000 $ readIORef startedRef
+          waitUntil 5_000 registered
+          shutdownWorkerPool config
+          _ <- runM env $ Ops.deregisterWorker schema wid
+          -- The job's lease extensions keep the registry heartbeat ticking.
+          threadDelay 1_500_000
+          registered `shouldReturn` False
+          Async.wait worker
 
       it "paused worker keeps heartbeating and survives the sweeper" $ \env -> do
         let handler :: JobRead payload -> m ()

@@ -8,7 +8,7 @@ module Arbiter.Test.Operations
   ) where
 
 import Arbiter.Core.Codec (Col (..), col, pval)
-import Arbiter.Core.Exceptions (ParsingException (..))
+import Arbiter.Core.Exceptions (JobGoneException (..), ParsingException (..))
 import Arbiter.Core.HighLevel (SetVisibilityResult (..))
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Archive (archivePrimaryKey)
@@ -177,6 +177,15 @@ operationsSpec mkMessage mkResult runM = do
       map primaryKey matched `shouldBe` [primaryKey inserted]
       counted <- runM env (HL.countJobsFiltered @payload [Ops.FilterJobId (primaryKey inserted)])
       counted `shouldBe` 1
+
+    it "matches only parentless jobs for a roots-only filter" $ \env -> do
+      Right (root :| [_child]) <-
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup (defaultJob (mkMessage "filter-root")) (JT.leaf (defaultJob (mkMessage "filter-child")) :| [])
+      Just standalone <- runM env (HL.insertJob (defaultJob (mkMessage "filter-standalone")))
+      matched <- runM env (HL.listJobsFiltered [Ops.FilterRootsOnly] 10 0) :: IO [JobRead payload]
+      map primaryKey matched `shouldMatchList` [primaryKey root, primaryKey standalone]
 
     it "matches nothing for a completion filter on the main table" $ \env -> do
       void $ runM env (HL.insertJob (setGroupKey (Just "filter-completed") (defaultJob (mkMessage "not-completed"))))
@@ -574,6 +583,34 @@ operationsSpec mkMessage mkResult runM = do
       -- The cycle ends on a pass that finds nothing.
       pass afterThird `shouldReturn` Nothing
 
+    it "recreates a missing summary for a live group" $ \env -> do
+      let key = "grp-missing"
+      runM env $ void (HL.insertJob (defaultGroupedJob key (mkMessage key)))
+      runM env $ do
+        tbl <- groupsTable
+        void $ execStatement ("DELETE FROM " <> tbl <> " WHERE group_key = ?") [pval CText key]
+      groupCount env key `shouldReturn` Nothing
+
+      runM env $ do
+        schemaName <- getSchema
+        void (Ops.refreshGroupsForQueue schemaName (HL.queueTable @payload @m) 10 Nothing)
+      groupCount env key `shouldReturn` Just 1
+
+    it "keeps the latest live lease as a group's in-flight deadline" $ \env -> do
+      let key = "grp-latest-lease"
+      runM env $ forM_ ["lease-a", "lease-b"] $ \name -> void (HL.insertJob (defaultGroupedJob key (mkMessage name)))
+      batches <- runM env (HL.claimNextVisibleJobsBatched 2 1 60) :: IO [NE.NonEmpty (JobRead payload)]
+      map length batches `shouldBe` [2]
+      void $ runM env (HL.setVisibilityTimeout 3600 (NE.head (head batches)))
+      lateDeadline <-
+        runM env $ do
+          tbl <- groupsTable
+          execQuery
+            ("SELECT in_flight_until > NOW() + interval '600 seconds' AS late FROM " <> tbl <> " WHERE group_key = ?")
+            [pval CText key]
+            (col "late" CBool)
+      lateDeadline `shouldBe` [True]
+
   describe "setVisibilityTimeout" $ do
     it "extends visibility timeout for retry" $ \env -> do
       let job = setGroupKey (Just "visibility-extend-test") $ defaultJob (mkMessage "Test")
@@ -820,6 +857,19 @@ operationsSpec mkMessage mkResult runM = do
       runM env (HL.setVisibilityTimeoutBatch 120 [live])
         >>= (`shouldBe` [JobCancelled jobId])
 
+    it "refuses a heartbeat to a lapsed claim carrying the same worker id" $ \env -> do
+      let owner = UUID.nil
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "same-worker-heartbeat")))
+      let jobId = primaryKey inserted
+      [stale] <- claimJobsAs env 1 owner
+      void $ runM env (HL.setVisibilityTimeout 0 stale)
+      [live] <- claimJobsAs env 1 owner
+
+      runM env (HL.setVisibilityTimeoutBatch 3600 [stale])
+        >>= (`shouldBe` [JobReclaimed jobId (claimSeq stale) (claimSeq live)])
+      Just held <- getJob env jobId
+      notVisibleUntil held `shouldBe` notVisibleUntil live
+
     it "reports a job force-cancelled twice as cancelled" $ \env -> do
       Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "double-flag")))
       let jobId = primaryKey inserted
@@ -831,6 +881,32 @@ operationsSpec mkMessage mkResult runM = do
         >>= (`shouldBe` [JobCancelled jobId])
 
   describe "Handoff windows" $ do
+    it "refuses a spawn to a lapsed claim carrying the same worker id" $ \env -> do
+      let owner = UUID.nil
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "same-worker-spawn")))
+      [stale] <- claimJobsAs env 1 owner
+      void $ runM env (HL.setVisibilityTimeout 0 stale)
+      [_live] <- claimJobsAs env 1 owner
+
+      runM env (HL.spawnChildren stale (defaultJob (mkMessage "late-child") :| []))
+        `shouldThrow` \JobGoneException {} -> True
+      runM env (HL.countJobs @payload) `shouldReturn` 1
+      assertNotSuspended env (primaryKey inserted)
+
+    it "refuses an ack's suspend to a lapsed claim carrying the same worker id" $ \env -> do
+      let owner = UUID.nil
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "same-worker-suspend")))
+      let jobId = primaryKey inserted
+      [stale] <- claimJobsAs env 1 owner
+      void $ runM env (HL.setVisibilityTimeout 0 stale)
+      [live] <- claimJobsAs env 1 owner
+      void $ runM env (HL.spawnChildren live (defaultJob (mkMessage "live-child") :| []))
+
+      runM env (HL.ackJob stale) `shouldReturn` 0
+      assertNotSuspended env jobId
+      runM env (HL.ackJobsBatch [stale]) `shouldReturn` []
+      assertNotSuspended env jobId
+
     it "refuses the retry write for a claim that was stolen" $ \env -> do
       -- Window 2.
       Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "window2")))
@@ -969,6 +1045,99 @@ operationsSpec mkMessage mkResult runM = do
         `shouldReturn` (0, [])
       isJust <$> getJob env (primaryKey inserted) `shouldReturn` True
       dlqAll env `shouldReturn` []
+
+    it "the exhausted sweep leaves a suspended job on its last attempt" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (setMaxAttempts (Just 1) (defaultJob (mkMessage "pin-sweep-suspended"))))
+      [held] <- claimJobsAs env 1 UUID.nil
+      void $ runM env (HL.setVisibilityTimeout 0 held)
+      runM env (HL.suspendJob @payload (primaryKey inserted)) `shouldReturn` 1
+
+      runM env (getSchema >>= \schemaName -> Ops.sweepExhaustedJobs schemaName [HL.queueTable @payload @m])
+        `shouldReturn` (0, [])
+      assertSuspended env (primaryKey inserted)
+      dlqAll env `shouldReturn` []
+
+    it "the exhausted sweep leaves a flagged job on its last attempt to the cancelled delete" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (setMaxAttempts (Just 1) (defaultJob (mkMessage "pin-sweep-flagged"))))
+      [_held] <- runM env (HL.claimNextVisibleJobsAs 1 1 UUID.nil) :: IO [JobRead payload]
+      runM env (HL.forceCancelJob @payload (primaryKey inserted)) `shouldReturn` 1
+      threadDelay 1_100_000
+      isJust <$> getJob env (primaryKey inserted) `shouldReturn` True
+
+      runM env (getSchema >>= \schemaName -> Ops.sweepExhaustedJobs schemaName [HL.queueTable @payload @m])
+        `shouldReturn` (0, [])
+      dlqAll env `shouldReturn` []
+
+    it "a batch extend with a re-read suspended finalizer leaves it without a deadline" $ \env -> do
+      held <- suspendedFinalizer env "pin-susp-reread"
+      Just reread <- getJob env (primaryKey held)
+      void $ runM env (HL.setVisibilityTimeoutBatch 3600 [reread])
+      (notVisibleUntil =<<) <$> getJob env (primaryKey held) `shouldReturn` Nothing
+
+    it "resume leaves a finalizer whose children are still queued suspended" $ \env -> do
+      held <- suspendedFinalizer env "pin-resume-finalizer"
+      runM env (HL.resumeJob @payload (primaryKey held)) `shouldReturn` 0
+      assertSuspended env (primaryKey held)
+
+    it "promote leaves a job whose delay has already passed" $ \env -> do
+      past <- addUTCTime (-60) <$> getCurrentTime
+      Just inserted <- runM env (HL.insertJob (setNotVisibleUntil (Just past) (defaultJob (mkMessage "pin-promote-due"))))
+      runM env (HL.promoteJob @payload (primaryKey inserted)) `shouldReturn` 0
+
+    it "a batch ack after a spawn suspends the job and hands back its attempt" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "pin-batch-spawn")))
+      [held] <- claimJobsAs env 1 UUID.nil
+      runM env . MA.withDbTransaction $ do
+        void (HL.spawnChildren held (defaultJob (mkMessage "pin-batch-spawn-kid") :| []))
+        void (HL.ackJobsBatch [held])
+      assertSuspended env (primaryKey inserted)
+      Just reread <- getJob env (primaryKey inserted)
+      attempts reread `shouldBe` attempts held - 1
+
+    it "a second batch nack of the same claim hands back nothing" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "pin-double-nack")))
+      [held] <- claimJobsAs env 1 UUID.nil
+      runM env (HL.nackJobsBatch [held]) `shouldReturn` [primaryKey inserted]
+      runM env (HL.nackJobsBatch [held]) `shouldReturn` []
+
+    it "a DLQ retry leaves a finalizer under a live lease unsuspended" $ \env -> do
+      Right (parent :| [child]) <-
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "LiveLeaseFinalizer"))
+            (JT.leaf (defaultJob (mkMessage "LiveLeaseFinalizerChild")) :| [])
+      [claimedChild] <- claimJobs env 1
+      primaryKey claimedChild `shouldBe` primaryKey child
+      runM env (HL.moveToDLQ "boom" claimedChild) `shouldReturn` 1
+      [claimedParent] <- claimJobs env 1
+      primaryKey claimedParent `shouldBe` primaryKey parent
+
+      [dlqChild] <- dlqAll env
+      Just _ <- runM env (HL.retryFromDLQ @payload (DLQ.dlqPrimaryKey dlqChild))
+      assertNotSuspended env (primaryKey parent)
+
+    it "reschedule refuses a flagged job whose lease lapsed" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "pin-reschedule-flagged")))
+      [_held] <- runM env (HL.claimNextVisibleJobsAs 1 1 UUID.nil) :: IO [JobRead payload]
+      runM env (HL.forceCancelJob @payload (primaryKey inserted)) `shouldReturn` 1
+      threadDelay 1_100_000
+      now <- getCurrentTime
+      runM env (HL.rescheduleJob @payload (primaryKey inserted) now) `shouldReturn` 0
+
+    it "reschedule refuses an exhausted job" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (setMaxAttempts (Just 1) (defaultJob (mkMessage "pin-reschedule-exhausted"))))
+      [_held] <- runM env (HL.claimNextVisibleJobsAs 1 1 UUID.nil) :: IO [JobRead payload]
+      threadDelay 1_100_000
+      now <- getCurrentTime
+      runM env (HL.rescheduleJob @payload (primaryKey inserted) now) `shouldReturn` 0
+
+    it "the cancelled sweep leaves an unflagged job whose lease lapsed" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "pin-sweep-unflagged")))
+      [held] <- claimJobsAs env 1 UUID.nil
+      void $ runM env (HL.setVisibilityTimeout 0 held)
+      sweepCancelled env [primaryKey inserted] `shouldReturn` []
+      isJust <$> getJob env (primaryKey inserted) `shouldReturn` True
 
     it "a stale nack leaves the claim that replaced it" $ \env -> do
       Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "pin-stale-nack")))
@@ -2541,6 +2710,23 @@ operationsSpec mkMessage mkResult runM = do
       let claimedPayloads = map payload claimed2
       claimedPayloads `shouldContain` [mkMessage "PauseChild1"]
       claimedPayloads `shouldContain` [mkMessage "PauseChild2"]
+
+    it "pause/resume children leaves a delayed child alone" $ \env -> do
+      future <- addUTCTime 3600 <$> getCurrentTime
+      Right (parent :| [delayed, ready]) <-
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "DelayParent"))
+            ( JT.leaf (setNotVisibleUntil (Just future) (defaultJob (mkMessage "DelayedChild")))
+                :| [JT.leaf (defaultJob (mkMessage "ReadyChild"))]
+            )
+      map payload [delayed, ready] `shouldBe` [mkMessage "DelayedChild", mkMessage "ReadyChild"]
+
+      runM env (HL.pauseChildren @payload (primaryKey parent)) `shouldReturn` 1
+      assertNotSuspended env (primaryKey delayed)
+      assertSuspended env (primaryKey ready)
+      runM env (HL.resumeChildren @payload (primaryKey parent)) `shouldReturn` 1
 
     it "pause/resume children descends through naturally-suspended rollups" $ \env -> do
       -- Tree: Grandparent → Parent (rollup) → [Leaf1, Leaf2]

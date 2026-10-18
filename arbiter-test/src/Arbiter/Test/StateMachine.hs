@@ -292,7 +292,7 @@ driftViolations schema table withConn = withConn $ \conn -> do
     tbl = schema <> "." <> table
     groupsTbl = schema <> "." <> table <> "_groups"
     -- NOW() is evaluated once per statement. The recompute filters mirror the
-    -- trigger definitions.
+    -- trigger definitions. A past stored in_flight_until reads as free, as in the claim.
     oracleSql =
       "SELECT group_name, drift FROM (SELECT COALESCE(summary.group_key, expected.group_key) AS group_name, concat_ws(', '"
         <> ", CASE WHEN summary.group_key IS NULL THEN 'missing summary row' END"
@@ -303,7 +303,8 @@ driftViolations schema table withConn = withConn $ \conn -> do
         <> ", CASE WHEN summary.ready_count IS DISTINCT FROM expected.ready_count THEN 'ready_count' END"
         <> ", CASE WHEN summary.next_due IS DISTINCT FROM expected.next_due THEN 'next_due' END"
         <> ", CASE WHEN summary.in_flight_until IS DISTINCT FROM expected.in_flight_until THEN 'in_flight_until' END"
-        <> ") AS drift FROM (SELECT group_key, min_priority, min_id, job_count, ready_count, next_due, in_flight_until FROM "
+        <> ") AS drift FROM (SELECT group_key, min_priority, min_id, job_count, ready_count, next_due"
+        <> ", CASE WHEN in_flight_until > NOW() THEN in_flight_until END AS in_flight_until FROM "
         <> groupsTbl
         <> " WHERE job_count > 0) summary FULL OUTER JOIN (SELECT group_key"
         <> ", MIN(priority)::int AS min_priority"
@@ -2248,6 +2249,25 @@ reclaimGuard run reset = do
   viaReaper <- claim1
   length viaReaper `shouldBe` 1
 
+-- | An expired lease leaves a past @in_flight_until@, which every reader treats as
+-- free. The drift oracle accepts it.
+expiredLeaseDriftGuard
+  :: forall sm
+   . (ArbiterC sm)
+  => (forall a. sm a -> IO a)
+  -> Text
+  -> Text
+  -> (forall a. (PG.Connection -> IO a) -> IO a)
+  -> IO ()
+  -> IO ()
+expiredLeaseDriftGuard run schema table withConn reset = do
+  reset
+  void (run (mkInsert @sm id (Just "drift-lapse") Nothing 0 Nothing))
+  claimed <- run (HL.claimNextVisibleJobs 1 1 :: sm [JobRead SMPayload])
+  length claimed `shouldBe` 1
+  threadDelay 2_000_000
+  driftViolations schema table withConn >>= (`shouldBe` [])
+
 -- | Deterministic checks for 'Ops.runGated'. A second caller within the interval
 -- is skipped. Under concurrency exactly one of many callers wins.
 runGatedChecks
@@ -2632,6 +2652,8 @@ stateMachineSpec run schema table withConn reset = do
     withinSecs 60 (progressGuard @sm run schema table withConn reset)
   it "expired-lease grouped job is reclaimable via triggers and after a reaper recompute" $
     withinSecs 60 (reclaimGuard @sm run reset)
+  it "the drift oracle accepts an expired lease's past in-flight time" $
+    withinSecs 60 (expiredLeaseDriftGuard @sm run schema table withConn reset)
   it "a dedup-replaced job does not carry a stale claim owner" $
     withinSecs 60 (dedupReplaceStaleLeaseGuard @sm run schema table withConn reset)
   it "promote leaves a live lease and a paused schedule alone" $
