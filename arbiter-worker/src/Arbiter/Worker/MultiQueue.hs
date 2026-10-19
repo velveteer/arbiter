@@ -40,7 +40,7 @@ import Arbiter.Worker.Config
   , workerStateVar
   )
 import Arbiter.Worker.EnabledQueues (getEnabledQueues, requestedQueues)
-import Arbiter.Worker.Logger (LogConfig (..), (.=))
+import Arbiter.Worker.Logger (withIdentity, (.=))
 import Arbiter.Worker.Pool (runWorkerPool, throwIfInvalid)
 import Arbiter.Worker.WorkerState (WorkerState (ShuttingDown))
 
@@ -123,13 +123,8 @@ runSelectedWorkerPools enabled pools = do
   where
     withPoolAsync :: NamedWorkerPool m -> ContT () m (Async.Async ())
     withPoolAsync (NamedWorkerPool name cfg) =
-      let cfg' = cfg {logConfig = withPoolContext name (logConfig cfg)}
+      let cfg' = cfg {logConfig = withIdentity ("pool" .= name) (logConfig cfg)}
        in ContT $ Async.withAsync (labelArbiterThread "pool" (Just name) >> runWorkerPool cfg')
-
--- | Name the pool a message came from.
-withPoolContext :: Text -> LogConfig -> LogConfig
-withPoolContext poolName logCfg =
-  logCfg {identityContext = identityContext logCfg <> ["pool" .= poolName]}
 
 -- | Pool connections per handler thread of an enabled pool.
 connectionsPerWorker :: Int

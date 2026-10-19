@@ -36,7 +36,7 @@ module Arbiter.Worker
   , hoistBatchCallbacks
 
     -- * Worker state
-  , module Arbiter.Worker.WorkerState
+  , WorkerState (..)
   , WorkerRuntime
   , shutdownWorkerPool
   , getWorkerState
@@ -125,4 +125,4 @@ import Arbiter.Worker.MultiQueue
 import Arbiter.Worker.Pool (runWorkerPool)
 import Arbiter.Worker.Reaper (MaintenancePace (..), runMaintenancePass)
 import Arbiter.Worker.Results (childResults, mergeChildResults, mergedChildResults, storeEncodedResult, storeJobResult)
-import Arbiter.Worker.WorkerState
+import Arbiter.Worker.WorkerState (WorkerState (..))

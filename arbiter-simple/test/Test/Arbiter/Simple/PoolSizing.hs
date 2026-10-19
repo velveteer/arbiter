@@ -20,10 +20,11 @@ import Arbiter.Worker.Config
   , transactionalWorkerConfig
   , validateWorkerConfig
   )
-import Control.Monad (forM_, void)
+import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
 import Data.Either (isLeft)
+import Data.Foldable (for_)
 import Data.IORef (newIORef, readIORef)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
@@ -79,7 +80,7 @@ spec connStr = do
         env <- createSimpleEnvWithConfig (Proxy @SizingTestRegistry) connStr testSchema poolCfg
         withAsync (runSimpleDb env $ runWorkerPools pools) $ \_ -> do
           producer <- createSimpleEnv (Proxy @SizingTestRegistry) connStr testSchema
-          forM_ [1 :: Int .. 6] $ \jobIndex ->
+          for_ [1 :: Int .. 6] $ \jobIndex ->
             runSimpleDb producer
               $ void
               $ HL.insertJob (defaultJob (SimpleTask (T.pack ("sizing " <> show jobIndex))))

@@ -64,8 +64,8 @@ library
     Arbiter.Worker.Heartbeat.Guard.Loop
     Arbiter.Worker.Heartbeat.Guard.Signal
     Arbiter.Worker.Heartbeat.Guard.State
-    Arbiter.Worker.MultiQueue
     Arbiter.Worker.Logger.Internal
+    Arbiter.Worker.MultiQueue
     Arbiter.Worker.NotificationListener
     Arbiter.Worker.Pool
     Arbiter.Worker.Processing

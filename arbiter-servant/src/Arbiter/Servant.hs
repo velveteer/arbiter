@@ -75,4 +75,4 @@ import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
 
 import Arbiter.Servant.API
 import Arbiter.Servant.Server
-import Arbiter.Servant.Types hiding (bodylessContentType, jobLeasePairs)
+import Arbiter.Servant.Types

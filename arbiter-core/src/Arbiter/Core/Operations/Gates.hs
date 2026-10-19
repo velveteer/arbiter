@@ -20,7 +20,7 @@ import Data.Aeson (FromJSON, ToJSON, Value, parseJSON, toJSON)
 import Data.Aeson.Types (parseEither, parseMaybe)
 import Data.Bifunctor (second)
 import Data.List (sort)
-import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
@@ -33,6 +33,7 @@ import Arbiter.Core.MonadArbiter qualified as MA
 import Arbiter.Core.Sql.Gates qualified as Sql
 import Arbiter.Core.Sql.QQ qualified as QQ
 import Arbiter.Core.SqlLiterals (intLiteral)
+import Arbiter.Core.Threads (microsPerSecond)
 
 -- ---------------------------------------------------------------------------
 -- Global Gate Operations
@@ -42,7 +43,7 @@ import Arbiter.Core.SqlLiterals (intLiteral)
 -- database aborts a statement that exceeds the limit.
 setLocalStatementTimeout :: (MonadArbiter m) => NominalDiffTime -> m ()
 setLocalStatementTimeout limit =
-  let millis = ceiling (realToFrac limit * 1000 :: Double) :: Int
+  let millis = ceiling (realToFrac limit * millisPerSecond) :: Int
       millisText = intLiteral millis
    in void $
         MA.executeQuery
@@ -105,9 +106,7 @@ runGatedInner
   -> (Maybe Value -> m (a, Maybe Value))
   -> m (Maybe a)
 runGatedInner schemaName task interval work = do
-  _ <-
-    MA.executeStatement
-      (Sql.ensureGateRowSQL schemaName task)
+  void $ MA.executeStatement (Sql.ensureGateRowSQL schemaName task)
   gateOpen <- checkGateOuter
   if not gateOpen
     then pure Nothing
@@ -115,11 +114,9 @@ runGatedInner schemaName task interval work = do
   where
     intervalSecs = realToFrac interval :: Double
 
-    checkGateOuter = do
-      rows <- MA.executeQuery (Sql.checkGateSQL schemaName task intervalSecs)
-      pure $ fromMaybe True (listToMaybe rows)
+    checkGateOuter = and <$> MA.executeQuery (Sql.checkGateSQL schemaName task intervalSecs)
 
-    tryClaimGate = listToMaybe <$> MA.executeQuery (Sql.tryClaimGateSQL schemaName task intervalSecs)
+    tryClaimGate = MA.queryMaybe (Sql.tryClaimGateSQL schemaName task intervalSecs)
 
     ran state = do
       (result, next) <- work state
@@ -130,9 +127,7 @@ runGatedInner schemaName task interval work = do
 gateNameFor :: (MonadArbiter m) => Text -> [Text] -> m Text
 gateNameFor prefix parts
   | T.length joined <= maxGateNameLength = pure (prefix <> ":" <> joined)
-  | otherwise = do
-      rows <- MA.executeQuery (Sql.gateNameDigestSQL joined)
-      pure (prefix <> ":#" <> fromMaybe joined (listToMaybe rows))
+  | otherwise = (\digest -> prefix <> ":#" <> fromMaybe joined digest) <$> MA.queryMaybe (Sql.gateNameDigestSQL joined)
   where
     joined = T.intercalate "," (sort parts)
 
@@ -165,7 +160,7 @@ runGatedShared
   -> m a
   -> m (Maybe (Shared a))
 runGatedShared schemaName task interval maxAge work =
-  MA.executeQuery claimOrRead >>= maybe (pure Nothing) shared . listToMaybe
+  MA.queryMaybe claimOrRead >>= maybe (pure Nothing) shared
   where
     claimOrRead =
       Sql.claimOrReadGateSQL schemaName task (realToFrac interval) (realToFrac maxAge)
@@ -184,4 +179,8 @@ runGatedShared schemaName task interval maxAge work =
 
 -- | An interval in microseconds, for the timeout and delay primitives.
 micros :: NominalDiffTime -> Int
-micros seconds = round (realToFrac seconds * 1_000_000 :: Double)
+micros seconds = round (realToFrac seconds * microsPerSecond :: Double)
+
+-- | Milliseconds in one second.
+millisPerSecond :: Double
+millisPerSecond = 1000

@@ -16,10 +16,11 @@ import Arbiter.Test.Concurrency
   )
 import Arbiter.Test.Fixtures (TestPayload (..))
 import Arbiter.Test.Poll (bumpRef)
-import Arbiter.Test.Setup (cleanupData, createPoolOf, setupOnce)
+import Arbiter.Test.Setup (cleanupData, concurrencyPoolSize, createPoolOf, setupOnce, withConn)
 import Control.Concurrent (threadDelay)
-import Control.Monad (forM_, replicateM_, void, when)
+import Control.Monad (replicateM_, void, when)
 import Data.ByteString (ByteString)
+import Data.Foldable (for_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Pool (withResource)
 import Data.Proxy (Proxy (..))
@@ -38,9 +39,17 @@ type SimpleConcurrencyTestRegistry = '[Queue "arbiter_simple_concurrency_test" T
 testTable :: Text
 testTable = "arbiter_simple_concurrency_test"
 
+-- | Rounds of the group serialization race.
+groupSerializationRounds :: Int
+groupSerializationRounds = 500
+
+-- | Wait before a claimer polls again after an empty claim.
+claimerIdleDelayMicros :: Int
+claimerIdleDelayMicros = 1_000
+
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
-  sharedPool <- runIO (createPoolOf 10 connStr)
+  sharedPool <- runIO (createPoolOf concurrencyPoolSize connStr)
   sharedEnv <- runIO (createSimpleEnvWithPool (Proxy @SimpleConcurrencyTestRegistry) sharedPool testSchema)
   around (\action -> withResource sharedPool (cleanupData testSchema testTable) >> action sharedEnv) $ do
     concurrencySpec @TestPayload TestMessage runSimpleDb
@@ -50,8 +59,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
       it "groups trigger serializes concurrent inserts within a group" $ \env -> do
         violationsRef <- newIORef (0 :: Int)
 
-        replicateM_ 500 $ do
-          connSlow <- PG.connectPostgreSQL connStr
+        replicateM_ groupSerializationRounds $ withConn connStr $ \connSlow -> do
           _ <- PG.execute_ connSlow "BEGIN"
 
           -- Pod 1 inserts inside the slow transaction. The groups trigger holds the row lock.
@@ -71,17 +79,16 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
                        pure []
                    , do
                        _ <- PG.execute_ connSlow "COMMIT"
-                       PG.close connSlow
                        pure []
                    ]
 
           let allClaimed = concat results
           -- Any claimed job from this group must be Pod 1's job, which has the lower id.
-          forM_ allClaimed $ \job ->
+          for_ allClaimed $ \job ->
             when (groupKey job == Just "serialize" && primaryKey job /= primaryKey jobA) $
               bumpRef violationsRef
 
-          forM_ allClaimed $ \job -> void $ runSimpleDb env (HL.ackJob job)
+          for_ allClaimed $ \job -> void $ runSimpleDb env (HL.ackJob job)
           drainAll
             (runSimpleDb env (HL.claimNextVisibleJobs 100 60) :: IO [JobRead TestPayload])
             (void . runSimpleDb env . HL.ackJob)
@@ -106,10 +113,10 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
               let go = do
                     done <- readIORef doneRef
                     claimed <- runSimpleDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]
-                    forM_ claimed $ \job -> void $ runSimpleDb env (HL.ackJob job)
+                    for_ claimed $ \job -> void $ runSimpleDb env (HL.ackJob job)
                     if done && null claimed
                       then pure ()
-                      else do when (null claimed) $ threadDelay 1_000; go
+                      else do when (null claimed) $ threadDelay claimerIdleDelayMicros; go
               go
 
         _ <-

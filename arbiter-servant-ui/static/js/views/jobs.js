@@ -569,11 +569,11 @@ export const JobsTab = {
                   <template v-if="job._childCount">
                     <a v-if="mode === 'tree'" href="#" class="text-decoration-none d-inline-flex align-items-center gap-1" @click.prevent="toggleChildren(job.primaryKey)">
                       <span class="expand-arrow">{{ expanded[job.primaryKey] ? '▼' : '▶' }}</span>
-                      <span class="badge bg-info-subtle text-info-emphasis">{{ job._childCount }} {{ pluralize(job._childCount, 'child', 'children') }}</span>
+                      <span :class="tone('info')" class="badge">{{ job._childCount }} {{ pluralize(job._childCount, 'child', 'children') }}</span>
                     </a>
                     <span v-else class="text-muted small">{{ job._childCount }} {{ pluralize(job._childCount, 'child', 'children') }}</span>
                   </template>
-                  <span v-if="job._dlqChildCount" class="badge bg-danger-subtle text-danger-emphasis">{{ job._dlqChildCount }} in DLQ</span>
+                  <span v-if="job._dlqChildCount" :class="tone('danger')" class="badge">{{ job._dlqChildCount }} in DLQ</span>
                 </span>
                 <template v-else>{{ EMPTY }}</template>
               </td>

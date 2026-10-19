@@ -27,9 +27,9 @@ import Arbiter.Core.Sql.DLQ qualified as Tmpl
 import Arbiter.Core.Sql.Groups qualified as GroupsTmpl
 import Arbiter.Core.Sql.Tree qualified as TreeTmpl
 import Control.Concurrent (threadDelay)
-import Control.Monad (forM, forM_, void)
+import Control.Monad (void)
 import Data.Aeson qualified as Aeson
-import Data.Foldable (traverse_)
+import Data.Foldable (for_, traverse_)
 import Data.Int (Int32, Int64)
 import Data.List (find, sort)
 import Data.List.NonEmpty (NonEmpty (..))
@@ -39,6 +39,7 @@ import Data.Maybe (isJust, listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (addUTCTime, getCurrentTime)
+import Data.Traversable (for)
 import Data.UUID.Types qualified as UUID
 import GHC.TypeLits (KnownSymbol)
 import Test.Hspec
@@ -46,6 +47,18 @@ import UnliftIO.Async (concurrently)
 
 import Arbiter.Test.Concurrency (findDuplicates)
 import Arbiter.Test.Setup (execQuery, execStatement, truncateToMicros)
+
+-- | Past a 0.5 s lease.
+pastHalfSecondLeaseMicros :: Int
+pastHalfSecondLeaseMicros = 600_000
+
+-- | Past a 1 s lease.
+pastLeaseMicros :: Int
+pastLeaseMicros = 1_100_000
+
+-- | An id that no job row has.
+absentJobId :: Int64
+absentJobId = 999_999
 
 -- | Build a test suite for the given 'MonadArbiter' runner.
 -- Build the schema with 'Arbiter.Test.Setup.setupOnce' and empty it before each test with 'Arbiter.Test.Setup.cleanupData'.
@@ -500,7 +513,7 @@ operationsSpec mkMessage mkResult runM = do
             runM env $ do
               schemaName <- getSchema
               MA.executeQuery (GroupsTmpl.groupsWindowSQL schemaName (HL.queueTable @payload @m) limit cursor)
-      runM env $ forM_ keys $ \key -> void (HL.insertJob (defaultGroupedJob key (mkMessage key)))
+      runM env $ for_ keys $ \key -> void (HL.insertJob (defaultGroupedJob key (mkMessage key)))
 
       groupsWindow 2 Nothing >>= (`shouldBe` take 2 keys)
       groupsWindow 2 (Just "grp-cursor-b") >>= (`shouldBe` drop 2 keys)
@@ -509,7 +522,7 @@ operationsSpec mkMessage mkResult runM = do
     it "reclaims an emptied group the cursor has already passed" $ \env -> do
       let emptied = "grp-reclaim-a"
           laterKeys = ["grp-reclaim-b", "grp-reclaim-c"]
-      runM env $ forM_ (emptied : laterKeys) $ \key -> void (HL.insertJob (defaultGroupedJob key (mkMessage key)))
+      runM env $ for_ (emptied : laterKeys) $ \key -> void (HL.insertJob (defaultGroupedJob key (mkMessage key)))
       claimed <- claimJobs env 1
       void $ runM env (HL.ackJob (head claimed))
 
@@ -538,7 +551,7 @@ operationsSpec mkMessage mkResult runM = do
           emptyOut key = do
             Just job <- runM env (HL.insertJob (defaultGroupedJob key (mkMessage key)))
             deleteRowDirectly env (primaryKey job)
-      runM env $ forM_ live $ \key -> void (HL.insertJob (defaultGroupedJob key (mkMessage key)))
+      runM env $ for_ live $ \key -> void (HL.insertJob (defaultGroupedJob key (mkMessage key)))
       emptyOut low
       emptyOut high
       groupCount env low `shouldReturn` Just 0
@@ -563,7 +576,7 @@ operationsSpec mkMessage mkResult runM = do
             runM env $ do
               schemaName <- getSchema
               Ops.passResume <$> Ops.refreshGroupsForQueue schemaName (HL.queueTable @payload @m) 2 cursor
-      runM env $ forM_ keys $ \key -> void (HL.insertJob (defaultGroupedJob key (mkMessage key)))
+      runM env $ for_ keys $ \key -> void (HL.insertJob (defaultGroupedJob key (mkMessage key)))
       driftGroupCount env tailKey 99
       groupCount env tailKey `shouldReturn` Just 99
 
@@ -598,7 +611,7 @@ operationsSpec mkMessage mkResult runM = do
 
     it "keeps the latest live lease as a group's in-flight deadline" $ \env -> do
       let key = "grp-latest-lease"
-      runM env $ forM_ ["lease-a", "lease-b"] $ \name -> void (HL.insertJob (defaultGroupedJob key (mkMessage name)))
+      runM env $ for_ ["lease-a", "lease-b"] $ \name -> void (HL.insertJob (defaultGroupedJob key (mkMessage name)))
       batches <- runM env (HL.claimNextVisibleJobsBatched 2 1 60) :: IO [NE.NonEmpty (JobRead payload)]
       map length batches `shouldBe` [2]
       void $ runM env (HL.setVisibilityTimeout 3600 (NE.head (head batches)))
@@ -667,7 +680,7 @@ operationsSpec mkMessage mkResult runM = do
       result `shouldBe` 1
 
       -- Wait for it to expire
-      threadDelay 600_000
+      threadDelay pastHalfSecondLeaseMicros
 
       -- Claimable again
       reclaimed <- claimJobs env 1
@@ -677,7 +690,7 @@ operationsSpec mkMessage mkResult runM = do
     it "settles two batches over the same parents concurrently without deadlocking" $ \env -> do
       -- A bulk ack and a bulk DLQ move each hold one parent and want the other.
       -- Both take the union of parent locks up front.
-      forM_ [1 .. 8 :: Int] $ \round' -> do
+      for_ [1 .. 8 :: Int] $ \round' -> do
         let name side = mkMessage ("lockorder-" <> T.pack (show round') <> "-" <> side)
             tree side =
               JT.rollup
@@ -780,7 +793,7 @@ operationsSpec mkMessage mkResult runM = do
 
       -- Simulate handler manually acking 2 jobs mid-processing
       let (toAck, stillProcessing) = splitAt 2 claimed
-      forM_ toAck $ \job -> void $ runM env (HL.ackJob job)
+      for_ toAck $ \job -> void $ runM env (HL.ackJob job)
 
       -- Now the heartbeat fires
       results <- runM env (HL.setVisibilityTimeoutBatch 120 claimed)
@@ -1061,7 +1074,7 @@ operationsSpec mkMessage mkResult runM = do
       Just inserted <- runM env (HL.insertJob (setMaxAttempts (Just 1) (defaultJob (mkMessage "pin-sweep-flagged"))))
       [_held] <- runM env (HL.claimNextVisibleJobsAs 1 1 UUID.nil) :: IO [JobRead payload]
       runM env (HL.forceCancelJob @payload (primaryKey inserted)) `shouldReturn` 1
-      threadDelay 1_100_000
+      threadDelay pastLeaseMicros
       isJust <$> getJob env (primaryKey inserted) `shouldReturn` True
 
       runM env (getSchema >>= \schemaName -> Ops.sweepExhaustedJobs schemaName [HL.queueTable @payload @m])
@@ -1121,14 +1134,14 @@ operationsSpec mkMessage mkResult runM = do
       Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "pin-reschedule-flagged")))
       [_held] <- runM env (HL.claimNextVisibleJobsAs 1 1 UUID.nil) :: IO [JobRead payload]
       runM env (HL.forceCancelJob @payload (primaryKey inserted)) `shouldReturn` 1
-      threadDelay 1_100_000
+      threadDelay pastLeaseMicros
       now <- getCurrentTime
       runM env (HL.rescheduleJob @payload (primaryKey inserted) now) `shouldReturn` 0
 
     it "reschedule refuses an exhausted job" $ \env -> do
       Just inserted <- runM env (HL.insertJob (setMaxAttempts (Just 1) (defaultJob (mkMessage "pin-reschedule-exhausted"))))
       [_held] <- runM env (HL.claimNextVisibleJobsAs 1 1 UUID.nil) :: IO [JobRead payload]
-      threadDelay 1_100_000
+      threadDelay pastLeaseMicros
       now <- getCurrentTime
       runM env (HL.rescheduleJob @payload (primaryKey inserted) now) `shouldReturn` 0
 
@@ -1858,7 +1871,7 @@ operationsSpec mkMessage mkResult runM = do
             | index <- [1 .. 5 :: Int]
             ]
 
-      forM_ jobs $ \job -> do
+      for_ jobs $ \job -> do
         Just _inserted <- runM env (HL.insertJob job)
         claimed <- claimJobs env 1
         claimed `shouldNotBe` []
@@ -1991,7 +2004,7 @@ operationsSpec mkMessage mkResult runM = do
 
     it "claims multiple jobs from the same group up to batch size" $ \env -> do
       -- Insert 5 jobs in the same group
-      forM_ [1 .. 5 :: Int] $ \index ->
+      for_ [1 .. 5 :: Int] $ \index ->
         void $ runM env (HL.insertJob (defaultGroupedJob "batch-size-test" (mkMessage (T.pack $ "Job" <> show index))))
 
       -- Claim with batch size 3, limit 10
@@ -2001,11 +2014,11 @@ operationsSpec mkMessage mkResult runM = do
       length batches `shouldBe` 1
       let batch = NE.toList (head batches)
       length batch `shouldBe` 3
-      forM_ batch $ \job -> groupKey job `shouldBe` Just "batch-size-test"
+      for_ batch $ \job -> groupKey job `shouldBe` Just "batch-size-test"
 
     it "respects batch size limit per group" $ \env -> do
       -- Insert 10 jobs in group batch-limit-test-1 and 10 in group batch-limit-test-2
-      forM_ [1 .. 10 :: Int] $ \index -> do
+      for_ [1 .. 10 :: Int] $ \index -> do
         void $ runM env (HL.insertJob (defaultGroupedJob "batch-limit-test-1" (mkMessage (T.pack $ "G1-" <> show index))))
         void $ runM env (HL.insertJob (defaultGroupedJob "batch-limit-test-2" (mkMessage (T.pack $ "G2-" <> show index))))
 
@@ -2014,14 +2027,14 @@ operationsSpec mkMessage mkResult runM = do
 
       -- 2 batches of 3 jobs each, one per group
       length batches `shouldBe` 2
-      forM_ batches $ \batch -> NE.length batch `shouldBe` 3
+      for_ batches $ \batch -> NE.length batch `shouldBe` 3
       let batchGroups = map (\batch -> groupKey (NE.head batch)) batches
       batchGroups `shouldMatchList` [Just "batch-limit-test-1", Just "batch-limit-test-2"]
 
     it "respects overall limit across groups" $ \env -> do
       -- Insert 10 jobs each in 5 different groups
-      forM_ [1 .. 5 :: Int] $ \groupIndex ->
-        forM_ [1 .. 10 :: Int] $ \index ->
+      for_ [1 .. 5 :: Int] $ \groupIndex ->
+        for_ [1 .. 10 :: Int] $ \index ->
           void $
             runM
               env
@@ -2036,15 +2049,15 @@ operationsSpec mkMessage mkResult runM = do
       -- Exactly 3 batches, one per group
       length batches `shouldBe` 3
       -- Every batch is grouped
-      forM_ batches $ \batch -> groupKey (NE.head batch) `shouldSatisfy` isJust
+      for_ batches $ \batch -> groupKey (NE.head batch) `shouldSatisfy` isJust
 
     it "ungrouped and grouped jobs compete fairly for batch slots" $ \env -> do
       -- Insert ungrouped first (low IDs), then grouped (high IDs)
-      forM_ [1 .. 3 :: Int] $ \index ->
+      for_ [1 .. 3 :: Int] $ \index ->
         void $ runM env (HL.insertJob (defaultJob (mkMessage (T.pack $ "U" <> show index))))
-      forM_ [1 .. 2 :: Int] $ \index ->
+      for_ [1 .. 2 :: Int] $ \index ->
         void $ runM env (HL.insertJob (defaultGroupedJob "fair-batch-a" (mkMessage (T.pack $ "Ga" <> show index))))
-      forM_ [1 .. 2 :: Int] $ \index ->
+      for_ [1 .. 2 :: Int] $ \index ->
         void $ runM env (HL.insertJob (defaultGroupedJob "fair-batch-b" (mkMessage (T.pack $ "Gb" <> show index))))
 
       -- Claim with batchSize=2, limit=3 (3 batch slots)
@@ -2096,7 +2109,7 @@ operationsSpec mkMessage mkResult runM = do
       length claimed2 `shouldBe` 0
 
       -- Ack the first two jobs
-      forM_ claimed1 $ \job -> void $ runM env (HL.ackJob job)
+      for_ claimed1 $ \job -> void $ runM env (HL.ackJob job)
 
       -- The third job is claimable now
       claimed3 <- claimBatchedFlat env 2 10 :: IO [JobRead payload]
@@ -2116,12 +2129,12 @@ operationsSpec mkMessage mkResult runM = do
       length batches `shouldBe` 1
       let batch = NE.toList (head batches)
       length batch `shouldBe` 3
-      forM_ batch $ \job -> groupKey job `shouldBe` Just "batch-priority-test"
+      for_ batch $ \job -> groupKey job `shouldBe` Just "batch-priority-test"
       map priority batch `shouldBe` [0, 5, 10]
 
     it "increments attempts for all jobs in batch" $ \env -> do
       -- Insert 3 jobs in same group
-      forM_ [1 .. 3 :: Int] $ \index ->
+      for_ [1 .. 3 :: Int] $ \index ->
         void $ runM env (HL.insertJob (defaultGroupedJob "batch-attempts-test" (mkMessage (T.pack $ "Job" <> show index))))
 
       -- Claim batch
@@ -2129,11 +2142,11 @@ operationsSpec mkMessage mkResult runM = do
       length claimed `shouldBe` 3
 
       -- Every job has attempts = 1
-      forM_ claimed $ \job -> attempts job `shouldBe` 1
+      for_ claimed $ \job -> attempts job `shouldBe` 1
 
     it "blocks group while batch is in-flight" $ \env -> do
       -- Insert 10 jobs in same group
-      forM_ [1 .. 10 :: Int] $ \index ->
+      for_ [1 .. 10 :: Int] $ \index ->
         void $ runM env (HL.insertJob (defaultGroupedJob "batch-block-test" (mkMessage (T.pack $ "Job" <> show index))))
 
       -- Claim first batch of 5
@@ -2145,7 +2158,7 @@ operationsSpec mkMessage mkResult runM = do
       length secondClaim `shouldBe` 0
 
       -- Ack the first batch
-      forM_ firstBatch $ \job -> void $ runM env (HL.ackJob job)
+      for_ firstBatch $ \job -> void $ runM env (HL.ackJob job)
 
       -- The remaining 5 jobs are claimable now
       thirdClaim <- claimBatchedFlat env 5 10 :: IO [JobRead payload]
@@ -2170,7 +2183,7 @@ operationsSpec mkMessage mkResult runM = do
       length ungroupedBatches `shouldBe` 1
       NE.length (head ungroupedBatches) `shouldBe` 2
       length groupedBatches `shouldBe` 2
-      forM_ groupedBatches $ \batch -> NE.length batch `shouldBe` 2
+      for_ groupedBatches $ \batch -> NE.length batch `shouldBe` 2
       let batchGroups = sort $ map (\batch -> groupKey (NE.head batch)) groupedBatches
       batchGroups `shouldBe` [Just "batch-mixed-test-1", Just "batch-mixed-test-2"]
 
@@ -2178,10 +2191,10 @@ operationsSpec mkMessage mkResult runM = do
       -- Insert grouped and ungrouped interleaved. Group members have
       -- non-consecutive ids.
       void $ runM env (HL.insertJob (defaultGroupedJob "spaced-group" (mkMessage "G1")))
-      forM_ [1 .. 3 :: Int] $ \index ->
+      for_ [1 .. 3 :: Int] $ \index ->
         void $ runM env (HL.insertJob (defaultJob (mkMessage (T.pack $ "U" <> show index))))
       void $ runM env (HL.insertJob (defaultGroupedJob "spaced-group" (mkMessage "G2")))
-      forM_ [4 .. 6 :: Int] $ \index ->
+      for_ [4 .. 6 :: Int] $ \index ->
         void $ runM env (HL.insertJob (defaultJob (mkMessage (T.pack $ "U" <> show index))))
       void $ runM env (HL.insertJob (defaultGroupedJob "spaced-group" (mkMessage "G3")))
 
@@ -2198,7 +2211,7 @@ operationsSpec mkMessage mkResult runM = do
       -- Ungrouped jobs form 2 batches of 3
       let ungroupedBatches = filter (\batch -> groupKey (NE.head batch) == Nothing) batches
       length ungroupedBatches `shouldBe` 2
-      forM_ ungroupedBatches $ \batch -> NE.length batch `shouldBe` 3
+      for_ ungroupedBatches $ \batch -> NE.length batch `shouldBe` 3
 
     it "batched mode claims children but not suspended finalizers" $ \env -> do
       -- Insert a rollup tree: finalizer + 2 children
@@ -2227,7 +2240,7 @@ operationsSpec mkMessage mkResult runM = do
   describe "Batch Admin Operations" $ do
     it "cancelJobsBatch deletes multiple jobs" $ \env -> do
       -- Insert 5 jobs
-      insertedJobs <- forM [1 .. 5 :: Int] $ \index -> do
+      insertedJobs <- for [1 .. 5 :: Int] $ \index -> do
         Just job <- runM env (HL.insertJob (defaultJob (mkMessage (T.pack $ "Cancel" <> show index))))
         pure job
 
@@ -2250,12 +2263,12 @@ operationsSpec mkMessage mkResult runM = do
       Just job2 <- runM env (HL.insertJob (defaultJob (mkMessage "Keep2")))
 
       -- Try to cancel with mix of valid and invalid IDs
-      let idsToCancel = [primaryKey job1, 999999, primaryKey job2, 888888]
+      let idsToCancel = [primaryKey job1, absentJobId, primaryKey job2, succ absentJobId]
       deleted <- runM env (HL.cancelJobsBatch @payload idsToCancel)
       deleted `shouldBe` 2
 
     it "cancels two batches over the same parents concurrently without deadlocking" $ \env -> do
-      forM_ [1 .. 8 :: Int] $ \round' -> do
+      for_ [1 .. 8 :: Int] $ \round' -> do
         let name side = mkMessage ("cancel-lockorder-" <> T.pack (show round') <> "-" <> side)
             tree side =
               JT.rollup
@@ -2277,7 +2290,7 @@ operationsSpec mkMessage mkResult runM = do
 
     it "moveToDLQBatch moves multiple jobs with individual error messages" $ \env -> do
       -- Insert and claim 3 jobs
-      claimedJobs <- forM [1 .. 3 :: Int] $ \index -> do
+      claimedJobs <- for [1 .. 3 :: Int] $ \index -> do
         Just _ <-
           runM
             env
@@ -2324,7 +2337,7 @@ operationsSpec mkMessage mkResult runM = do
 
     it "deleteDLQJobsBatch deletes multiple DLQ jobs" $ \env -> do
       -- Insert, claim, and move 5 jobs to DLQ
-      forM_ [1 .. 5 :: Int] $ \index -> do
+      for_ [1 .. 5 :: Int] $ \index -> do
         Just _ <-
           runM
             env
@@ -2352,7 +2365,7 @@ operationsSpec mkMessage mkResult runM = do
   describe "Admin Operations" $ do
     it "listJobs returns jobs with pagination" $ \env -> do
       -- Insert 5 jobs
-      forM_ [1 .. 5 :: Int] $ \index ->
+      for_ [1 .. 5 :: Int] $ \index ->
         void $ runM env (HL.insertJob (defaultJob (mkMessage (T.pack $ "List" <> show index))))
 
       -- List first 2
@@ -2378,20 +2391,20 @@ operationsSpec mkMessage mkResult runM = do
       found `shouldBe` Just inserted
 
     it "getJobById returns Nothing when job doesn't exist" $ \env -> do
-      found <- getJob env 999999
+      found <- getJob env absentJobId
       found `shouldBe` Nothing
 
     it "listJobsByGroup returns jobs filtered by group key" $ \env -> do
       -- Insert jobs in different groups
-      forM_ [1 .. 3 :: Int] $ \index ->
+      for_ [1 .. 3 :: Int] $ \index ->
         void $ runM env (HL.insertJob (defaultGroupedJob "group-filter-a" (mkMessage (T.pack $ "A" <> show index))))
-      forM_ [1 .. 2 :: Int] $ \index ->
+      for_ [1 .. 2 :: Int] $ \index ->
         void $ runM env (HL.insertJob (defaultGroupedJob "group-filter-b" (mkMessage (T.pack $ "B" <> show index))))
 
       -- Get only group A
       groupAJobs <- runM env (HL.listJobsByGroup @payload "group-filter-a" 10 0)
       length groupAJobs `shouldBe` 3
-      forM_ groupAJobs $ \job -> groupKey job `shouldBe` Just "group-filter-a"
+      for_ groupAJobs $ \job -> groupKey job `shouldBe` Just "group-filter-a"
 
     it "promoteJob makes delayed job immediately visible" $ \env -> do
       -- Insert a job, claim it, and put it in retry backoff
@@ -2416,7 +2429,7 @@ operationsSpec mkMessage mkResult runM = do
 
     it "getQueueStats returns correct statistics" $ \env -> do
       -- Insert 5 jobs
-      forM_ [1 .. 5 :: Int] $ \index ->
+      for_ [1 .. 5 :: Int] $ \index ->
         void $
           runM
             env
@@ -2617,7 +2630,7 @@ operationsSpec mkMessage mkResult runM = do
       HL.readyJobs stats `shouldBe` 0
 
     it "getQueueStats counts grouped jobs behind their head as blocked" $ \env -> do
-      forM_ [1 .. 3 :: Int] $ \index ->
+      for_ [1 .. 3 :: Int] $ \index ->
         void $ runM env (HL.insertJob (defaultGroupedJob "blocked-group" (mkMessage (T.pack ("B" <> show index)))))
       queued <- runM env (HL.getQueueStats @payload)
       HL.readyJobs queued `shouldBe` 1
@@ -2633,7 +2646,7 @@ operationsSpec mkMessage mkResult runM = do
   describe "Count Operations" $ do
     it "countJobs returns total job count" $ \env -> do
       -- Insert 4 jobs
-      forM_ [1 .. 4 :: Int] $ \index ->
+      for_ [1 .. 4 :: Int] $ \index ->
         void $ runM env (HL.insertJob (defaultJob (mkMessage (T.pack $ "Count" <> show index))))
 
       count <- runM env (HL.countJobs @payload)
@@ -2641,9 +2654,9 @@ operationsSpec mkMessage mkResult runM = do
 
     it "countJobsByGroup returns count for specific group" $ \env -> do
       -- Insert jobs in different groups
-      forM_ [1 .. 3 :: Int] $ \index ->
+      for_ [1 .. 3 :: Int] $ \index ->
         void $ runM env (HL.insertJob (defaultGroupedJob "count-group-x" (mkMessage (T.pack $ "X" <> show index))))
-      forM_ [1 .. 2 :: Int] $ \index ->
+      for_ [1 .. 2 :: Int] $ \index ->
         void $ runM env (HL.insertJob (defaultGroupedJob "count-group-y" (mkMessage (T.pack $ "Y" <> show index))))
 
       countX <- runM env (HL.countJobsByGroup @payload "count-group-x")
@@ -2658,7 +2671,7 @@ operationsSpec mkMessage mkResult runM = do
       count0 `shouldBe` 0
 
       -- Move 2 jobs to DLQ
-      forM_ [1 .. 2 :: Int] $ \index -> do
+      for_ [1 .. 2 :: Int] $ \index -> do
         Just _ <-
           runM
             env
@@ -3147,8 +3160,8 @@ operationsSpec mkMessage mkResult runM = do
 
       -- The children are not suspended
       length children `shouldBe` 2
-      forM_ children $ \child -> suspended child `shouldBe` False
-      forM_ children $ \child -> parentId child `shouldBe` Just (primaryKey parent)
+      for_ children $ \child -> suspended child `shouldBe` False
+      for_ children $ \child -> parentId child `shouldBe` Just (primaryKey parent)
 
       -- Only the children are claimable
       claimed <- claimJobs env 10
@@ -3212,8 +3225,8 @@ operationsSpec mkMessage mkResult runM = do
       groupKey parent `shouldBe` Just "shared-group"
 
       -- The children are not suspended and share the group key
-      forM_ children $ \child -> suspended child `shouldBe` False
-      forM_ children $ \child -> groupKey child `shouldBe` Just "shared-group"
+      for_ children $ \child -> suspended child `shouldBe` False
+      for_ children $ \child -> groupKey child `shouldBe` Just "shared-group"
 
       -- A suspended job does not hold the group. The children are claimable.
       claimed <- claimJobs env 1
@@ -3271,7 +3284,7 @@ operationsSpec mkMessage mkResult runM = do
       exists `shouldBe` True
 
     it "dlqJobExists returns False for non-existent DLQ job" $ \env -> do
-      exists <- runM env (HL.dlqJobExists @payload 99999)
+      exists <- runM env (HL.dlqJobExists @payload absentJobId)
       exists `shouldBe` False
 
     it "retryFromDLQ refuses when parent no longer exists" $ \env -> do
@@ -3451,7 +3464,7 @@ operationsSpec mkMessage mkResult runM = do
       -- Claim both children and DLQ both. The parent wakes.
       claimed <- claimJobs env 2
       length claimed `shouldBe` 2
-      forM_ claimed $ \job -> void $ runM env (HL.moveToDLQ "child failed" job)
+      for_ claimed $ \job -> void $ runM env (HL.moveToDLQ "child failed" job)
 
       -- Claim the woken parent and DLQ it. All three are in the DLQ.
       [parentClaim] <- claimJobs env 1
@@ -3490,7 +3503,7 @@ operationsSpec mkMessage mkResult runM = do
       -- Claim both children and DLQ both. The parent wakes.
       claimed <- claimJobs env 2
       length claimed `shouldBe` 2
-      forM_ claimed $ \job -> void $ runM env (HL.moveToDLQ "child failed" job)
+      for_ claimed $ \job -> void $ runM env (HL.moveToDLQ "child failed" job)
 
       -- Claim the woken parent and DLQ it. All three are in the DLQ.
       [parentClaim] <- claimJobs env 1
@@ -3512,7 +3525,7 @@ operationsSpec mkMessage mkResult runM = do
       -- Claim and ack both children. The parent wakes.
       claimedChildren <- claimJobs env 2
       length claimedChildren `shouldBe` 2
-      forM_ claimedChildren $ \job -> void $ runM env (HL.ackJob job)
+      for_ claimedChildren $ \job -> void $ runM env (HL.ackJob job)
 
       assertNotSuspended env (primaryKey parent)
 
@@ -3977,7 +3990,7 @@ operationsSpec mkMessage mkResult runM = do
       length children `shouldBe` 2
       -- Claim and DLQ both children
       claimed <- claimJobs env 10
-      forM_ claimed $ \job -> void $ runM env $ HL.moveToDLQ "fail" job
+      for_ claimed $ \job -> void $ runM env $ HL.moveToDLQ "fail" job
       count <- runM env $ HL.countDLQChildren @payload (primaryKey parent)
       count `shouldBe` 2
 
@@ -4009,7 +4022,7 @@ operationsSpec mkMessage mkResult runM = do
         $ runM env
         $ HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child2) (Aeson.String "r2")
       claimed <- claimJobs env 10
-      forM_ claimed $ \job -> void $ runM env (HL.ackJob job)
+      for_ claimed $ \job -> void $ runM env (HL.ackJob job)
       [parentJob] <- claimJobs env 1
 
       -- First DLQ round-trip: snapshot results, move to DLQ, retry
@@ -4089,11 +4102,11 @@ operationsSpec mkMessage mkResult runM = do
       isRollup sec2 `shouldBe` True
 
       -- Leaf mappers are not suspended, parented to their section
-      forM_ [m1a, m1b] $ \mapper -> do
+      for_ [m1a, m1b] $ \mapper -> do
         suspended mapper `shouldBe` False
         parentId mapper `shouldBe` Just (primaryKey sec1)
 
-      forM_ [m2a, m2b] $ \mapper -> do
+      for_ [m2a, m2b] $ \mapper -> do
         suspended mapper `shouldBe` False
         parentId mapper `shouldBe` Just (primaryKey sec2)
 
@@ -4106,7 +4119,7 @@ operationsSpec mkMessage mkResult runM = do
       length claimed `shouldBe` 5
       let claimedPayloads = map payload claimed
           expectedLeaves = map payload [m1a, m1b, m2a, m2b, solo]
-      forM_ expectedLeaves $ \expected -> claimedPayloads `shouldContain` [expected]
+      for_ expectedLeaves $ \expected -> claimedPayloads `shouldContain` [expected]
 
     it "rollup aggregates child results in results table" $ \env -> do
       -- Rollup: 3 children produce partial word lists stored in results table.
@@ -4137,7 +4150,7 @@ operationsSpec mkMessage mkResult runM = do
       void $ insertRes (primaryKey mapperC) ["forecast", "trend"]
 
       -- Ack all mappers → wakes the reducer
-      forM_ claimed $ \job -> void $ runM env (HL.ackJob job)
+      for_ claimed $ \job -> void $ runM env (HL.ackJob job)
 
       -- Claim the reducer
       [reducerJob] <- claimJobs env 1
@@ -4193,7 +4206,7 @@ operationsSpec mkMessage mkResult runM = do
       void $ insertRes (primaryKey sec2) (primaryKey m2b) ["trend", "outlook"]
 
       -- Step 3: Ack all mappers → wakes both section finalizers
-      forM_ claimed $ \job -> void $ runM env (HL.ackJob job)
+      for_ claimed $ \job -> void $ runM env (HL.ackJob job)
 
       -- Step 4: Claim both section finalizers
       sections <- claimJobs env 10
@@ -4202,13 +4215,13 @@ operationsSpec mkMessage mkResult runM = do
       let decode value = case Aeson.fromJSON value of Aeson.Success parsed -> parsed; _ -> ([] :: [Text])
 
       -- Step 5: Each section reads its children's results, merges, inserts result to root
-      forM_ sections $ \secJob -> do
+      for_ sections $ \secJob -> do
         resultMap <- runM env $ HL.getResultsByParent @payload (primaryKey secJob)
         let merged = foldMap decode (Map.elems resultMap)
         void $ insertRes (primaryKey root) (primaryKey secJob) merged
 
       -- Step 6: Ack both sections → wakes root
-      forM_ sections $ \job -> void $ runM env (HL.ackJob job)
+      for_ sections $ \job -> void $ runM env (HL.ackJob job)
 
       -- Step 7: Claim the root reducer
       [rootJob] <- claimJobs env 1
@@ -4266,7 +4279,7 @@ operationsSpec mkMessage mkResult runM = do
 
       -- Ack both children then the parent
       claimed <- claimJobs env 10
-      forM_ claimed $ \job -> void $ runM env (HL.ackJob job)
+      for_ claimed $ \job -> void $ runM env (HL.ackJob job)
       -- The parent is claimable now
       [parentJob] <- claimJobs env 1
       primaryKey parentJob `shouldBe` primaryKey parent
@@ -4361,7 +4374,7 @@ operationsSpec mkMessage mkResult runM = do
       -- Ack children to wake the parent
       claimed <- claimJobs env 10
       length claimed `shouldBe` 2
-      forM_ claimed $ \job -> void $ runM env (HL.ackJob job)
+      for_ claimed $ \job -> void $ runM env (HL.ackJob job)
 
       -- The parent is claimable now
       [parentJob] <- claimJobs env 1
@@ -4397,7 +4410,7 @@ operationsSpec mkMessage mkResult runM = do
         $ runM env
         $ HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child) (Aeson.String "retry-val")
       claimed <- claimJobs env 1
-      forM_ claimed $ \job -> void $ runM env (HL.ackJob job)
+      for_ claimed $ \job -> void $ runM env (HL.ackJob job)
       [parentJob] <- claimJobs env 1
 
       -- Persist results and move to DLQ
@@ -4443,7 +4456,7 @@ operationsSpec mkMessage mkResult runM = do
       -- Children in DLQ with cascade error
       let childDLQs = filter (\candidate -> payload (DLQ.jobSnapshot candidate) /= mkMessage "CascDLQParent") dlqJobs
       length childDLQs `shouldBe` 2
-      forM_ childDLQs $ \candidate ->
+      for_ childDLQs $ \candidate ->
         lastError (DLQ.jobSnapshot candidate) `shouldBe` Just "Parent moved to DLQ"
 
       -- The main queue is empty
@@ -4480,7 +4493,7 @@ operationsSpec mkMessage mkResult runM = do
       map payload claimed `shouldMatchList` [mkMessage "CascRetryChild1", mkMessage "CascRetryChild2"]
 
       -- Ack children → parent wakes
-      forM_ claimed $ \job -> void $ runM env (HL.ackJob job)
+      for_ claimed $ \job -> void $ runM env (HL.ackJob job)
       assertNotSuspended env (primaryKey retried)
 
       -- The parent is claimable
@@ -4594,7 +4607,7 @@ operationsSpec mkMessage mkResult runM = do
       -- The children carry the cascade error message
       let childDLQs = filter (\candidate -> payload (DLQ.jobSnapshot candidate) /= mkMessage "BatchCascParent") dlqJobs
       length childDLQs `shouldBe` 2
-      forM_ childDLQs $ \candidate ->
+      for_ childDLQs $ \candidate ->
         lastError (DLQ.jobSnapshot candidate) `shouldBe` Just "Parent moved to DLQ"
 
       -- The main queue is empty
@@ -4732,7 +4745,7 @@ operationsSpec mkMessage mkResult runM = do
       map payload claimed `shouldMatchList` [mkMessage "3LRetryLeaf1", mkMessage "3LRetryLeaf2"]
 
       -- Ack both leaves → mid-parent wakes
-      forM_ claimed $ \job -> void $ runM env (HL.ackJob job)
+      for_ claimed $ \job -> void $ runM env (HL.ackJob job)
       assertNotSuspended env (primaryKey midParent)
 
       -- Claim and ack mid-parent → grandparent wakes
@@ -4822,7 +4835,7 @@ operationsSpec mkMessage mkResult runM = do
       -- Claim and ack both children. The parent wakes.
       reClaimed <- claimJobs env 2
       length reClaimed `shouldBe` 2
-      forM_ reClaimed $ \job -> void $ runM env (HL.ackJob job)
+      for_ reClaimed $ \job -> void $ runM env (HL.ackJob job)
       assertNotSuspended env (primaryKey parent)
 
   describe "moveToDLQBatch mixed rollup and non-rollup" $ do
@@ -4859,7 +4872,7 @@ operationsSpec mkMessage mkResult runM = do
               (\candidate -> payload (DLQ.jobSnapshot candidate) `elem` [mkMessage "MixBatchChild1", mkMessage "MixBatchChild2"])
               dlqJobs
       length childDLQs `shouldBe` 2
-      forM_ childDLQs $ \candidate ->
+      for_ childDLQs $ \candidate ->
         lastError (DLQ.jobSnapshot candidate) `shouldBe` Just "Parent moved to DLQ"
 
       -- Main queue empty
@@ -4901,7 +4914,7 @@ operationsSpec mkMessage mkResult runM = do
       map payload leaves `shouldMatchList` [mkMessage "L4LeafA", mkMessage "L4LeafB"]
 
       -- Ack both leaves → L3 wakes
-      forM_ leaves $ \job -> void $ runM env (HL.ackJob job)
+      for_ leaves $ \job -> void $ runM env (HL.ackJob job)
       assertNotSuspended env (primaryKey level3)
       assertSuspended env (primaryKey level2)
       assertSuspended env (primaryKey level1)

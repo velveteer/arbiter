@@ -11,6 +11,7 @@ author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Database
 build-type:      Simple
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
 extra-doc-files: README.md
 homepage:        https://github.com/velveteer/arbiter
 bug-reports:     https://github.com/velveteer/arbiter/issues

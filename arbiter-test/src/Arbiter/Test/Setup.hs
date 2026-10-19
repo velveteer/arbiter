@@ -17,6 +17,9 @@ module Arbiter.Test.Setup
   , createSharedPool
   , createPoolOf
   , createPoolWith
+  , sharedPoolSize
+  , concurrencyPoolSize
+  , stateMachinePoolSize
   , truncateToMicros
   , mkTime
   , seedConcurrencyPolicySQL
@@ -80,7 +83,7 @@ cleanupData schemaName tableName conn = do
   execute_ conn "SET client_min_messages = WARNING"
   -- A draining worker pool can still hold locks on the job and groups tables.
   -- Bound the wait and retry on a deadlock or lock timeout.
-  execute_ conn "SET lock_timeout = '5s'"
+  execute_ conn ("SET lock_timeout = " <> textLiteral cleanupLockTimeout)
   -- Rate-limit policies are seeded once per suite.
   let truncated = filter (/= RL.arbiterRateLimitPoliciesTableName) (allSchemaTables [tableName])
       truncateSql =
@@ -94,11 +97,23 @@ cleanupData schemaName tableName conn = do
           -- 40P01 deadlock_detected, 55P03 lock_not_available
           Left sqlErr
             | sqlState sqlErr `elem` ["40P01", "55P03"] && remaining > (0 :: Int) ->
-                threadDelay 100_000 >> go (remaining - 1)
+                threadDelay cleanupRetryDelayMicros >> go (remaining - 1)
             | otherwise -> throwIO sqlErr
-  go 10
+  go cleanupRetries
   execute_ conn "RESET lock_timeout"
   execute_ conn "SET client_min_messages = NOTICE"
+
+-- | Lock wait bound for the cleanup truncate.
+cleanupLockTimeout :: Text
+cleanupLockTimeout = "5s"
+
+-- | Wait before the cleanup truncate tries again.
+cleanupRetryDelayMicros :: Int
+cleanupRetryDelayMicros = 100_000
+
+-- | Retries of the cleanup truncate after a deadlock or lock timeout.
+cleanupRetries :: Int
+cleanupRetries = 10
 
 -- | 'cleanupData' on a fresh connection.
 cleanupOnce :: ByteString -> Text -> Text -> IO ()
@@ -207,8 +222,17 @@ createPoolWith :: Int -> IO conn -> (conn -> IO ()) -> IO (Pool conn)
 createPoolWith size connect release =
   newPool $ setNumStripes (Just 1) $ defaultPoolConfig connect release sharedPoolIdleSeconds size
 
+-- | The default test pool size.
 sharedPoolSize :: Int
 sharedPoolSize = 5
+
+-- | The pool size for suites that race many claimers.
+concurrencyPoolSize :: Int
+concurrencyPoolSize = 10
+
+-- | The pool size for the state-machine suite.
+stateMachinePoolSize :: Int
+stateMachinePoolSize = 40
 
 sharedPoolIdleSeconds :: Double
 sharedPoolIdleSeconds = 60

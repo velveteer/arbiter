@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# OPTIONS_HADDOCK not-home #-}
 
@@ -9,6 +8,8 @@ module Arbiter.Core.Sql.Tree
   ( pauseChildrenSQL
   , resumeChildrenSQL
   , lockedByIdsCte
+  , childDescendantsCte
+  , wakeParentCte
   , lockJobTreesSQL
   , lockJobTreesFromRootSQL
   , cancelJobCascadeSQL
@@ -59,8 +60,8 @@ import Arbiter.Core.SqlLiterals (intLiteral, textLiteral)
 -- | Suspend every unsuspended visible job in a parent's subtree, lapsed leases included.
 -- Jobs with a future visibility (delayed, backoff, throttled, leased) are skipped.
 pauseChildrenSQL :: SchemaName -> TableName -> Int64 -> Query ()
-pauseChildrenSQL schema tableName parentId =
-  let tbl = jobQueueTable schema tableName
+pauseChildrenSQL schemaName tableName parentId =
+  let tbl = jobQueueTable schemaName tableName
       cte = childDescendantsCte tbl parentId
       locked = lockDescendantsCte tbl
    in [sql|
@@ -76,8 +77,8 @@ pauseChildrenSQL schema tableName parentId =
 -- | Resume the suspended jobs in a parent's subtree. A finalizer with children still
 -- in the queue stays suspended.
 resumeChildrenSQL :: SchemaName -> TableName -> Int64 -> Query ()
-resumeChildrenSQL schema tableName parentId =
-  let tbl = jobQueueTable schema tableName
+resumeChildrenSQL schemaName tableName parentId =
+  let tbl = jobQueueTable schemaName tableName
       cte = childDescendantsCte tbl parentId
       locked = lockDescendantsCte tbl
    in [sql|
@@ -108,6 +109,24 @@ descendantsFromCte tbl seed =
 -- | 'descendantsFromCte' seeded from a parent's children, excluding the parent itself.
 childDescendantsCte :: Text -> Int64 -> Query ()
 childDescendantsCte tbl parentId = descendantsFromCte tbl [sql|parent_id = #{parentId :: CInt8}|]
+
+-- | CTE binding @wake_parent@ to the suspended parent of @source@'s rows, resumed when no other child remains.
+wakeParentCte :: Text -> Text -> Query ()
+wakeParentCte tbl source =
+  [sql|
+    wake_parent AS (
+      UPDATE ${tbl}
+      SET suspended = FALSE, updated_at = NOW()
+      WHERE id = (SELECT parent_id FROM ${source} WHERE parent_id IS NOT NULL)
+        AND suspended = TRUE
+        AND NOT EXISTS (
+          SELECT 1 FROM ${tbl} child
+          WHERE child.parent_id = (SELECT parent_id FROM ${source} WHERE parent_id IS NOT NULL)
+            AND child.id NOT IN (SELECT id FROM ${source})
+        )
+      RETURNING id, group_key
+    )
+  |]
 
 -- | 'descendantsFromCte' seeded from a job id.
 descendantsCte :: Text -> Int64 -> Query ()
@@ -168,11 +187,11 @@ descendantsOfCte tbl jobIds =
 -- | Lock the named jobs and all their descendants, several trees in one pass. Locks rows
 -- in descending id order. Then lock the group summaries of the rows and their parents.
 lockJobTreesSQL :: SchemaName -> TableName -> [Int64] -> Query Int64
-lockJobTreesSQL schema tableName jobIds =
-  let tbl = jobQueueTable schema tableName
+lockJobTreesSQL schemaName tableName jobIds =
+  let tbl = jobQueueTable schemaName tableName
       cte = descendantsOfCte tbl jobIds
       locked = lockDescendantsCte tbl
-      groups = lockTreeGroupsCte tbl (jobQueueGroupsTable schema tableName)
+      groups = lockTreeGroupsCte tbl (jobQueueGroupsTable schemaName tableName)
    in [sql|
         ${cte},
         ${locked},
@@ -203,11 +222,11 @@ lockTreeGroupsCte tbl groupsTbl =
 -- all rows that tree cancellation can delete. The named identifiers also start
 -- the downward walk. An orphan locks its subtree.
 lockJobTreesFromRootSQL :: SchemaName -> TableName -> [Int64] -> Query Int64
-lockJobTreesFromRootSQL schema tableName jobIds =
-  let tbl = jobQueueTable schema tableName
+lockJobTreesFromRootSQL schemaName tableName jobIds =
+  let tbl = jobQueueTable schemaName tableName
       cte = rootsFromCte tbl [sql|id = ANY(#{jobIds :: [CInt8]})|]
       locked = lockDescendantsCte tbl
-      groups = lockTreeGroupsCte tbl (jobQueueGroupsTable schema tableName)
+      groups = lockTreeGroupsCte tbl (jobQueueGroupsTable schemaName tableName)
    in [sql|
         ${cte},
         descendants AS (
@@ -224,8 +243,8 @@ lockJobTreesFromRootSQL schema tableName jobIds =
 -- | Cancel a job and all its descendants recursively. Locks rows in descending id order.
 -- Returns the ids deleted.
 cancelJobCascadeSQL :: SchemaName -> TableName -> Int64 -> Query Int64
-cancelJobCascadeSQL schema tableName jobId =
-  let tbl = jobQueueTable schema tableName
+cancelJobCascadeSQL schemaName tableName jobId =
+  let tbl = jobQueueTable schemaName tableName
       cte = descendantsCte tbl jobId
       locked = lockDescendantsCte tbl
    in [sql|
@@ -241,10 +260,10 @@ cancelJobCascadeSQL schema tableName jobId =
 -- | Force-cancel a job subtree. Flags still-live claimed jobs and bumps their claim
 -- token once, deletes the rest, and NOTIFYs every claimed job affected.
 forceCancelJobSQL :: SchemaName -> TableName -> Int64 -> Query Int64
-forceCancelJobSQL schema tableName jobId =
-  let tbl = jobQueueTable schema tableName
+forceCancelJobSQL schemaName tableName jobId =
+  let tbl = jobQueueTable schemaName tableName
       cte = descendantsCte tbl jobId
-      chan = textLiteral (cancelNotifyChannel schema tableName)
+      chan = textLiteral (cancelNotifyChannel schemaName tableName)
    in [sql|
         ${cte},
         locked AS (
@@ -292,8 +311,8 @@ cancelTokenBump = 1
 
 -- | Delete the force-cancel-flagged jobs that have no live lease.
 deleteLapsedCancelledJobsSQL :: SchemaName -> TableName -> [Int64] -> Query (Int64, Maybe Int64)
-deleteLapsedCancelledJobsSQL schema tableName jobIds =
-  let tbl = jobQueueTable schema tableName
+deleteLapsedCancelledJobsSQL schemaName tableName jobIds =
+  let tbl = jobQueueTable schemaName tableName
    in deleteLockedSQL
         tbl
         [sql|
@@ -308,8 +327,8 @@ deleteLapsedCancelledJobsSQL schema tableName jobIds =
 -- | Delete the force-cancel-flagged jobs that @owner@ holds.
 -- Each pair is a job id and the claim token that its claim returned.
 deleteHeldCancelledJobsSQL :: SchemaName -> TableName -> UUID -> [(Int64, Int64)] -> Query (Int64, Maybe Int64)
-deleteHeldCancelledJobsSQL schema tableName owner claims =
-  let tbl = jobQueueTable schema tableName
+deleteHeldCancelledJobsSQL schemaName tableName owner claims =
+  let tbl = jobQueueTable schemaName tableName
       ids = map fst claims
       tokens = map snd claims
    in deleteLockedSQL
@@ -336,8 +355,8 @@ deleteLockedSQL tbl locked =
 -- | Flagged jobs whose lease has lapsed. The reaper deletes them and resumes their
 -- parents.
 selectCancelledReapableJobsSQL :: SchemaName -> TableName -> Int -> Query Int64
-selectCancelledReapableJobsSQL schema tableName limit =
-  let tbl = jobQueueTable schema tableName
+selectCancelledReapableJobsSQL schemaName tableName limit =
+  let tbl = jobQueueTable schemaName tableName
       lim = intLiteral limit
    in [sql|
         SELECT @{id :: CInt8}
@@ -352,8 +371,8 @@ selectCancelledReapableJobsSQL schema tableName limit =
 -- then cascade-deleting everything from the root down. Locks rows in descending id
 -- order. Deletes nothing for an orphan. Returns the ids deleted.
 cancelJobTreeSQL :: SchemaName -> TableName -> Int64 -> Query Int64
-cancelJobTreeSQL schema tableName jobId =
-  let tbl = jobQueueTable schema tableName
+cancelJobTreeSQL schemaName tableName jobId =
+  let tbl = jobQueueTable schemaName tableName
       cte = rootsFromCte tbl [sql|id = #{jobId :: CInt8}|]
       locked = lockDescendantsCte tbl
    in [sql|
@@ -374,8 +393,8 @@ cancelJobTreeSQL schema tableName jobId =
 -- | Resume a suspended parent for its completion round, once no child of it is left in
 -- the main queue.
 tryWakeAncestorSQL :: SchemaName -> TableName -> Int64 -> Query ()
-tryWakeAncestorSQL schema tableName ancestorId =
-  let tbl = jobQueueTable schema tableName
+tryWakeAncestorSQL schemaName tableName ancestorId =
+  let tbl = jobQueueTable schemaName tableName
    in [sql|
         UPDATE ${tbl}
         SET suspended = FALSE, updated_at = NOW()
@@ -387,8 +406,8 @@ tryWakeAncestorSQL schema tableName ancestorId =
 -- | Rollup finalizer ids in a job's subtree, the job itself included. Read before a DLQ
 -- move.
 treeRollupIdsSQL :: SchemaName -> TableName -> Int64 -> Query Int64
-treeRollupIdsSQL schema tableName jobId =
-  let tbl = jobQueueTable schema tableName
+treeRollupIdsSQL schemaName tableName jobId =
+  let tbl = jobQueueTable schemaName tableName
    in [sql|
         WITH RECURSIVE descendants AS (
           SELECT id, parent_state FROM ${tbl} WHERE id = #{jobId :: CInt8}
@@ -401,8 +420,8 @@ treeRollupIdsSQL schema tableName jobId =
 -- | Mark a claimed, childless job as a rollup finalizer, matched on the claim token.
 -- The ack's suspend branch refunds the attempt.
 beginSpawnSQL :: SchemaName -> TableName -> Int64 -> Int64 -> Query ()
-beginSpawnSQL schema tableName jobId cseq =
-  let tbl = jobQueueTable schema tableName
+beginSpawnSQL schemaName tableName jobId cseq =
+  let tbl = jobQueueTable schemaName tableName
    in [sql|
         UPDATE ${tbl}
         SET parent_state = '{}'::jsonb, updated_at = NOW()
@@ -413,8 +432,8 @@ beginSpawnSQL schema tableName jobId cseq =
 
 -- | Which of the given ids carry a rollup finalizer's @parent_state@.
 rollupIdsSQL :: SchemaName -> TableName -> [Int64] -> Query Int64
-rollupIdsSQL schema tableName ids =
-  let tbl = jobQueueTable schema tableName
+rollupIdsSQL schemaName tableName ids =
+  let tbl = jobQueueTable schemaName tableName
    in [sql|
         SELECT @{id :: CInt8} FROM ${tbl}
         WHERE id = ANY(#{ids :: [CInt8]}) AND parent_state IS NOT NULL
@@ -422,8 +441,8 @@ rollupIdsSQL schema tableName ids =
 
 -- | Whether a job has already spawned a round under the given claim token.
 spawnedAlreadySQL :: SchemaName -> TableName -> Int64 -> Int64 -> Query Bool
-spawnedAlreadySQL schema tableName jobId cseq =
-  let tbl = jobQueueTable schema tableName
+spawnedAlreadySQL schemaName tableName jobId cseq =
+  let tbl = jobQueueTable schemaName tableName
    in [sql|
         SELECT (suspended OR EXISTS (SELECT 1 FROM ${tbl} child WHERE child.parent_id = #{jobId :: CInt8})) AS @{spawned :: CBool}
         FROM ${tbl}
@@ -432,8 +451,8 @@ spawnedAlreadySQL schema tableName jobId cseq =
 
 -- | Suspend a job, making it unclaimable. Refuses an in-flight job.
 suspendJobSQL :: SchemaName -> TableName -> Int64 -> Query ()
-suspendJobSQL schema tableName jobId =
-  let tbl = jobQueueTable schema tableName
+suspendJobSQL schemaName tableName jobId =
+  let tbl = jobQueueTable schemaName tableName
    in [sql|
         UPDATE ${tbl}
         SET suspended = TRUE, claimed_by = NULL, updated_at = NOW()
@@ -446,8 +465,8 @@ suspendJobSQL schema tableName jobId =
 -- A child in the DLQ is terminal. The finalizer reads its error through
 -- 'readChildResultsSQL' and decides for itself.
 resumeJobSQL :: SchemaName -> TableName -> Int64 -> Query ()
-resumeJobSQL schema tableName jobId =
-  let tbl = jobQueueTable schema tableName
+resumeJobSQL schemaName tableName jobId =
+  let tbl = jobQueueTable schemaName tableName
    in [sql|
         UPDATE ${tbl}
         SET suspended = FALSE, updated_at = NOW()
@@ -460,14 +479,14 @@ resumeJobSQL schema tableName jobId =
 
 -- | Check whether a job with the given id exists.
 jobExistsSQL :: SchemaName -> TableName -> Int64 -> Query Bool
-jobExistsSQL schema tableName jobId =
-  let tbl = jobQueueTable schema tableName
+jobExistsSQL schemaName tableName jobId =
+  let tbl = jobQueueTable schemaName tableName
    in [sql|SELECT EXISTS (SELECT 1 FROM ${tbl} WHERE id = #{jobId :: CInt8}) AS @{result :: CBool}|]
 
 -- | Fetch the parent ids of several jobs.
 getParentIdsSQL :: SchemaName -> TableName -> [Int64] -> Query (Maybe Int64)
-getParentIdsSQL schema tableName jobIds =
-  let tbl = jobQueueTable schema tableName
+getParentIdsSQL schemaName tableName jobIds =
+  let tbl = jobQueueTable schemaName tableName
    in [sql|SELECT @{parent_id :: Maybe CInt8} FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]})|]
 
 -- ---------------------------------------------------------------------------
@@ -476,8 +495,8 @@ getParentIdsSQL schema tableName jobIds =
 
 -- | Insert a child's result into the results table.
 insertResultSQL :: SchemaName -> TableName -> Int64 -> Int64 -> Value -> Query ()
-insertResultSQL schema tableName parentId childId result =
-  let resultsTbl = jobQueueResultsTable schema tableName
+insertResultSQL schemaName tableName parentId childId result =
+  let resultsTbl = jobQueueResultsTable schemaName tableName
    in [sql|
         INSERT INTO ${resultsTbl} (parent_id, child_id, result)
         VALUES (#{parentId :: CInt8}, #{childId :: CInt8}, #{result :: CJsonb})
@@ -486,8 +505,8 @@ insertResultSQL schema tableName parentId childId result =
 
 -- | 'insertResultSQL' for several children in one statement.
 insertResultsBatchSQL :: SchemaName -> TableName -> [Int64] -> [Int64] -> [Value] -> Query ()
-insertResultsBatchSQL schema tableName parentIds childIds results =
-  let resultsTbl = jobQueueResultsTable schema tableName
+insertResultsBatchSQL schemaName tableName parentIds childIds results =
+  let resultsTbl = jobQueueResultsTable schemaName tableName
    in [sql|
         INSERT INTO ${resultsTbl} (parent_id, child_id, result)
         SELECT parent_id, child_id, result FROM (
@@ -500,54 +519,54 @@ insertResultsBatchSQL schema tableName parentIds childIds results =
 
 -- | Get all child results for a parent from the results table.
 getResultsByParentSQL :: SchemaName -> TableName -> Int64 -> Query (Int64, Value)
-getResultsByParentSQL schema tableName parentId =
-  let resultsTbl = jobQueueResultsTable schema tableName
+getResultsByParentSQL schemaName tableName parentId =
+  let resultsTbl = jobQueueResultsTable schemaName tableName
    in [sql|
         SELECT @{child_id :: CInt8}, @{result :: CJsonb} FROM ${resultsTbl} WHERE parent_id = #{parentId :: CInt8}
       |]
 
 -- | Drop a parent's stored child results.
 deleteResultsByParentSQL :: SchemaName -> TableName -> Int64 -> Query ()
-deleteResultsByParentSQL schema tableName parentId =
-  let resultsTbl = jobQueueResultsTable schema tableName
+deleteResultsByParentSQL schemaName tableName parentId =
+  let resultsTbl = jobQueueResultsTable schemaName tableName
    in [sql|DELETE FROM ${resultsTbl} WHERE parent_id = #{parentId :: CInt8}|]
 
 -- | Detach a parent's DLQ children.
 detachDLQChildrenSQL :: SchemaName -> TableName -> Int64 -> Query ()
-detachDLQChildrenSQL schema tableName parentId =
-  let dlqTbl = jobQueueDLQTable schema tableName
+detachDLQChildrenSQL schemaName tableName parentId =
+  let dlqTbl = jobQueueDLQTable schemaName tableName
    in [sql|UPDATE ${dlqTbl} SET parent_id = NULL WHERE parent_id = #{parentId :: CInt8}|]
 
 -- | Get DLQ child errors for a parent, one @(job_id, last_error)@ row per DLQ'd child.
 getDLQChildErrorsByParentSQL :: SchemaName -> TableName -> Int64 -> Query (Int64, Maybe Text)
-getDLQChildErrorsByParentSQL schema tableName parentId =
-  let dlqTbl = jobQueueDLQTable schema tableName
+getDLQChildErrorsByParentSQL schemaName tableName parentId =
+  let dlqTbl = jobQueueDLQTable schemaName tableName
    in [sql|
         SELECT @{job_id :: CInt8}, @{last_error :: Maybe CText} FROM ${dlqTbl} WHERE parent_id = #{parentId :: CInt8}
       |]
 
 -- | Snapshot child results into @parent_state@ before a DLQ move.
 persistParentStateSQL :: SchemaName -> TableName -> Value -> Int64 -> Query ()
-persistParentStateSQL schema tableName parentState jobId =
-  let tbl = jobQueueTable schema tableName
+persistParentStateSQL schemaName tableName parentState jobId =
+  let tbl = jobQueueTable schemaName tableName
    in [sql|
         UPDATE ${tbl} SET parent_state = #{parentState :: CJsonb}, updated_at = NOW() WHERE id = #{jobId :: CInt8}
       |]
 
 -- | Read a job's raw @parent_state@ snapshot.
 getParentStateSnapshotSQL :: SchemaName -> TableName -> Int64 -> Query (Maybe Value)
-getParentStateSnapshotSQL schema tableName jobId =
-  let tbl = jobQueueTable schema tableName
+getParentStateSnapshotSQL schemaName tableName jobId =
+  let tbl = jobQueueTable schemaName tableName
    in [sql|SELECT @{parent_state :: Maybe CJsonb} FROM ${tbl} WHERE id = #{jobId :: CInt8}|]
 
 -- | A rollup finalizer's child results, DLQ child errors, and @parent_state@ snapshot in
 -- one query, tagged @r@, @e@ and @s@ respectively.
 readChildResultsSQL
   :: SchemaName -> TableName -> Int64 -> Query (Text, Maybe Int64, Maybe Value, Maybe Text, Maybe Int64)
-readChildResultsSQL schema tableName parentId =
-  let resultsTbl = jobQueueResultsTable schema tableName
-      dlqTbl = jobQueueDLQTable schema tableName
-      tbl = jobQueueTable schema tableName
+readChildResultsSQL schemaName tableName parentId =
+  let resultsTbl = jobQueueResultsTable schemaName tableName
+      dlqTbl = jobQueueDLQTable schemaName tableName
+      tbl = jobQueueTable schemaName tableName
    in [sql|
         SELECT 'r'::text AS @{source :: CText}, @{child_id :: Maybe CInt8}, @{result :: Maybe CJsonb},
                NULL::text AS @{error :: Maybe CText}, NULL::bigint AS @{dlq_pk :: Maybe CInt8}

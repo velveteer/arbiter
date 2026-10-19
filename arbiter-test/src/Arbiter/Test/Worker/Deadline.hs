@@ -2,7 +2,7 @@
 {-# LANGUAGE TypeFamilies #-}
 
 -- | Heartbeat guard, lease fence, and job deadline tests, instantiated for each backend.
-module Arbiter.Worker.TestKit.Deadline (deadlineSpec) where
+module Arbiter.Test.Worker.Deadline (deadlineSpec) where
 
 import Arbiter.Core.Exceptions (JobForceCancelled (..))
 import Arbiter.Core.HighLevel (QueueOperation, RegistryAdmissionPolicies)
@@ -55,8 +55,8 @@ import UnliftIO (MonadUnliftIO, finally, mask_, tryAny, withRunInIO)
 import UnliftIO.Async (async, poll, waitCatch, withAsync)
 
 import Arbiter.Test.Poll (bumpRef, waitUntil)
-import Arbiter.Worker.TestKit.Backend (TestBackend (..))
-import Arbiter.Worker.TestKit.Rows (flagCancelled, holdRowLock, reclaimJob, releaseRow, rowCount, takeClaimHolder)
+import Arbiter.Test.Worker.Backend (TestBackend (..))
+import Arbiter.Test.Worker.Rows (flagCancelled, holdRowLock, reclaimJob, releaseRow, rowCount, takeClaimHolder)
 
 -- | Longer than any deadline under test.
 handlerSleepMicros :: Int
@@ -158,7 +158,7 @@ deadlineSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, mkHandler, ru
               defaultObservabilityHooks
                 { onJobClaimed = \_ _ -> liftIO $ do
                     bumpRef hookCalls
-                    threadDelay 30_000_000
+                    threadDelay handlerSleepMicros
                 }
         void (insertedId env)
         base :: WorkerConfig m payload <- transactionalWorkerConfig 1 handler

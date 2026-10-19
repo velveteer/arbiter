@@ -19,6 +19,7 @@ module Arbiter.Worker.Cron.Types
   , truncateToMinute
   , formatMinute
   , enumMinutes
+  , oneMinute
   ) where
 
 import Arbiter.Core.CronSchedule qualified as CS
@@ -91,12 +92,13 @@ overlapPolicyFromText _ = Nothing
 -- | Check a cron patch before it is written. At tick time a bad override stops
 -- firing or falls back to the default.
 validateCronScheduleUpdate :: CS.CronScheduleUpdate -> Either Text ()
-validateCronScheduleUpdate (CS.CronScheduleUpdate mExpr mOverlap mTz _) = do
-  check mExpr (isRight . parseCronSchedule) "Invalid cron expression"
-  check mOverlap (isJust . overlapPolicyFromText) "Invalid overlap policy: must be SkipOverlap or AllowOverlap"
-  check mTz (isJust . resolveTZ) "Invalid timezone: must be an IANA tz name (e.g. America/New_York)"
-  where
-    check field ok message = unless (all ok (join field)) (Left message)
+validateCronScheduleUpdate
+  CS.CronScheduleUpdate {CS.overrideExpression = mExpr, CS.overrideOverlap = mOverlap, CS.overrideTimezone = mTz} = do
+    check mExpr (isRight . parseCronSchedule) "Invalid cron expression"
+    check mOverlap (isJust . overlapPolicyFromText) "Invalid overlap policy: must be SkipOverlap or AllowOverlap"
+    check mTz (isJust . resolveTZ) "Invalid timezone: must be an IANA tz name (e.g. America/New_York)"
+    where
+      check field ok message = unless (all ok (join field)) (Left message)
 
 -- | 'Arbiter.Core.HighLevel.updateCronScheduleUnchecked' behind
 -- 'validateCronScheduleUpdate'. Returns rows affected, 0 for an unknown name or an
@@ -219,7 +221,7 @@ nextRunInTimezone (Just tzName) sched now = do
     -- A replayed minute runs ahead of @now@ in UTC while reading behind it locally.
     replayed zone = do
       endsAt <- replayEnd zone now
-      find (matchesInTimezone (Just tzName) sched) (enumMinutes (addUTCTime 60 (truncateToMinute now)) endsAt)
+      find (matchesInTimezone (Just tzName) sched) (enumMinutes (addUTCTime oneMinute (truncateToMinute now)) endsAt)
     seek zone from = do
       localMinute <- nextMatch sched from
       find
@@ -249,8 +251,16 @@ nextRunFromExpression tzName expr now =
 truncateToMinute :: UTCTime -> UTCTime
 truncateToMinute tick =
   let secs = utctDayTime tick
-      truncated = secondsToDiffTime (floor secs `div` 60 * 60)
+      truncated = secondsToDiffTime (floor secs `div` secondsPerMinute * secondsPerMinute)
    in tick {utctDayTime = truncated}
+
+-- | Seconds in one minute.
+secondsPerMinute :: Integer
+secondsPerMinute = 60
+
+-- | One minute, the cron tick step.
+oneMinute :: NominalDiffTime
+oneMinute = fromInteger secondsPerMinute
 
 -- | Format a 'UTCTime' as @YYYY-MM-DDTHH:MM@ for dedup key buckets.
 formatMinute :: UTCTime -> Text
@@ -261,5 +271,5 @@ formatMinute = T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M"
 enumMinutes :: UTCTime -> UTCTime -> [UTCTime]
 enumMinutes start end =
   unfoldr
-    (\minute -> if minute > end then Nothing else Just (minute, addUTCTime 60 minute))
+    (\minute -> if minute > end then Nothing else Just (minute, addUTCTime oneMinute minute))
     start

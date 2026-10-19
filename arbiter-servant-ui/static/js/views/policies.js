@@ -243,7 +243,7 @@ const RlThrottled = {
   props: { p: Object },
   setup: () => inject('policies'),
   template: /* html */ `
-    <a v-if="p.throttledCount > 0" href="#" class="badge bg-warning-subtle text-warning-emphasis text-decoration-none" @click.prevent="openThrottled(p)"
+    <a v-if="p.throttledCount > 0" href="#" :class="tone('warning')" class="badge text-decoration-none" @click.prevent="openThrottled(p)"
       title="Show the jobs this policy is throttling">{{ p.throttledCount }}</a>
     <span v-else class="text-muted">0</span>`,
 };
@@ -380,7 +380,7 @@ export const RateLimitsView = {
         <tbody>
           <tr v-for="p in P.sort.rows" :key="p.prefix" class="detail-row" tabindex="0" :class="{ 'policy-warn': p.throttledCount > 0, 'table-active': P.d.is(p) }"
             @click="isRowClick($event) && P.d.view(p)" @keydown.enter.self.prevent="P.d.toggle(p)" @keydown.space.self.prevent="P.d.toggle(p)">
-            <td class="text-break">{{ p.prefix }} <span v-if="overridden(p)" class="badge bg-info-subtle text-info-emphasis ms-1">override</span></td>
+            <td class="text-break">{{ p.prefix }} <span v-if="overridden(p)" :class="tone('info')" class="badge ms-1">override</span></td>
             <td>{{ rate(p) }}</td>
             <td>{{ fmtNum(effMax(p)) }}</td>
             <td>{{ p.bucketCount }}</td>
@@ -394,7 +394,7 @@ export const RateLimitsView = {
     </div>
 
     <drawer :d="P.d" :title="P.d.cur?.prefix || 'Policy'" :status="P.d.cur?.throttledCount > 0 ? 'throttling' : ''"
-      status-class="bg-warning-subtle text-warning-emphasis" :sticky="P.editing">
+      :status-class="tone('warning')" :sticky="P.editing">
       <template #actions>
         <action-menu v-if="P.d.cur" v-slot="{ close }"><rl-menu :p="P.d.cur" :close="close"/></action-menu>
       </template>
@@ -547,7 +547,7 @@ export const ConcurrencyView = {
         <tbody>
           <tr v-for="p in P.sort.rows" :key="p.prefix" class="detail-row" tabindex="0" :class="{ 'policy-bad': saturated(p), 'table-active': P.d.is(p) }"
             @click="isRowClick($event) && P.d.view(p)" @keydown.enter.self.prevent="P.d.toggle(p)" @keydown.space.self.prevent="P.d.toggle(p)">
-            <td class="text-break">{{ p.prefix }} <span v-if="p.overrideLimit != null" class="badge bg-info-subtle text-info-emphasis ms-1">override</span></td>
+            <td class="text-break">{{ p.prefix }} <span v-if="p.overrideLimit != null" :class="tone('info')" class="badge ms-1">override</span></td>
             <td>{{ effLimit(p) }}</td>
             <td>{{ p.keyCount }}</td>
             <td>{{ p.totalInFlight }}</td>
@@ -559,7 +559,7 @@ export const ConcurrencyView = {
     </div>
 
     <drawer :d="P.d" :title="P.d.cur?.prefix || 'Policy'" :status="P.d.cur && saturated(P.d.cur) ? 'at limit' : ''"
-      status-class="bg-danger-subtle text-danger-emphasis" :sticky="P.editing">
+      :status-class="tone('danger')" :sticky="P.editing">
       <template #actions>
         <action-menu v-if="P.d.cur && !P.editing" v-slot="{ close }">
           <button type="button" class="dropdown-item" @click="openEdit(P.d.cur); close()">Edit</button>

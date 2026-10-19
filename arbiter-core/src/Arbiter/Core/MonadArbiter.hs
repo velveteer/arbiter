@@ -26,10 +26,13 @@ module Arbiter.Core.MonadArbiter
     -- | Internal to the arbiter packages. Not covered by the PVP.
   , countOr0
   , countOr0Prepared
+  , queryMaybe
+  , queryAny
   ) where
 
 import Data.Int (Int64)
 import Data.Kind (Type)
+import Data.Maybe (listToMaybe)
 import GHC.TypeLits (ErrorMessage (..), TypeError)
 import UnliftIO (MonadUnliftIO)
 
@@ -111,6 +114,14 @@ countOr0 = fmap singleCount . executeQuery
 -- | 'countOr0' over a prepared statement.
 countOr0Prepared :: (MonadArbiter m) => Query Int64 -> m Int64
 countOr0Prepared = fmap singleCount . executeQueryPrepared
+
+-- | Run a 'Query' and keep its first row.
+queryMaybe :: (MonadArbiter m) => Query a -> m (Maybe a)
+queryMaybe = fmap listToMaybe . executeQuery
+
+-- | Run a boolean 'Query'. The result is true when a row is true.
+queryAny :: (MonadArbiter m) => Query Bool -> m Bool
+queryAny = fmap or . executeQuery
 
 singleCount :: [Int64] -> Int64
 singleCount [count] = count

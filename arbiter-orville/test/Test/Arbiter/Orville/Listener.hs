@@ -8,7 +8,7 @@ module Test.Arbiter.Orville.Listener (listenerSpec, multiQueueSpec) where
 import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Test.Fixtures (QueueAPayload (..), QueueBPayload (..), WorkerTestPayload)
 import Arbiter.Test.Setup (addQueueTable, cleanupOnce, setupOnce)
-import Arbiter.Worker.TestKit qualified as TestKit
+import Arbiter.Test.Worker qualified as TestKit
 import Data.ByteString (ByteString)
 import Data.Text (Text, pack)
 import Test.Hspec (Spec, beforeAll)

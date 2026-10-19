@@ -27,7 +27,8 @@ const App = {
     });
     useScrollActive(nav, () => route.view);
     const open = (view) => navigate(view === 'queues' ? listUrl() : viewUrl(view));
-    return { app, route, nav, navItems, MARK, SYSTEM, open, toggleTheme };
+    const themeLabel = computed(() => (app.theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'));
+    return { app, route, nav, navItems, MARK, SYSTEM, open, toggleTheme, themeLabel };
   },
   template: /* html */ `
     <div class="top-loader" v-if="app.showLoader" role="status" aria-label="Loading"></div>
@@ -44,7 +45,7 @@ const App = {
             <span class="status-dot" aria-hidden="true"></span>
           </span>
           <button class="btn btn-sm nav-theme-toggle" @click="toggleTheme"
-            :title="app.theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'" :aria-label="app.theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'"
+            :title="themeLabel" :aria-label="themeLabel"
             >{{ app.theme === 'dark' ? '\\u263c' : '\\u263d' }}</button>
         </div>
       </div>

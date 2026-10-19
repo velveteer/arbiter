@@ -15,7 +15,7 @@ import Arbiter.Core.Exceptions (displayEx)
 import Arbiter.Core.Trace (resolveTracer)
 import Arbiter.Worker.Logger (LogConfig, LogDestination)
 import Control.Exception (SomeException, bracket)
-import Control.Monad (void)
+import Control.Monad (guard, void)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Bifunctor (first)
 import Data.Either (fromRight)
@@ -97,7 +97,7 @@ withTelemetry action = do
   readerOpts <- periodicMetricReaderOptionsFromEnv
   detected <- tryAny getTracerProviderInitializationOptions
   let (processors, traceOpts) = fromRight ([], emptyTracerProviderOptions) detected
-      detectNote = either (Just . signalFailed "traces") (const Nothing) detected
+      detectNote = noteOf (first (signalFailed "traces") detected)
   resources <- either (const detectResources) (pure . tracerProviderOptionsResources . snd) detected
   evalContT $ do
     traces <- ContT (withTraces processors traceOpts)
@@ -113,7 +113,9 @@ withTelemetry action = do
           , telemetryLogDestination = either (const Nothing) (Just . loggerDestination) logs
           , gaugeRefresh = refreshFor readerOpts
           , telemetrySummary =
-              summarize (serviceName resources) (catMaybes [detectNote, noteOf traces, noteOf instruments, noteOf logs])
+              summarize
+                ("service.name=" <> fromMaybe "unset" (serviceName resources))
+                [detectNote, noteOf traces, noteOf instruments, noteOf logs]
           }
   where
     withTraces :: [SpanProcessor] -> TracerProviderOptions -> (Either Text TracerProvider -> IO a) -> IO a
@@ -198,10 +200,9 @@ noteOf = either Just (const Nothing)
 arbiterInstruments :: MeterProvider -> IO (Either Text ArbiterMeters)
 arbiterInstruments meterProvider = first (signalFailed "metrics") <$> tryAny (newArbiterMeters meterProvider)
 
--- | Startup log line listing unavailable telemetry components.
-summarize :: Maybe Text -> [Text] -> Text
-summarize service notes =
-  T.intercalate ", " (("telemetry on, service.name=" <> fromMaybe "unset" service) : notes)
+-- | Startup log line naming the provider source and listing unavailable telemetry components.
+summarize :: Text -> [Maybe Text] -> Text
+summarize source notes = T.intercalate ", " (("telemetry on, " <> source) : catMaybes notes)
 
 -- | Service name in the detected resource. All signals use this name.
 serviceName :: MaterializedResources -> Maybe Text
@@ -224,7 +225,11 @@ baseTelemetry meterProvider =
 
 -- | A metric reader's export interval.
 refreshFor :: PeriodicMetricReaderOptions -> NominalDiffTime
-refreshFor opts = fromIntegral (periodicIntervalMicros opts) / 1_000_000
+refreshFor opts = fromIntegral (periodicIntervalMicros opts) / microsPerSecond
+
+-- | Microseconds in one second.
+microsPerSecond :: NominalDiffTime
+microsPerSecond = 1_000_000
 
 -- | 'withTelemetry', or an inert handle when @OTEL_SDK_DISABLED@ is @true@.
 withTelemetryFromEnv :: (Telemetry -> IO a) -> IO a
@@ -253,10 +258,9 @@ withExternalTelemetry mmp mlp action = do
       , telemetryLogDestination = loggerDestination <$> mlp
       , gaugeRefresh = refreshFor readerOpts
       , telemetrySummary =
-          T.intercalate ", " $
-            "telemetry on, caller's providers"
-              : catMaybes
-                [ if tracing then Nothing else Just "no global tracer provider installed"
-                , noteOf =<< instruments
-                ]
+          summarize
+            "caller's providers"
+            [ "no global tracer provider installed" <$ guard (not tracing)
+            , noteOf =<< instruments
+            ]
       }

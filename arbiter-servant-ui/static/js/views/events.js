@@ -3,13 +3,13 @@ import { ref, reactive, computed } from '../../vendor/vue.esm-browser.prod.js';
 import { queueLink } from '../router.js';
 import { app, toggleSSE } from '../store.js';
 import { TIMING } from '../config.js';
-import { memoByObject } from '../format.js';
+import { memoByObject, tone } from '../format.js';
 
 const TYPES = {
-  job_inserted: ['Inserted', 'bg-primary-subtle text-primary-emphasis'],
-  job_updated: ['Updated', 'bg-warning-subtle text-warning-emphasis'],
-  job_deleted: ['Deleted', 'bg-danger-subtle text-danger-emphasis'],
-  job_dlq: ['DLQ', 'bg-secondary-subtle text-secondary-emphasis'],
+  job_inserted: ['Inserted', tone('primary')],
+  job_updated: ['Updated', tone('warning')],
+  job_deleted: ['Deleted', tone('danger')],
+  job_dlq: ['DLQ', tone('secondary')],
 };
 
 const STATE_TEXT = {
@@ -69,7 +69,7 @@ export const EventsView = {
         <tbody>
           <tr v-for="e in shown" :key="e._seq">
             <td class="text-truncate" :title="formatTime(e.receivedAt)">{{ formatClock(e.receivedAt) }}</td>
-            <td class="text-truncate"><span class="badge" :class="TYPES[e.event]?.[1] || 'bg-info-subtle text-info-emphasis'" :title="e.event">{{ TYPES[e.event]?.[0] || e.event }}</span></td>
+            <td class="text-truncate"><span class="badge" :class="TYPES[e.event]?.[1] || tone('info')" :title="e.event">{{ TYPES[e.event]?.[0] || e.event }}</span></td>
             <td class="text-truncate">
               <a v-if="e.table" v-bind="tableLink(e)" :title="'Open ' + e.table">{{ e.table }}</a>
               <span v-else class="text-muted">{{ EMPTY }}</span>

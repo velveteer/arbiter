@@ -36,6 +36,7 @@ import Data.Aeson
   , genericToEncoding
   , genericToJSON
   , withObject
+  , (.:!)
   , (.:?)
   )
 import Data.Maybe (fromMaybe)
@@ -45,7 +46,7 @@ import Data.Time (UTCTime)
 import GHC.Generics (Generic)
 
 import Arbiter.Core.Job.Schema (SchemaName)
-import Arbiter.Core.Json (explicitOptionalField, patchOptions)
+import Arbiter.Core.Json (patchOptions)
 import Arbiter.Core.SqlLiterals (sharedTable)
 
 -- | A row from the @cron_schedules@ table.
@@ -115,12 +116,12 @@ instance ToJSON CronScheduleUpdate where
   toJSON = genericToJSON patchOptions
   toEncoding = genericToEncoding patchOptions
 
--- Plain @.:?@ collapses missing and null for @Maybe (Maybe a)@. 'explicitOptionalField' distinguishes them.
+-- Plain @.:?@ collapses missing and null for @Maybe (Maybe a)@. @.:!@ keeps them apart.
 instance FromJSON CronScheduleUpdate where
   parseJSON = withObject "CronScheduleUpdate" $ \obj -> do
-    expression <- explicitOptionalField obj "overrideExpression"
-    overlap <- explicitOptionalField obj "overrideOverlap"
-    timezone <- explicitOptionalField obj "overrideTimezone"
+    expression <- obj .:! "overrideExpression"
+    overlap <- obj .:! "overrideOverlap"
+    timezone <- obj .:! "overrideTimezone"
     enabledPatch <- obj .:? "enabled"
     pure
       CronScheduleUpdate

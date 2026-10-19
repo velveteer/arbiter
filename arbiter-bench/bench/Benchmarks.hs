@@ -44,6 +44,7 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Reader (ReaderT, runReaderT)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
+import Data.ByteString.Char8 qualified as BS8
 import Data.Foldable (toList, traverse_)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
@@ -76,6 +77,7 @@ import OpenTelemetry.Trace.Core
   , setGlobalTracerProvider
   )
 import Orville.PostgreSQL qualified as O
+import System.Environment (lookupEnv)
 import System.Exit (die)
 import Test.Tasty (localOption, mkTimeout)
 import Test.Tasty.Bench
@@ -86,8 +88,12 @@ import BenchHasql (hasqlTransports)
 benchSchema :: Text
 benchSchema = "arbiter"
 
-benchConnStr :: ByteString
-benchConnStr = "host=localhost port=5432 user=postgres password=master dbname=postgres options='-c track_functions=all'"
+-- | Reads @ARBITER_TEST_CONN_STRING@ when set. Otherwise it is 'defaultBenchConnStr'.
+getBenchConnStr :: IO ByteString
+getBenchConnStr = maybe defaultBenchConnStr BS8.pack <$> lookupEnv "ARBITER_TEST_CONN_STRING"
+
+defaultBenchConnStr :: ByteString
+defaultBenchConnStr = "host=localhost port=5432 user=postgres password=master dbname=postgres options='-c track_functions=all'"
 
 trialCount :: Int
 trialCount = 10
@@ -740,7 +746,9 @@ countProcessedN counter delta = liftIO $ atomicModifyIORef' counter (\count -> (
 
 -- | Run an action on a fresh connection that is closed afterwards.
 withBenchConn :: (Connection -> IO a) -> IO a
-withBenchConn = bracket (connectPostgreSQL benchConnStr) close
+withBenchConn action = do
+  connStr <- getBenchConnStr
+  bracket (connectPostgreSQL connStr) close action
 
 execute_ :: Connection -> Text -> IO ()
 execute_ conn sql = void $ execute conn (fromString (T.unpack sql) :: Query) ()
@@ -748,7 +756,8 @@ execute_ conn sql = void $ execute conn (fromString (T.unpack sql) :: Query) ()
 setupSchema :: IO ()
 setupSchema = withBenchConn $ \conn -> do
   execute_ conn $ "DROP SCHEMA IF EXISTS " <> benchSchema <> " CASCADE"
-  res <- runMigrationsForRegistry (Proxy @BenchRegistry) benchConnStr benchSchema defaultMigrationConfig
+  connStr <- getBenchConnStr
+  res <- runMigrationsForRegistry (Proxy @BenchRegistry) connStr benchSchema defaultMigrationConfig
   case res of
     MigrationSuccess -> pure ()
     MigrationError err -> die $ "Migration failed: " <> err
@@ -996,6 +1005,7 @@ main = do
   putStrLn "Setting up benchmark database schema..."
   setupSchema
   putStrLn "Schema ready. Creating environments..."
+  benchConnStr <- getBenchConnStr
 
   let benchPoolConfig = PoolConfig {poolSize = 25, poolIdleTimeout = 60, poolStripes = Just 4}
   simpleEnv <- createSimpleEnvWithConfig (Proxy @BenchRegistry) benchConnStr benchSchema benchPoolConfig

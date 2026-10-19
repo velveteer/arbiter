@@ -465,12 +465,14 @@ updateConcurrencyPolicyOverrides prefix upd = onSchema $ \schemaName -> Ops.upda
 -- | Override the policy's limit with its 'cpLimit', until it is cleared. Returns rows affected.
 setConcurrencyLimit :: (MonadArbiter m) => ConcurrencyPolicy -> m Int64
 setConcurrencyLimit policy =
-  updateConcurrencyPolicyOverrides (policyPrefixOf policy) (ConcurrencyPolicyUpdate (Just (Just (cpLimit policy))))
+  updateConcurrencyPolicyOverrides
+    (policyPrefixOf policy)
+    ConcurrencyPolicyUpdate {overrideLimit = Just (Just (cpLimit policy))}
 
 -- | Drop a concurrency policy's override. Its declared limit applies again. Returns rows affected.
 clearConcurrencyLimit :: (MonadArbiter m) => ConcurrencyPolicy -> m Int64
 clearConcurrencyLimit policy =
-  updateConcurrencyPolicyOverrides (policyPrefixOf policy) (ConcurrencyPolicyUpdate (Just Nothing))
+  updateConcurrencyPolicyOverrides (policyPrefixOf policy) ConcurrencyPolicyUpdate {overrideLimit = Just Nothing}
 
 -- | Delete drained concurrency rows with no live job. Returns the number pruned.
 pruneConcurrencyKeys
@@ -640,7 +642,7 @@ setVisibilityTimeoutBatch timeout jobs@(firstJob : _) =
     toResult (Ops.VisibilityUpdateInfo jobId heartbeated mActual cancelled suspended holder) =
       let mJob = Map.lookup jobId jobMap
           expected = maybe 0 claimSeq mJob
-          heldHere = maybe False (\job -> claimedBy job == holder) mJob
+          heldHere = any ((== holder) . claimedBy) mJob
        in case mActual of
             Nothing -> JobGone jobId
             Just actual

@@ -72,7 +72,15 @@ sentinelSource =
   JobWriteSource
     { sourceJob = defaultJob (SendWelcome "alice")
     , sourceEncoded = String "sentinel"
-    , sourceColumns = PayloadColumns Nothing Nothing Nothing 1 Nothing Nothing
+    , sourceColumns =
+        PayloadColumns
+          { pcKind = Nothing
+          , pcRateLimitKey = Nothing
+          , pcRateLimitPrefix = Nothing
+          , pcRateLimitCost = 1
+          , pcConcurrencyKey = Nothing
+          , pcConcurrencyPrefix = Nothing
+          }
     , sourceParentId = Nothing
     , sourceParentState = Nothing
     , sourceSuspended = False

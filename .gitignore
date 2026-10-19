@@ -1,4 +1,4 @@
-dist-newstyle
+dist-*/
 tags
 *.bak*
 .stack-work
@@ -6,3 +6,4 @@ cabal.project.freeze
 haddocks
 book/book
 node_modules
+.disabled.mutations/

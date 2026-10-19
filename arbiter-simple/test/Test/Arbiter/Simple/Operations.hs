@@ -9,9 +9,10 @@ import Arbiter.Core.Job.Types
 import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Test.Fixtures (TestPayload (..))
 import Arbiter.Test.Operations (operationsSpec)
-import Arbiter.Test.Setup (cleanupData, createSharedPool, execute_, setupOnce)
+import Arbiter.Test.Setup (cleanupData, createSharedPool, execute_, setupOnce, withConn)
 import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, catch, throwIO)
+import Control.Monad (void)
 import Data.ByteString (ByteString)
 import Data.Pool (withResource)
 import Data.Proxy (Proxy (..))
@@ -21,6 +22,10 @@ import Test.Hspec
 import UnliftIO.Async (async, wait)
 
 import Arbiter.Simple.SimpleDb (createSimpleEnvWithPool, inTransaction, runSimpleDb)
+
+-- | A pause for the second transaction to start and block.
+blockMicros :: Int
+blockMicros = 100_000
 
 testSchema :: Text
 testSchema = "arbiter_simple_test"
@@ -134,39 +139,34 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
         -- The groups table upsert (INSERT...ON CONFLICT) serializes concurrent
         -- inserts within the same group. B blocks until A commits.
 
-        connA <- PG.connectPostgreSQL connStr
-        connB <- PG.connectPostgreSQL connStr
-
-        -- A starts a transaction and inserts. A holds the lock on the groups table row.
-        _ <- PG.execute_ connA "BEGIN"
-        Just _ <-
-          inTransaction @SimpleOpsTestRegistry connA testSchema
-            $ HL.insertJob
-            $ setGroupKey (Just "g1")
-            $ defaultJob (TestMessage "JobA")
-
-        -- B inserts into the same group and blocks on the groups table upsert until A commits
-        asyncB <- async $ do
-          _ <- PG.execute_ connB "BEGIN"
-          Just job <-
-            inTransaction @SimpleOpsTestRegistry connB testSchema
+        withConn connStr $ \connA -> withConn connStr $ \connB -> do
+          -- A starts a transaction and inserts. A holds the lock on the groups table row.
+          _ <- PG.execute_ connA "BEGIN"
+          Just _ <-
+            inTransaction @SimpleOpsTestRegistry connA testSchema
               $ HL.insertJob
               $ setGroupKey (Just "g1")
-              $ defaultJob (TestMessage "JobB")
-          _ <- PG.execute_ connB "COMMIT"
-          pure job
+              $ defaultJob (TestMessage "JobA")
 
-        -- Give B time to start and block
-        threadDelay 100_000
+          -- B inserts into the same group and blocks on the groups table upsert until A commits
+          asyncB <- async $ do
+            _ <- PG.execute_ connB "BEGIN"
+            Just job <-
+              inTransaction @SimpleOpsTestRegistry connB testSchema
+                $ HL.insertJob
+                $ setGroupKey (Just "g1")
+                $ defaultJob (TestMessage "JobB")
+            _ <- PG.execute_ connB "COMMIT"
+            pure job
 
-        -- A commits and releases the groups table lock. B unblocks.
-        _ <- PG.execute_ connA "COMMIT"
+          -- Give B time to start and block
+          threadDelay blockMicros
 
-        -- B can now proceed
-        _ <- wait asyncB
+          -- A commits and releases the groups table lock. B unblocks.
+          _ <- PG.execute_ connA "COMMIT"
 
-        PG.close connA
-        PG.close connB
+          -- B can now proceed
+          void (wait asyncB)
 
         -- Both jobs now visible. A has lower ID, claimed first.
         [first] <- runSimpleDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]

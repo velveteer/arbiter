@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Job row edits from a side connection, as another worker or an operator makes them.
-module Arbiter.Worker.TestKit.Rows
+module Arbiter.Test.Worker.Rows
   ( updateJob
   , reclaimJob
   , flagCancelled

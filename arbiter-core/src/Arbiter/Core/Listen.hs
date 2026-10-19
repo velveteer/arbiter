@@ -62,7 +62,7 @@ import Arbiter.Core.FailureGate
   , newFailureGate
   )
 import Arbiter.Core.SqlLiterals (quoteIdentifier)
-import Arbiter.Core.Threads (labelArbiterThread)
+import Arbiter.Core.Threads (labelArbiterThread, microsPerSecond)
 
 -- | A received notification. The channel it arrived on and its payload.
 data Notification = Notification
@@ -111,7 +111,7 @@ data ListenConn = ListenConn
 newListener :: ((ListenConn -> IO ()) -> IO ()) -> IO Listener
 newListener withConn = do
   slot <- newMVar Nothing
-  pure (Listener slot withConn)
+  pure Listener {listenerSlot = slot, listenerWithConn = withConn}
 
 -- | Mutable hub state behind the slot. Opaque to callers.
 data RunningHub = RunningHub
@@ -206,9 +206,10 @@ startHub listener = do
   putMVar threadVar thread
   pure hub
 
+-- | Reconnect backoff bounds, in microseconds.
 baseBackoff, maxBackoff :: Int
-baseBackoff = 1_000_000
-maxBackoff = 30_000_000
+baseBackoff = 1 * microsPerSecond
+maxBackoff = 30 * microsPerSecond
 
 -- | Uptime past which a failure restarts backoff at the base.
 stableSeconds :: Double
@@ -229,16 +230,15 @@ hubLoop listener hub = newFailureGate >>= go baseBackoff
               getMonotonicTime >>= writeIORef readyAt . Just
               recovered <- clearFailure gate
               when recovered . void $ logHub hubRecovered hub "arbiter listener: reconnected"
-      let restart msg = do
-            mStart <- readIORef readyAt
-            ended <- getMonotonicTime
-            let uptime = maybe 0 (ended -) mStart
-            repeatAfter <- hubRepeatAfter hub
-            worth <- holdFailure gate repeatAfter msg
-            when worth $ reportFailure gate msg
-            threadDelay backoff
-            go (if uptime >= stableSeconds then baseBackoff else min maxBackoff (backoff * 2)) gate
-      restart $ "arbiter listener: " <> either displayEx (const "connection loop exited unexpectedly") result
+      let msg = "arbiter listener: " <> either displayEx (const "connection loop exited unexpectedly") result
+      mStart <- readIORef readyAt
+      ended <- getMonotonicTime
+      let uptime = maybe 0 (ended -) mStart
+      repeatAfter <- hubRepeatAfter hub
+      worth <- holdFailure gate repeatAfter msg
+      when worth $ reportFailure gate msg
+      threadDelay backoff
+      go (if uptime >= stableSeconds then baseBackoff else min maxBackoff (backoff * 2)) gate
     -- Not held when it reached no one.
     reportFailure gate msg =
       logHub hubError hub msg >>= \sent -> unless sent (void (clearFailure gate))

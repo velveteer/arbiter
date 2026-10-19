@@ -32,17 +32,21 @@ import Data.Time (NominalDiffTime)
 import System.Directory (removeFile)
 import UnliftIO
   ( MonadUnliftIO
+  , STM
   , atomically
   , checkSTM
   , finally
+  , newTVarIO
+  , readTVar
+  , readTVarIO
+  , registerDelay
+  , takeTMVar
   , tryAny
   , waitAnyCatch
   , writeTVar
   )
 import UnliftIO.Async qualified as Async
 import UnliftIO.Concurrent (threadDelay)
-import UnliftIO.STM (STM)
-import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.ChannelHandlers
   ( handleCancelNotif
@@ -61,10 +65,7 @@ import Arbiter.Worker.Reaper (MaintenancePace (..), reaperLoop)
 import Arbiter.Worker.Retry (spawnRetried)
 import Arbiter.Worker.Settlement (poolEffects, poolMode)
 import Arbiter.Worker.WorkQueue (WorkQueue, busyCount, inFlight, newWorkQueue, queuedCount)
-
--- ---------------------------------------------------------------------------
--- Worker Pool
--- ---------------------------------------------------------------------------
+import Arbiter.Worker.WorkerState (isShuttingDown)
 
 -- | Throw 'WorkerConfigException' for an invalid config.
 throwIfInvalid :: (MonadIO m) => WorkerConfig n payload -> m ()
@@ -123,15 +124,15 @@ runWorkerPool config = do
       )
       (traverse_ (atomically . writePause config))
 
-  dispatcherNotifVar <- STM.newTVarIO Nothing
-  cronRunVar <- STM.newTVarIO False
+  dispatcherNotifVar <- newTVarIO Nothing
+  cronRunVar <- newTVarIO False
   let createChannel = TE.encodeUtf8 (Schema.notificationChannelForTable queueName)
       pauseChannel = TE.encodeUtf8 (Schema.pauseNotifyChannel schemaName queueName)
       cancelChannel = TE.encodeUtf8 (Schema.cancelNotifyChannel schemaName queueName)
       cronRunChannel = TE.encodeUtf8 (Schema.cronRunNotifyChannel schemaName)
       cronNames = Set.fromList (map name (cronJobs config))
       handlers =
-        [ (createChannel, atomically . STM.writeTVar dispatcherNotifVar . Just)
+        [ (createChannel, atomically . writeTVar dispatcherNotifVar . Just)
         , (pauseChannel, handlePauseNotif config)
         , (cancelChannel, handleCancelNotif config guard)
         ]
@@ -259,9 +260,9 @@ drainPool logCfg mTimeout workQueue claimsStopped = do
           (busy, qLen) <- atomically ((,) <$> busyCount workQueue <*> queuedCount workQueue)
           tryLog logCfg Info $
             "Graceful shutdown: waiting for "
-              <> T.pack (show (busy :: Int))
+              <> T.pack (show busy)
               <> " busy worker(s), "
-              <> T.pack (show (qLen :: Int))
+              <> T.pack (show qLen)
               <> " job(s) in queue..."
           drainLoop
 
@@ -283,30 +284,30 @@ heartbeatLoop config schemaName queueName = do
   where
     logCfg = logConfig config
     sig = heartbeatSignal config
-    readShuttingDown = (== ShuttingDown) <$> STM.readTVar (workerStateVar config)
+    readShuttingDown = isShuttingDown (workerStateVar config)
     cadenceMicros = Ops.micros (workerHeartbeatInterval config)
     throttledWait = do
-      delayVar <- STM.registerDelay cadenceMicros
+      delayVar <- registerDelay cadenceMicros
       atomically $ do
-        STM.readTVar delayVar >>= checkSTM
-        paused <- STM.readTVar (pauseVar config)
-        unless paused $ STM.takeTMVar sig
+        readTVar delayVar >>= checkSTM
+        paused <- readTVar (pauseVar config)
+        unless paused $ takeTMVar sig
     tick gate = do
       traverse_
         (\path -> tryWarn logCfg "Liveness probe write failed" (liftIO $ writeFile path ""))
         (livenessFile config)
-      epoch <- STM.atomically $ STM.readTVar (pauseEpoch config)
+      epoch <- readTVarIO (pauseEpoch config)
       result <-
         tryReported logCfg Warning gate "Worker registry heartbeat" $
           Ops.heartbeatWorker schemaName (workerId config)
       traverse_ (maybe (reregister epoch) (reconcile epoch)) result
     reregister epoch = do
-      shutting <- STM.atomically readShuttingDown
+      shutting <- atomically readShuttingDown
       unless shutting $ do
         tryLog logCfg Warning "Worker registry row missing, re-registering"
         tryWarnWith logCfg "Worker re-registration failed" Nothing (registerSelf config schemaName queueName)
           >>= traverse_ (reconcile epoch)
     reconcile epoch registryPaused =
-      STM.atomically $ do
+      atomically $ do
         shutting <- readShuttingDown
         unless shutting $ writePauseIfCurrent config epoch registryPaused

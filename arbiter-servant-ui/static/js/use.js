@@ -705,6 +705,9 @@ export function useSort(rows, keys, by = '', ties = [], text = []) {
   return s;
 }
 
+// The warning when a step would drop an unsaved edit.
+const EDIT_PENDING = 'Save or cancel the edit first';
+
 // The drawer's selection and prev/next steps over the rows on screen.
 /**
  * @param {{ rows: () => any[], id: (row: any) => any, show?: (row: any) => void, held?: () => boolean, reset?: () => void }} opts
@@ -726,7 +729,7 @@ export function useDetail({ rows, id, show, held, reset }) {
     pinned: null,
     view(row) {
       if (d.held()) {
-        if (!same(row, d.cur)) toast('Save or cancel the edit first', 'warning');
+        if (!same(row, d.cur)) toast(EDIT_PENDING, 'warning');
         return false;
       }
       reset?.();
@@ -814,7 +817,7 @@ export function useDetail({ rows, id, show, held, reset }) {
     onBeforeUnmount(
       guardLeave(() => {
         if (!d.held()) return false;
-        toast('Save or cancel the edit first', 'warning');
+        toast(EDIT_PENDING, 'warning');
         return true;
       }),
     );

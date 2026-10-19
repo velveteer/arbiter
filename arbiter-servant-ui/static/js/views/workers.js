@@ -2,7 +2,7 @@
 // the global view when no queue is given.
 import { shallowRef, reactive, computed, provide, inject } from '../../vendor/vue.esm-browser.prod.js';
 import { api } from '../api.js';
-import { shortId } from '../format.js';
+import { shortId, tone } from '../format.js';
 import { useArm, useBusy, useDetail, useSort, useStored, useSummary, useView } from '../use.js';
 /** @import { Schema } from '../../../types/client' */
 
@@ -40,11 +40,11 @@ const COLS = [
 // Health is computed by the server on the database clock, apart from the paused flag.
 /** @type {Record<Schema<'WorkerHealth'>, [string, string]>} */
 const HEALTH = {
-  live: ['badge bg-success-subtle text-success-emphasis', 'Heartbeat is current'],
-  stale: ['badge bg-danger-subtle text-danger-emphasis', 'No heartbeat inside the stale threshold'],
+  live: ['badge ' + tone('success'), 'Heartbeat is current'],
+  stale: ['badge ' + tone('danger'), 'No heartbeat inside the stale threshold'],
   draining: ['badge draining-badge', 'Stops claiming, finishes its in-flight jobs, then stops'],
 };
-const healthClass = (w) => HEALTH[w.health]?.[0] || 'badge bg-secondary-subtle text-secondary-emphasis';
+const healthClass = (w) => HEALTH[w.health]?.[0] || 'badge ' + tone('secondary');
 
 const WorkerMenu = {
   props: { w: Object, close: Function },

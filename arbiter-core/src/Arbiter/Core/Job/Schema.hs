@@ -69,6 +69,7 @@ module Arbiter.Core.Job.Schema
 
     -- * Table name helpers
   , queueTableNames
+  , dlqSuffix
   , qualifiedTable
   , jobQueueTable
   , jobQueueDLQTable
@@ -89,7 +90,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import NeatInterpolation (text)
 
-import Arbiter.Core.SqlLiterals (defaultMaxAttemptsSQL, maxIdentifierBytes, quoteIdentifier, textLiteral)
+import Arbiter.Core.SqlLiterals (defaultMaxAttemptsSQL, dollarQuote, maxIdentifierBytes, quoteIdentifier, textLiteral)
 
 -- | PostgreSQL schema name, e.g. @"arbiter"@.
 type SchemaName = Text
@@ -526,14 +527,14 @@ createNotifyFunctionSQL schemaName tableName =
       channel = textLiteral (notificationChannelForTable tableName)
    in T.unlines
         [ "CREATE OR REPLACE FUNCTION " <> func <> "()"
-        , "RETURNS TRIGGER AS $$"
+        , "RETURNS TRIGGER AS " <> dollarQuote
         , "BEGIN"
         , "  IF EXISTS (SELECT 1 FROM new_table) THEN"
         , "    PERFORM pg_notify(" <> channel <> ", '');"
         , "  END IF;"
         , "  RETURN NULL;"
         , "END;"
-        , "$$ LANGUAGE plpgsql;"
+        , dollarQuote <> " LANGUAGE plpgsql;"
         , "COMMENT ON FUNCTION " <> func <> "() IS '" <> notifyObjectComment <> "';"
         ]
 
@@ -565,7 +566,7 @@ createEventStreamingFunctionSQL :: SchemaName -> Text
 createEventStreamingFunctionSQL schemaName =
   let funcName = qualifiedTable schemaName eventStreamingFunctionName
    in T.unlines
-        [ "CREATE OR REPLACE FUNCTION " <> funcName <> "() RETURNS trigger AS $$"
+        [ "CREATE OR REPLACE FUNCTION " <> funcName <> "() RETURNS trigger AS " <> dollarQuote
         , "DECLARE"
         , "  event_type text;"
         , "  job_id bigint;"
@@ -605,7 +606,7 @@ createEventStreamingFunctionSQL schemaName =
         , "    )::text);"
         , "  RETURN NULL;"
         , "END;"
-        , "$$ LANGUAGE plpgsql;"
+        , dollarQuote <> " LANGUAGE plpgsql;"
         , "COMMENT ON FUNCTION " <> funcName <> "() IS '" <> eventStreamingObjectComment <> "';"
         ]
   where

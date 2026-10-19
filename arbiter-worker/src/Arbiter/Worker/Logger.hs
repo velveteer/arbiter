@@ -27,7 +27,7 @@ module Arbiter.Worker.Logger
     -- the PVP.
   , tryLog
   , warnEx
-  , recoveryLevel
+  , withIdentity
   , toHubLog
   , FailureGate
   , newFailureGate
@@ -164,6 +164,10 @@ toHubLog cfg =
     }
   where
     shared = cfg {identityContext = []}
+
+-- | Add an identity field to every message.
+withIdentity :: Pair -> LogConfig -> LogConfig
+withIdentity field cfg = cfg {identityContext = identityContext cfg <> [field]}
 
 -- | Recovery log level visible at the failure's logging threshold.
 recoveryLevel :: LogConfig -> LogLevel -> LogLevel

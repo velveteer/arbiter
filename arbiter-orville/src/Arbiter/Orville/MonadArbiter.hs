@@ -31,10 +31,18 @@ module Arbiter.Orville.MonadArbiter
   , orvilleRunHandlerWithConnection
   ) where
 
-import Arbiter.Core.Codec (Col (..), NullCol (..), ParamType (..), SomeParam (..), runCodec)
 import Arbiter.Core.Exceptions (throwInternal)
-import Arbiter.Core.Job.Types.Internal (Stored (..), storedBytes)
-import Arbiter.Core.MonadArbiter (Query (..))
+import Arbiter.Core.MonadArbiter
+  ( Col (..)
+  , NullCol (..)
+  , ParamType (..)
+  , Query (..)
+  , SomeParam (..)
+  , Stored (..)
+  , runCodec
+  , storedBytes
+  )
+import Control.Monad ((<=<))
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (Value, eitherDecodeStrict', encode)
 import Data.ByteString (ByteString)
@@ -65,9 +73,7 @@ orvilleExecuteQuery query = O.withConnection $ \conn -> do
   result <- runRaw conn query
   let marshaller = O.annotateSqlMarshallerEmptyAnnotation (runCodec orvilleCol (qDecode query))
   decoded <- liftIO $ O.marshallResultFromSql O.defaultErrorDetailLevel marshaller result
-  case decoded of
-    Right rows -> pure rows
-    Left err -> throwInternal $ "orville decode error: " <> T.pack (show err)
+  either (\err -> throwInternal $ "orville decode error: " <> T.pack (show err)) pure decoded
 
 -- | Run a statement, returning rows affected.
 orvilleExecuteStatement
@@ -87,32 +93,25 @@ orvilleWithDbTransaction = O.withTransaction
 
 -- | Run a handler. Orville manages its own connection.
 orvilleRunHandlerWithConnection :: (job -> m result) -> job -> m result
-orvilleRunHandlerWithConnection handler job = handler job
+orvilleRunHandlerWithConnection = id
 
 someParamToSqlValue :: SomeParam -> Either Text SqlValue
 someParamToSqlValue (SomeParam (PScalar col) value) =
   Right $ FieldDef.fieldValueToSqlValue (colFieldDef "" col) value
 someParamToSqlValue (SomeParam (PNullable col) value) =
   Right $ FieldDef.fieldValueToSqlValue (O.nullableField (colFieldDef "" col)) value
-someParamToSqlValue (SomeParam (PArray col) values) = do
-  bytes <- traverse (colToBytes col) values
-  Right $ SqlValue.fromRawBytes $ Array.fmtArray bytes
-someParamToSqlValue (SomeParam (PNullArray col) values) = do
-  bytes <- traverse (colToNullableBytes col) values
-  Right $ SqlValue.fromRawBytes $ Array.fmtNullableArray bytes
+someParamToSqlValue (SomeParam (PArray col) values) =
+  SqlValue.fromRawBytes . Array.fmtArray <$> traverse (colToBytes col) values
+someParamToSqlValue (SomeParam (PNullArray col) values) =
+  SqlValue.fromRawBytes . Array.fmtNullableArray <$> traverse (traverse (colToBytes col)) values
 
 colToBytes :: Col a -> a -> Either Text ByteString
 colToBytes col value = sqlValueToBytes $ FieldDef.fieldValueToSqlValue (colFieldDef "" col) value
 
-colToNullableBytes :: Col a -> Maybe a -> Either Text (Maybe ByteString)
-colToNullableBytes col = traverse (colToBytes col)
-
 sqlValueToBytes :: SqlValue -> Either Text ByteString
-sqlValueToBytes =
-  SqlValue.foldSqlValue
-    (Right . PgText.toByteString)
-    (const $ Left "sqlValueToBytes: got composite row, expected scalar")
-    (Left "sqlValueToBytes: got NULL, expected non-null scalar")
+sqlValueToBytes value =
+  sqlValueToParam value
+    >>= maybe (Left "sqlValueToBytes: got NULL, expected non-null scalar") (Right . PgText.toByteString)
 
 sqlValueToParam :: SqlValue -> Either Text (Maybe PgTextFormatValue)
 sqlValueToParam =
@@ -123,11 +122,7 @@ sqlValueToParam =
 
 -- | Encode the ordered params into the libpq values 'Conn.executeRaw' consumes.
 encodeParams :: (MonadIO m) => [SomeParam] -> m [Maybe PgTextFormatValue]
-encodeParams = traverse toPgParam
-  where
-    toPgParam param = case someParamToSqlValue param >>= sqlValueToParam of
-      Left err -> throwInternal $ "param encoding error: " <> err
-      Right pgValue -> pure pgValue
+encodeParams = traverse (either (throwInternal . ("param encoding error: " <>)) pure . (sqlValueToParam <=< someParamToSqlValue))
 
 orvilleCol :: NullCol a -> O.SqlMarshaller () a
 orvilleCol (NotNull name col) = O.marshallReadOnlyField (colFieldDef name col)

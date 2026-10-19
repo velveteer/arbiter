@@ -13,18 +13,25 @@ import Test.Hspec (expectationFailure)
 import UnliftIO (MonadUnliftIO)
 import UnliftIO.Async (Async, link, withAsync)
 
--- | Poll every 100 ms until the predicate returns 'True'.
+-- | Milliseconds between polls of 'waitUntil'.
+pollIntervalMs :: Int
+pollIntervalMs = 100
+
+-- | Poll every 'pollIntervalMs' until the predicate returns 'True'.
 -- Fails with 'expectationFailure' after @timeoutMs@ milliseconds.
 waitUntil :: (HasCallStack) => Int -> IO Bool -> IO ()
-waitUntil timeoutMs check = go (max 1 (timeoutMs `div` 100))
+waitUntil timeoutMs check = go (max 1 (timeoutMs `div` pollIntervalMs))
   where
     go :: (HasCallStack) => Int -> IO ()
     go 0 = expectationFailure "waitUntil: timed out waiting for condition"
     go remaining = do
       satisfied <- check
       unless satisfied $ do
-        threadDelay 100_000
+        threadDelay (pollIntervalMs * microsPerMilli)
         go (remaining - 1)
+
+microsPerMilli :: Int
+microsPerMilli = 1_000
 
 -- | Run 'withAsync' with a linked handle. Raise a child-thread failure in the
 -- caller and stop the associated 'waitUntil'.

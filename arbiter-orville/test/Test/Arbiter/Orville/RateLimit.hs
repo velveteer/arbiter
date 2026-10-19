@@ -3,7 +3,7 @@
 module Test.Arbiter.Orville.RateLimit (spec) where
 
 import Arbiter.Test.RateLimit (RLReg, rateLimitSpec, rateLimitTable, setupRateLimitPolicy)
-import Arbiter.Test.Setup (setupOnce)
+import Arbiter.Test.Setup (setupOnce, sharedPoolSize)
 import Data.ByteString (ByteString)
 import Data.Text (Text)
 import Test.Hspec
@@ -16,6 +16,6 @@ testSchema = "arbiter_orville_ratelimit_test"
 spec :: ByteString -> Spec
 spec connStr =
   beforeAll (setupOnce connStr testSchema rateLimitTable False >> setupRateLimitPolicy connStr testSchema) $ do
-    env <- runIO (createOrvilleTestEnv @RLReg connStr testSchema rateLimitTable 5)
+    env <- runIO (createOrvilleTestEnv @RLReg connStr testSchema rateLimitTable sharedPoolSize)
     before (cleanupOrvilleTest env >> pure env) $
       rateLimitSpec (runOrvilleTest @RLReg)

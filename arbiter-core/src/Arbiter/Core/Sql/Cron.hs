@@ -140,10 +140,10 @@ tryFireCronGateSQL schemaName name minuteFloor =
 
 -- | Per-(schema, queue, name) transaction-scoped advisory lock for cron.
 tryAcquireCronLeaderSQL :: SchemaName -> Text -> Text -> Query Bool
-tryAcquireCronLeaderSQL schema queue name =
+tryAcquireCronLeaderSQL schemaName queue name =
   [sql|
     SELECT pg_try_advisory_xact_lock(
-      hashtextextended(#{schema :: CText} || ':' || #{queue :: CText} || ':' || #{name :: CText}, 0)
+      hashtextextended(#{schemaName :: CText} || ':' || #{queue :: CText} || ':' || #{name :: CText}, 0)
     ) AS @{result :: CBool}
   |]
 

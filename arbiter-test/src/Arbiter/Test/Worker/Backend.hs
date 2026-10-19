@@ -1,5 +1,5 @@
 -- | The backend record the worker suites run over.
-module Arbiter.Worker.TestKit.Backend (TestBackend (..)) where
+module Arbiter.Test.Worker.Backend (TestBackend (..)) where
 
 import Arbiter.Core.Job.Types (JobRead)
 import Arbiter.Core.MonadArbiter (JobHandler, ResultOf)

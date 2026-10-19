@@ -9,6 +9,7 @@ import Arbiter.Core.Job.Types
 import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Test.Fixtures (TestPayload (..))
 import Arbiter.Test.Operations (operationsSpec)
+import Arbiter.Test.Setup (sharedPoolSize)
 import Control.Exception (SomeException, catch, throwIO)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
@@ -27,7 +28,7 @@ testTable :: Text
 testTable = "arbiter_orville_ops_test"
 
 spec :: ByteString -> Spec
-spec connStr = beforeAll (setupOrvilleTest connStr testSchema testTable 5) $ beforeWith (\env -> cleanupOrvilleTest env >> pure env) $ do
+spec connStr = beforeAll (setupOrvilleTest connStr testSchema testTable sharedPoolSize) $ beforeWith (\env -> cleanupOrvilleTest env >> pure env) $ do
   operationsSpec @TestPayload TestMessage pure (runOrvilleTest @OrvilleOpsTestRegistry)
 
   describe "Transaction Participation" $ do

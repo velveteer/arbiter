@@ -27,6 +27,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 
 import Arbiter.Core.Codec (Params, RowCodec, SomeParam)
+import Arbiter.Core.Enum (showText)
 
 -- | One run of literal SQL or one parameter hole.
 data Piece
@@ -55,7 +56,7 @@ data Query a = Query
 mkQuery :: [Piece] -> Params -> RowCodec a -> Query a
 mkQuery pieces params = Query pieces params (render (const "?") pieces) (render positional pieces)
   where
-    positional index = "$" <> T.pack (show index)
+    positional index = "$" <> showText index
 
 -- | Render the pieces, numbering the holes from one.
 render :: (Int -> Text) -> [Piece] -> Text

@@ -14,7 +14,7 @@ module Test.Arbiter.Orville.Worker
 import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
 import Arbiter.Test.Fixtures (WorkerTestPayload (..))
 import Arbiter.Test.Setup qualified as TestSetup
-import Arbiter.Worker.TestKit qualified as TestKit
+import Arbiter.Test.Worker qualified as TestKit
 import Data.ByteString (ByteString)
 import Data.Text (Text)
 import Test.Hspec (Spec, afterAll_, beforeAll, runIO)

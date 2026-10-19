@@ -77,6 +77,7 @@ import Arbiter.Core.Admission (splitPrefixedSuffix)
 import Arbiter.Core.Concurrency.Spec (ConcurrencyKey (..))
 import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView (..), ConcurrencyPolicyView (..))
 import Arbiter.Core.CronSchedule (CronScheduleRow (..))
+import Arbiter.Core.Job.Dedup (dedupFromParts)
 import Arbiter.Core.Job.Types
   ( DedupKey (..)
   , JobRead
@@ -319,13 +320,9 @@ traceCodec =
 
 dedupCodec :: Codec (JobWriteSource payload) (Maybe DedupKey)
 dedupCodec =
-  toDedupKey
+  dedupFromParts
     <$> lmap (fst . dedupParts . JT.dedupKey . sourceJob) (rwN "dedup_key" CText)
     <*> lmap (snd . dedupParts . JT.dedupKey . sourceJob) (rwN "dedup_strategy" CText)
-  where
-    toDedupKey Nothing _ = Nothing
-    toDedupKey (Just key) (Just "replace") = Just (ReplaceDuplicate key)
-    toDedupKey (Just key) _ = Just (IgnoreDuplicate key)
 
 -- | An encoded payload and the columns derived from it, as every job write stores them.
 payloadWriteCodec :: Codec (Value, PayloadColumns) PayloadKeys
@@ -477,7 +474,19 @@ workerRowWithHealthCodec =
     <*> col "health" CText
   where
     toRow wid queue host count started heartbeat shuttingDown paused stale metadata rawHealth =
-      ( WorkerRow wid queue host count started heartbeat shuttingDown paused stale metadata Live
+      ( WorkerRow
+          { workerId = wid
+          , queueName = queue
+          , hostName = host
+          , workerCount = count
+          , startedAt = started
+          , lastHeartbeat = heartbeat
+          , shuttingDown = shuttingDown
+          , paused = paused
+          , staleThresholdSecs = stale
+          , metadata = metadata
+          , health = Live
+          }
       , rawHealth
       )
 

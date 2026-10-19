@@ -1,7 +1,7 @@
 {-# LANGUAGE DeriveAnyClass #-}
 
 module Test.Arbiter.Worker.Fixtures
-  ( WorkerTestPayload (..)
+  ( TaskPayload (..)
   , mkTime
   ) where
 
@@ -11,12 +11,12 @@ import Data.Text (Text)
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
 import GHC.Generics (Generic)
 
--- | A payload for the worker suites.
-newtype WorkerTestPayload = SimpleTask Text
+-- | A one-constructor payload for the worker unit tests.
+newtype TaskPayload = SimpleTask Text
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
-instance HasKind WorkerTestPayload
+instance HasKind TaskPayload
 
 -- | A UTCTime from calendar and clock components.
 mkTime :: Integer -> Int -> Int -> Int -> Int -> Int -> UTCTime

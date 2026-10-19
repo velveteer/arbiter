@@ -6,6 +6,7 @@
 -- RTS thread labels for an eventlog, ThreadScope session or @ghc-debug@ dump.
 module Arbiter.Core.Threads
   ( labelArbiterThread
+  , microsPerSecond
   ) where
 
 import Control.Concurrent (myThreadId)
@@ -23,3 +24,7 @@ labelArbiterThread role mQueue = liftIO $ do
   labelThread tid (T.unpack (T.intercalate ":" ("arbiter" : slug role : toList mQueue)))
   where
     slug = T.replace " " "-" . T.toLower
+
+-- | Microseconds in one second.
+microsPerSecond :: (Num a) => a
+microsPerSecond = 1_000_000

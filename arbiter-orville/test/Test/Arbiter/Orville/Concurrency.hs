@@ -9,6 +9,7 @@ import Arbiter.Test.Concurrency
   , raceConditionSpec
   )
 import Arbiter.Test.Fixtures (TestPayload (..))
+import Arbiter.Test.Setup (concurrencyPoolSize)
 import Data.ByteString (ByteString)
 import Data.Text (Text)
 import Test.Hspec
@@ -28,7 +29,7 @@ testTable :: Text
 testTable = "arbiter_orville_concurrency_test"
 
 spec :: ByteString -> Spec
-spec connStr = beforeAll (setupOrvilleTest connStr testSchema testTable 10) $ beforeWith (\env -> cleanupOrvilleTest env >> pure env) $ do
+spec connStr = beforeAll (setupOrvilleTest connStr testSchema testTable concurrencyPoolSize) $ beforeWith (\env -> cleanupOrvilleTest env >> pure env) $ do
   concurrencySpec @TestPayload
     TestMessage
     (runOrvilleTest @OrvilleConcurrencyTestRegistry)

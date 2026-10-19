@@ -317,10 +317,11 @@ runBatch effects guard mode handoff jobs = do
   -- finalizer.
   effectSpan effects $ \inherit -> (`catch` onForceCancel) $ do
     result <-
-      trySync $
-        guardBatch
+      trySync
+        $ guardBatch
           guard
-          Batch {batchJobs = jobs, batchPending = pendingJobs handoff jobs, batchStart = startTime, batchInherit = inherit} $ do
+          Batch {batchJobs = jobs, batchPending = pendingJobs handoff jobs, batchStart = startTime, batchInherit = inherit}
+        $ do
           traverse_ (reportClaimed run) jobs
           case mode of
             -- The commit stays interruptible. The transaction contains the handler.
@@ -481,8 +482,8 @@ callbacks base jobs startTime =
 unownedReason :: Text
 unownedReason = "no longer claimed by this worker"
 
-interruptedSiblingReason :: Text
-interruptedSiblingReason = "Releasing an interrupted batch sibling failed"
+interruptedSiblingWarning :: Text
+interruptedSiblingWarning = "Releasing an interrupted batch sibling failed"
 
 forceCancelledLog :: Text
 forceCancelledLog = "Job(s) force-cancelled"
@@ -605,14 +606,14 @@ reportBatchOutcome run jobs startTime endTime outcome = do
           -- its attempt.
           let (inBatch, jobsGone, siblings) = splitNamed gone
           void (settleGoneJobs run reason jobsGone)
-          when inBatch $ releaseOrWarn run interruptedSiblingReason siblings
+          when inBatch $ releaseOrWarn run interruptedSiblingWarning siblings
       | Just (JobScopedFailure inner scoped) <- fromException exc -> do
           let (inBatch, theirs, siblings) = splitNamed scoped
               failure = classifyException (toException inner)
           if inBatch
             then do
               failJobs failure theirs
-              releaseOrWarn run interruptedSiblingReason siblings
+              releaseOrWarn run interruptedSiblingWarning siblings
             else failJobs failure unhandled
       | Just JobNackException <- fromException exc -> do
           -- Hand back the attempt the claim consumed for every job the handler

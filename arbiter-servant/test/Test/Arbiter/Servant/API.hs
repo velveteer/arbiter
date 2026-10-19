@@ -50,7 +50,7 @@ import Arbiter.Worker.Logger (LogConfig (..), LogDestination (..), defaultLogCon
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.MVar (newEmptyMVar, takeMVar, tryPutMVar)
 import Control.Exception (finally)
-import Control.Monad (forM_, void)
+import Control.Monad (void)
 import Data.Aeson (FromJSON, ToJSON, Value (..), decode, encode, object, toJSON, (.=))
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.QQ.Simple (aesonQQ)
@@ -144,6 +144,10 @@ queuePath rest = TE.encodeUtf8 ("/api/queues/arbiter_servant_test/" <> rest)
 -- | A route on one row, e.g. @rowPath "dlq" 4 "retry"@.
 rowPath :: Text -> Int64 -> Text -> ByteString
 rowPath collection rowId verb = queuePath (collection <> "/" <> T.pack (show rowId) <> "/" <> verb)
+
+-- | A row ID that no test inserts.
+absentJobId :: Int64
+absentJobId = 99999
 
 -- | A response with this status and exactly this body.
 statusWithBody :: Int -> LB.ByteString -> ResponseMatcher
@@ -434,7 +438,7 @@ spec connStr = do
         primaryKey returnedJob `shouldBe` jobId
 
     it "GET /api/queues/arbiter_servant_test/jobs/:id returns 404 for non-existent job" $ do
-      get "/api/queues/arbiter_servant_test/jobs/99999"
+      get (queuePath ("jobs/" <> T.pack (show absentJobId)))
         `shouldRespondWith` "Job not found" {matchStatus = 404}
 
     it "GET /api/queues/arbiter_servant_test/jobs supports limit parameter" $ do
@@ -467,7 +471,7 @@ spec connStr = do
         pageTotal (jobsPage body) `shouldBe` 1
         length (pageItems (jobsPage body)) `shouldBe` 1
         -- Verify only groupA jobs returned
-        forM_ (pageItems (jobsPage body)) $ \listed -> groupKey (ajwsJob listed) `shouldBe` Just "groupA"
+        for_ (pageItems (jobsPage body)) $ \listed -> groupKey (ajwsJob listed) `shouldBe` Just "groupA"
 
     it "GET /api/queues/arbiter_servant_test/jobs supports kind filter" $ do
       liftIO $ do
@@ -538,7 +542,7 @@ spec connStr = do
         body :: JobsResponse ServantTestPayload <- decodeBody childResp
         pageTotal (jobsPage body) `shouldBe` 2
         let returned = map (primaryKey . ajwsJob) (pageItems (jobsPage body))
-        forM_ childIds $ \childId -> (childId `elem` returned) `shouldBe` True
+        for_ childIds $ \childId -> (childId `elem` returned) `shouldBe` True
 
     it "GET /api/queues/arbiter_servant_test/jobs clamps out-of-range limit and offset" $ do
       liftIO $ do
@@ -650,7 +654,7 @@ spec connStr = do
         `shouldRespondWith` 404
 
     it "DELETE /api/queues/arbiter_servant_test/jobs/:id returns 404 for non-existent job" $ do
-      delete "/api/queues/arbiter_servant_test/jobs/99999" `shouldRespondWith` 404
+      delete (queuePath ("jobs/" <> T.pack (show absentJobId))) `shouldRespondWith` 404
 
     it "POST /api/queues/arbiter_servant_test/jobs/:id/force-cancel cancels a job" $ do
       jobId <- liftIO $ do
@@ -665,7 +669,7 @@ spec connStr = do
         `shouldRespondWith` 404
 
     it "POST /api/queues/arbiter_servant_test/jobs/:id/force-cancel returns 404 for non-existent job" $ do
-      post "/api/queues/arbiter_servant_test/jobs/99999/force-cancel" "" `shouldRespondWith` 404
+      post (rowPath "jobs" absentJobId "force-cancel") "" `shouldRespondWith` 404
 
     it "POST /api/queues/arbiter_servant_test/jobs/:id/force-cancel removes a parent and its children" $ do
       -- Plain cancel refuses a parent with children. force-cancel cascade-deletes the tree.
@@ -689,7 +693,7 @@ spec connStr = do
         `shouldRespondWith` 404
 
     it "POST /api/queues/arbiter_servant_test/jobs/:id/promote returns 404 for non-existent job" $ do
-      post "/api/queues/arbiter_servant_test/jobs/99999/promote" "" `shouldRespondWith` 404
+      post (rowPath "jobs" absentJobId "promote") "" `shouldRespondWith` 404
 
     it "POST /api/queues/arbiter_servant_test/jobs/:id/move-to-dlq moves job to DLQ" $ do
       -- Insert a job
@@ -728,7 +732,7 @@ spec connStr = do
       get "/api/queues/arbiter_servant_test/dlq" >>= liftIO . splices
 
     it "POST /api/queues/arbiter_servant_test/jobs/:id/move-to-dlq returns 404 for non-existent job" $ do
-      post "/api/queues/arbiter_servant_test/jobs/99999/move-to-dlq" "" `shouldRespondWith` 404
+      post (rowPath "jobs" absentJobId "move-to-dlq") "" `shouldRespondWith` 404
 
     it "POST /api/queues/arbiter_servant_test/jobs/:id/pause-children pauses children" $ do
       -- Insert a finalizer tree - parent suspended, children unsuspended
@@ -749,8 +753,7 @@ spec connStr = do
       liftIO $ do
         allJobs :: [JobRead (Stored ServantTestPayload)] <- runSimpleDb mkEnv $ Ops.listJobs testSchema testTable 10 0
         let childJobs = filter (\listed -> decodeStored (payload listed) == Right (TestMessage "child")) allJobs
-        length childJobs `shouldBe` 1
-        forM_ childJobs $ \listed -> suspended listed `shouldBe` True
+        map suspended childJobs `shouldBe` [True]
 
     it "POST /api/queues/arbiter_servant_test/jobs/:id/pause-children returns 204 for job with no children" $ do
       jobId <- liftIO $ do
@@ -779,8 +782,7 @@ spec connStr = do
       liftIO $ do
         allJobs :: [JobRead (Stored ServantTestPayload)] <- runSimpleDb mkEnv $ Ops.listJobs testSchema testTable 10 0
         let childJobs = filter (\listed -> decodeStored (payload listed) == Right (TestMessage "child")) allJobs
-        length childJobs `shouldBe` 1
-        suspended (head childJobs) `shouldBe` False
+        map suspended childJobs `shouldBe` [False]
 
     it "POST /api/queues/arbiter_servant_test/jobs/:id/resume-children returns 204 for job with no children" $ do
       jobId <- liftIO $ do
@@ -790,10 +792,10 @@ spec connStr = do
         `shouldRespondWith` 204
 
     it "POST /api/queues/arbiter_servant_test/jobs/:id/pause-children returns 404 for unknown job" $ do
-      post "/api/queues/arbiter_servant_test/jobs/999999/pause-children" "" `shouldRespondWith` 404
+      post (rowPath "jobs" absentJobId "pause-children") "" `shouldRespondWith` 404
 
     it "POST /api/queues/arbiter_servant_test/jobs/:id/resume-children returns 404 for unknown job" $ do
-      post "/api/queues/arbiter_servant_test/jobs/999999/resume-children" "" `shouldRespondWith` 404
+      post (rowPath "jobs" absentJobId "resume-children") "" `shouldRespondWith` 404
 
   describe "DLQ API" $ with (cleanupDb >> pure app) $ do
     it "GET /api/queues/arbiter_servant_test/dlq returns empty list initially" $ do
@@ -945,7 +947,7 @@ spec connStr = do
         length allJobs `shouldBe` 0
 
     it "POST /api/queues/arbiter_servant_test/dlq/:id/retry returns 404 for non-existent DLQ job" $ do
-      post "/api/queues/arbiter_servant_test/dlq/99999/retry" "" `shouldRespondWith` 404
+      post (rowPath "dlq" absentJobId "retry") "" `shouldRespondWith` 404
 
     it "POST /api/queues/arbiter_servant_test/dlq/:id/retry returns 409 when parent no longer exists" $ do
       -- Insert parent + child via insertJobTree, ack parent (resumes children),
@@ -972,7 +974,7 @@ spec connStr = do
         `shouldRespondWith` 409
 
     it "DELETE /api/queues/arbiter_servant_test/dlq/:id returns 404 for non-existent DLQ job" $ do
-      delete "/api/queues/arbiter_servant_test/dlq/99999" `shouldRespondWith` 404
+      delete (queuePath ("dlq/" <> T.pack (show absentJobId))) `shouldRespondWith` 404
 
     it "GET /api/queues/arbiter_servant_test/dlq searches the payload and the last error" $ do
       liftIO $ do
@@ -1071,10 +1073,10 @@ spec connStr = do
 
     it "GET /api/queues/arbiter_servant_test/archive searches the payload" $ do
       liftIO $ do
-        forM_ ["archived invoice", "archived receipt"] $ \message ->
+        for_ ["archived invoice", "archived receipt"] $ \message ->
           runSimpleDb mkEnv $ HL.insertJob (setArchiveFor (Just 86400) (defaultJob (TestMessage message)))
         claimed <- runSimpleDb mkEnv $ HL.claimNextVisibleJobsAs @ServantTestPayload 2 60 UUID.nil
-        forM_ claimed $ runSimpleDb mkEnv . HL.ackJob
+        for_ claimed $ runSimpleDb mkEnv . HL.ackJob
       resp <- get (queuePath "archive?payload=INVOICE")
       liftIO $ do
         body :: ArchiveResponse ServantTestPayload <- decodeBody resp
@@ -1131,7 +1133,7 @@ spec connStr = do
         suspended job `shouldBe` False
 
     it "POST /:id/resume returns 404 for non-existent job" $ do
-      post "/api/queues/arbiter_servant_test/jobs/99999/resume" "" `shouldRespondWith` 404
+      post (rowPath "jobs" absentJobId "resume") "" `shouldRespondWith` 404
 
     it "POST /:id/resume returns 409 for non-suspended job" $ do
       jobId <- liftIO $ do
@@ -1271,11 +1273,11 @@ spec connStr = do
 
     it "POST /:id/reschedule returns 404 for non-existent job" $ do
       at <- later
-      reschedule 99999 at `shouldRespondWith` 404
+      reschedule absentJobId at `shouldRespondWith` 404
 
   describe "Groups API" $ with (cleanupDb >> pure app) $ do
     let seedGroups = liftIO $ do
-          forM_ ["big-1", "big-2", "big-3"] $ \message ->
+          for_ ["big-1", "big-2", "big-3"] $ \message ->
             runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "big" (TestMessage message))
           void . runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "small" (TestMessage "small-1"))
           [held] <- runSimpleDb mkEnv $ HL.claimNextVisibleJobs 1 60 :: IO [JobRead ServantTestPayload]
@@ -1363,13 +1365,12 @@ spec connStr = do
       body <- groupsAt "?group_key=rs"
       liftIO $ map gsReadyCount (pageItems body) `shouldBe` [1]
 
-  -- QueueOverview's instances also carry a gauge snapshot through the shared gate.
   describe "Job wire contract" $ do
-    -- A job object as a server predating the trace and claim fields sends it.
-    let olderJob =
+    -- A job object with only the required fields.
+    let minimalJob =
           [aesonQQ|
             { "primaryKey": 1
-            , "payload": {"tag": "TestMessage", "contents": "older server"}
+            , "payload": {"tag": "TestMessage", "contents": "minimal"}
             , "queueName": "arbiter_servant_test"
             , "groupKey": null
             , "insertedAt": "2026-01-01T00:00:00Z"
@@ -1381,12 +1382,16 @@ spec connStr = do
             , "notVisibleUntil": null
             , "dedupKey": null
             , "maxAttempts": null
+            , "suspended": true
+            , "claimSeq": 3
             }
           |]
 
-    it "decodes a job object carrying none of the fields added since" $
-      (claimSeq <$> decode @(JobRead ServantTestPayload) (encode olderJob)) `shouldBe` Just 0
+    it "decodes a job object that carries only the required fields" $
+      ((\job -> (suspended job, claimSeq job)) <$> decode @(JobRead ServantTestPayload) (encode minimalJob))
+        `shouldBe` Just (True, 3)
 
+  -- QueueOverview's instances also carry a gauge snapshot through the shared gate.
   describe "Landing overview wire contract" $ do
     let overview =
           Ops.QueueOverview
@@ -1443,26 +1448,6 @@ spec connStr = do
 
     it "round-trips, which is what the shared gauge payload relies on" $
       decode (encode overview) `shouldBe` Just overview
-
-    -- A stats object as a replica predating the kind rollup publishes it.
-    let olderStats =
-          [aesonQQ|
-            { "totalJobs": 8
-            , "readyJobs": 3
-            , "inFlightJobs": 2
-            , "scheduledJobs": 1
-            , "backoffJobs": 1
-            , "throttledJobs": 0
-            , "suspendedJobs": 1
-            , "cancelledJobs": 0
-            , "dlqJobs": 2
-            , "oldestReadyAgeSeconds": 12.5
-            , "oldestInFlightAgeSeconds": 4.5
-            }
-          |]
-
-    it "decodes a stats object carrying no kind rollup" $
-      (Ops.kindCounts <$> decode @Ops.QueueStats (encode olderStats)) `shouldBe` Just Map.empty
 
   describe "Consumer API" $ with (cleanupDb >> pure app) $ do
     it "POST /claim leases a job and returns its lease" $ do
@@ -1883,7 +1868,7 @@ spec connStr = do
       liftIO $ do
         body :: WorkersResponse <- decodeBody resp
         length (workers body) `shouldBe` 1
-        forM_ (workers body) $ \worker -> W.paused worker `shouldBe` False
+        for_ (workers body) $ \worker -> W.paused worker `shouldBe` False
 
     it "POST /api/workers/:id/pause then resume flips the paused flag" $ do
       _ <- seedWorker

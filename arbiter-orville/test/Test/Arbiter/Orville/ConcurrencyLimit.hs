@@ -4,7 +4,7 @@ module Test.Arbiter.Orville.ConcurrencyLimit (spec) where
 
 import Arbiter.Test.ConcurrencyLimit (CLReg, concurrencyLimitSpec, concurrencyTable)
 import Arbiter.Test.ConcurrencyModel (concurrencyModelSpec)
-import Arbiter.Test.Setup (createSharedPool, setupOnce)
+import Arbiter.Test.Setup (createSharedPool, setupOnce, sharedPoolSize)
 import Data.ByteString (ByteString)
 import Data.Pool (withResource)
 import Data.Text (Text)
@@ -19,7 +19,7 @@ testSchema = "arbiter_orville_concurrency_limit_test"
 spec :: ByteString -> Spec
 spec connStr =
   beforeAll (setupOnce connStr testSchema concurrencyTable False) $ do
-    env <- runIO (createOrvilleTestEnv @CLReg connStr testSchema concurrencyTable 5)
+    env <- runIO (createOrvilleTestEnv @CLReg connStr testSchema concurrencyTable sharedPoolSize)
     pgPool <- runIO (createSharedPool connStr)
     let run :: forall a. TestOrville CLReg a -> IO a
         run = runOrvilleTest env

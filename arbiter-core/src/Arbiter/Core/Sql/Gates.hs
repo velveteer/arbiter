@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# OPTIONS_HADDOCK not-home #-}
 
@@ -21,7 +20,7 @@ import Data.Aeson (Value)
 import Data.Text (Text)
 import Data.Time (UTCTime)
 
-import Arbiter.Core.Gates (arbiterGatesTable)
+import Arbiter.Core.Gates (arbiterGatesTable, gateEpochSQL)
 import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query)
@@ -77,7 +76,7 @@ claimOrReadGateSQL schemaName task intervalSecs maxAgeSecs =
           SELECT #{task :: CText}, NOW()
           WHERE NOT EXISTS (SELECT 1 FROM ${tbl} WHERE task_name = #{task :: CText})
           ON CONFLICT (task_name) DO NOTHING
-          RETURNING NOW() AS claimed_at, '1970-01-01'::timestamptz AS previous_run_at
+          RETURNING NOW() AS claimed_at, ${gateEpochSQL} AS previous_run_at
         ),
         claimed AS (
           UPDATE ${tbl} gate SET last_run_at = NOW()

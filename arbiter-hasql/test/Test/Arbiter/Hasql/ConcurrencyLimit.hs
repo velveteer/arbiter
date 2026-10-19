@@ -4,7 +4,7 @@ module Test.Arbiter.Hasql.ConcurrencyLimit (spec) where
 
 import Arbiter.Test.ConcurrencyLimit (CLReg, concurrencyLimitSpec, concurrencyTable)
 import Arbiter.Test.ConcurrencyModel (concurrencyModelSpec)
-import Arbiter.Test.Setup (cleanupOnce, createSharedPool, setupOnce)
+import Arbiter.Test.Setup (cleanupOnce, createSharedPool, setupOnce, sharedPoolSize)
 import Data.ByteString (ByteString)
 import Data.Pool (withResource)
 import Data.Proxy (Proxy (..))
@@ -21,7 +21,7 @@ testSchema = "arbiter_hasql_concurrency_limit_test"
 spec :: ByteString -> Spec
 spec connStr =
   beforeAll (setupOnce connStr testSchema concurrencyTable False) $ do
-    sharedPool <- runIO (createHasqlPool 5 connStr)
+    sharedPool <- runIO (createHasqlPool sharedPoolSize connStr)
     pgPool <- runIO (createSharedPool connStr)
     mkEnv <- runIO (createHasqlEnvWithPool (Proxy @CLReg) sharedPool testSchema)
     let run :: forall a. HasqlDb CLReg IO a -> IO a

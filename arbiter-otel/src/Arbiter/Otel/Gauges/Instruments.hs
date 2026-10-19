@@ -188,17 +188,15 @@ registerInstruments meter cache = do
       over
         tables
         (\tableHealth -> [([("table", Health.table tableHealth), (label, key)], value) | (key, value) <- pairs tableHealth])
-    perDbTotals label pairs = over dbOf (\dbHealth -> [([(label, key)], value) | (key, value) <- pairs dbHealth])
-    dbTotal field = over dbOf (\dbHealth -> [([], field dbHealth)])
-    perTable field = observed (over tables (\tableHealth -> [([("table", Health.table tableHealth)], field tableHealth)]))
+    perTable field = perTableMaybe (Just . field)
     perTableMaybe field =
       observed
         (over tables (\tableHealth -> [([("table", Health.table tableHealth)], value) | value <- toList (field tableHealth)]))
     perQueue field =
       observed
         (over queues (\overview -> [([("queue", overviewQueue overview)], fromMaybe 0 (field (overviewStats overview)))]))
-    perDb = observed . dbTotal
-    perDbBy label = observed . perDbTotals label
+    perDb field = observed (over dbOf (\dbHealth -> [([], field dbHealth)]))
+    perDbBy label pairs = observed (over dbOf (\dbHealth -> [([(label, key)], value) | (key, value) <- pairs dbHealth]))
 
 -- | Count an absolute total's rise since the scan it was last counted from.
 addRise

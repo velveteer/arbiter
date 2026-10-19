@@ -55,16 +55,16 @@ library
     Arbiter.Test.RateLimit
     Arbiter.Test.Setup
     Arbiter.Test.StateMachine
-    Arbiter.Worker.TestKit
-    Arbiter.Worker.TestKit.Backend
-    Arbiter.Worker.TestKit.ConnectionRecovery
-    Arbiter.Worker.TestKit.Cron
-    Arbiter.Worker.TestKit.Deadline
-    Arbiter.Worker.TestKit.Lifecycle
-    Arbiter.Worker.TestKit.Reclaim
+    Arbiter.Test.Worker
+    Arbiter.Test.Worker.Backend
+    Arbiter.Test.Worker.ConnectionRecovery
+    Arbiter.Test.Worker.Cron
+    Arbiter.Test.Worker.Deadline
+    Arbiter.Test.Worker.Lifecycle
+    Arbiter.Test.Worker.Reclaim
 
   other-modules:
-    Arbiter.Worker.TestKit.Rows
+    Arbiter.Test.Worker.Rows
   build-depends:
     , aeson                 >=2.2  && <2.3
     , arbiter-core          >=0.1  && <0.2

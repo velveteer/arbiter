@@ -26,7 +26,7 @@ import Arbiter.Core.Sql.Archive (archiveAckCte)
 import Arbiter.Core.Sql.Groups (settleGroupLocksCte)
 import Arbiter.Core.Sql.QQ (sql, stmt)
 import Arbiter.Core.Sql.Query (Query, mwhen)
-import Arbiter.Core.Sql.Tree (lockedByIdsCte)
+import Arbiter.Core.Sql.Tree (lockedByIdsCte, wakeParentCte)
 import Arbiter.Core.SqlLiterals (attemptsLeftSQL)
 
 -- | Parent-aware ack. Deletes a childless job, suspends one whose children are still
@@ -34,11 +34,12 @@ import Arbiter.Core.SqlLiterals (attemptsLeftSQL)
 -- or 0 for a job gone, reclaimed or cancelled. When @archiveEnabled@, the deleted row
 -- is teed into the archive per-row on @archive_for@.
 smartAckJobSQL :: Bool -> SchemaName -> TableName -> Int64 -> Int64 -> Query Int64
-smartAckJobSQL archiveEnabled schema tableName =
-  let tbl = jobQueueTable schema tableName
+smartAckJobSQL archiveEnabled schemaName tableName =
+  let tbl = jobQueueTable schemaName tableName
       returning = if archiveEnabled then "*" else "id, parent_id, group_key" :: Text
-      archived = mwhen archiveEnabled (archiveAckCte schema tableName "ack")
-      groupLocks = settleGroupLocksCte schema tableName "ack" ["wake_parent"]
+      archived = mwhen archiveEnabled (archiveAckCte schemaName tableName "ack")
+      wakeParent = wakeParentCte tbl "ack"
+      groupLocks = settleGroupLocksCte schemaName tableName "ack" ["wake_parent"]
    in [stmt|
         WITH ack AS (
           DELETE FROM ${tbl}
@@ -56,18 +57,7 @@ smartAckJobSQL archiveEnabled schema tableName =
             AND EXISTS (SELECT 1 FROM ${tbl} WHERE parent_id = #{jobId :: CInt8})
           RETURNING id
         ),
-        wake_parent AS (
-          UPDATE ${tbl}
-          SET suspended = FALSE, updated_at = NOW()
-          WHERE id = (SELECT parent_id FROM ack WHERE parent_id IS NOT NULL)
-            AND suspended = TRUE
-            AND NOT EXISTS (
-              SELECT 1 FROM ${tbl} child
-              WHERE child.parent_id = (SELECT parent_id FROM ack WHERE parent_id IS NOT NULL)
-                AND child.id NOT IN (SELECT id FROM ack)
-            )
-          RETURNING id, group_key
-        ),
+        ${wakeParent},
         ${groupLocks}
         SELECT
           (SELECT count(*) FROM ack) + (SELECT count(*) FROM suspend) AS @{result :: CInt8}
@@ -80,11 +70,11 @@ smartAckJobSQL archiveEnabled schema tableName =
 -- ids acked or suspended. Gone or reclaimed jobs are absent. Locks rows in descending id order.
 -- The caller holds the parent locks.
 smartAckJobsBatchSQL :: Bool -> SchemaName -> TableName -> [Int64] -> [Int64] -> Query Int64
-smartAckJobsBatchSQL archiveEnabled schema tableName =
-  let tbl = jobQueueTable schema tableName
+smartAckJobsBatchSQL archiveEnabled schemaName tableName =
+  let tbl = jobQueueTable schemaName tableName
       returning = if archiveEnabled then "job.*" else "job.id, job.parent_id, job.group_key" :: Text
-      archived = mwhen archiveEnabled (archiveAckCte schema tableName "ack")
-      groupLocks = settleGroupLocksCte schema tableName "ack" ["suspend", "wake_parent"]
+      archived = mwhen archiveEnabled (archiveAckCte schemaName tableName "ack")
+      groupLocks = settleGroupLocksCte schemaName tableName "ack" ["suspend", "wake_parent"]
    in [stmt|
         WITH input AS (
           SELECT unnest(#{ids :: [CInt8]}::bigint[]) AS id, unnest(#{cseqs :: [CInt8]}::bigint[]) AS cseq
@@ -134,8 +124,8 @@ smartAckJobsBatchSQL archiveEnabled schema tableName =
 -- | Extend a job's visibility timeout. Matches on the claim token and does not check
 -- the holder. Suspended rows hold no lease. @secs@ at or below 0 clears the lease.
 setVisibilityTimeoutSQL :: SchemaName -> TableName -> Double -> Int64 -> Int64 -> Query ()
-setVisibilityTimeoutSQL schema tableName secs jobId cseq =
-  let tbl = jobQueueTable schema tableName
+setVisibilityTimeoutSQL schemaName tableName secs jobId cseq =
+  let tbl = jobQueueTable schemaName tableName
       leaseUntil = leaseDeadline secs
    in [sql|
         UPDATE ${tbl}
@@ -152,9 +142,9 @@ setVisibilityTimeoutSQL schema tableName secs jobId cseq =
 -- the rows, both with SKIP LOCKED, and a row whose summary or row is busy reads back
 -- unchanged. The caller attaches the row decoder.
 setVisibilityTimeoutBatchSQL :: SchemaName -> TableName -> Query () -> [Int64] -> Double -> Query ()
-setVisibilityTimeoutBatchSQL schema tableName valuesFrag ids secs =
-  let tbl = jobQueueTable schema tableName
-      groupsTbl = jobQueueGroupsTable schema tableName
+setVisibilityTimeoutBatchSQL schemaName tableName valuesFrag ids secs =
+  let tbl = jobQueueTable schemaName tableName
+      groupsTbl = jobQueueGroupsTable schemaName tableName
       leaseUntil = leaseDeadline secs
    in [sql|
         WITH input_jobs AS (
@@ -210,8 +200,8 @@ setVisibilityTimeoutBatchSQL schema tableName valuesFrag ids secs =
 
 -- | Park a failed job for its retry backoff. Matches on the claim token.
 updateJobForRetrySQL :: SchemaName -> TableName -> Int64 -> Text -> Int64 -> Int64 -> Query ()
-updateJobForRetrySQL schema tableName backoff errorMsg jobId cseq =
-  let tbl = jobQueueTable schema tableName
+updateJobForRetrySQL schemaName tableName backoff errorMsg jobId cseq =
+  let tbl = jobQueueTable schemaName tableName
    in [sql|
         UPDATE ${tbl}
         SET not_visible_until = NOW() + (#{backoff :: CInt8} * interval '1 second'),
@@ -224,8 +214,8 @@ updateJobForRetrySQL schema tableName backoff errorMsg jobId cseq =
 -- | Soft nack. Releases the claim and hands back the attempt it consumed, recording no
 -- failure. Leaves @not_visible_until@ as it stands.
 nackJobSQL :: SchemaName -> TableName -> Int64 -> Int64 -> Int32 -> Query ()
-nackJobSQL schema tableName jobId cseq att =
-  let tbl = jobQueueTable schema tableName
+nackJobSQL schemaName tableName jobId cseq att =
+  let tbl = jobQueueTable schemaName tableName
    in [sql|
         UPDATE ${tbl}
         SET attempts = LEAST(GREATEST(#{att :: CInt4} - 1, attempts - 1, 0), attempts),
@@ -238,8 +228,8 @@ nackJobSQL schema tableName jobId cseq att =
 -- | 'nackJobSQL' over @unnest@ed @(id, claim_seq, attempts)@ arrays. Locks rows in
 -- descending id order. Returns the ids nacked.
 nackJobsBatchSQL :: SchemaName -> TableName -> [Int64] -> [Int64] -> [Int32] -> Query Int64
-nackJobsBatchSQL schema tableName ids cseqs atts =
-  let tbl = jobQueueTable schema tableName
+nackJobsBatchSQL schemaName tableName ids cseqs atts =
+  let tbl = jobQueueTable schemaName tableName
       locked = lockedByIdsCte tbl ids
    in [sql|
         WITH input AS (
@@ -261,8 +251,8 @@ nackJobsBatchSQL schema tableName ids cseqs atts =
 
 -- | Make a delayed or retrying job immediately visible. Refuses an in-flight or suspended job.
 promoteJobSQL :: SchemaName -> TableName -> Int64 -> Query ()
-promoteJobSQL schema tableName jobId =
-  let tbl = jobQueueTable schema tableName
+promoteJobSQL schemaName tableName jobId =
+  let tbl = jobQueueTable schemaName tableName
    in [sql|
         UPDATE ${tbl}
         SET not_visible_until = NULL,
@@ -277,8 +267,8 @@ promoteJobSQL schema tableName jobId =
 -- | Set when a job next becomes visible, clear its throttle marker and void a lapsed
 -- claim. Refuses an in-flight, suspended, force-cancel-flagged or exhausted job.
 rescheduleJobSQL :: SchemaName -> TableName -> Int64 -> UTCTime -> Query ()
-rescheduleJobSQL schema tableName jobId runAt =
-  let tbl = jobQueueTable schema tableName
+rescheduleJobSQL schemaName tableName jobId runAt =
+  let tbl = jobQueueTable schemaName tableName
       attemptsLeft = attemptsLeftSQL ""
    in [sql|
         UPDATE ${tbl}

@@ -22,6 +22,7 @@ import Arbiter.Core.Exceptions (throwInternal)
 import Arbiter.Core.Listen (ListenConn)
 import Data.Bifunctor (first)
 import Data.ByteString (ByteString)
+import Data.Either (fromRight)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.Encoding.Error qualified as TE
@@ -38,6 +39,8 @@ import Arbiter.Core.Listen.Driver
   , execOutcome
   , withDriverListenConn
   )
+import Control.Monad ((>=>))
+import Data.Either (isRight)
 import Pqi qualified as PQ
 #else
 import Arbiter.LibPQ (libPQListenConn, withLibPQListenConn)
@@ -47,11 +50,12 @@ import Database.PostgreSQL.LibPQ qualified as PQ
 -- | Run a bare SQL command, such as @BEGIN@ or @COMMIT@.
 runSQL :: Hasql.Connection -> ByteString -> IO ()
 runSQL conn sql =
-  Hasql.use conn (runScript sql)
+  Hasql.use conn (Session.script (lenientText sql))
     >>= either (\err -> throwInternal $ "hasql runSQL error: " <> T.pack (show err)) pure
 
-runScript :: ByteString -> Session.Session ()
-runScript = Session.script . TE.decodeUtf8With TE.lenientDecode
+-- | Decode UTF-8, replacing invalid bytes.
+lenientText :: ByteString -> T.Text
+lenientText = TE.decodeUtf8With TE.lenientDecode
 
 #if MIN_VERSION_hasql(2,0,0)
 -- | Connection settings for hasql 2: transport adapter (for example @Pqi.Ffi.adapter@) and connection string.
@@ -89,13 +93,14 @@ withDedicatedListenConn (HasqlConnect connStr) = withLibPQListenConn connStr
 
 -- | Whether the connection is in a transaction block, valid or aborted.
 connectionInTransaction :: Hasql.Connection -> IO Bool
-connectionInTransaction conn = do
-  result <- Hasql.use conn $ Session.onLibpqConnection $ \libpq -> do
-    status <- PQ.transactionStatus libpq
-    pure (Right (txStatusNeedsRollback status), libpq)
-  case result of
-    Right inTx -> pure inTx
-    Left _ -> pure False
+connectionInTransaction conn =
+  fromRight False
+    <$> Hasql.use
+      conn
+      ( Session.onLibpqConnection $ \libpq -> do
+          status <- PQ.transactionStatus libpq
+          pure (Right (txStatusNeedsRollback status), libpq)
+      )
 
 -- | Run the listener loop on the connection's driver handle. The loop runs outside the
 -- session.
@@ -112,8 +117,8 @@ toListenConn conn =
   ListenConn
     { listenNotifies = fmap (Notification <$> PQ.notifyRelname <*> PQ.notifyExtra) <$> PQ.notifies conn
     , listenSocket = PQ.socket conn
-    , listenConsumeInput = PQ.exec conn "" >>= fmap (either (const False) (const True)) . execOutcome PQ.EmptyQuery PQ.resultStatus
-    , listenExec = \sql -> PQ.exec conn sql >>= execOutcome PQ.CommandOk PQ.resultStatus
+    , listenConsumeInput = PQ.exec conn "" >>= fmap isRight . execOutcome PQ.EmptyQuery PQ.resultStatus
+    , listenExec = PQ.exec conn >=> execOutcome PQ.CommandOk PQ.resultStatus
     , listenEscapeIdentifier = PQ.escapeIdentifier conn
     }
 
@@ -149,4 +154,4 @@ type HasqlSettings = Settings.Settings
 
 -- | Convert a connection string ByteString to hasql settings.
 hasqlSettings :: ByteString -> HasqlSettings
-hasqlSettings = Settings.connectionString . TE.decodeUtf8With TE.lenientDecode
+hasqlSettings = Settings.connectionString . lenientText

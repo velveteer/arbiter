@@ -104,7 +104,7 @@ newtype HasqlConfig = HasqlConfig
   }
 
 hasqlDriver :: Driver Hasql.Connection HasqlConfig
-hasqlDriver = Driver {withListenConn = withHasqlListenConn, initialConfig = HasqlConfig True}
+hasqlDriver = Driver {withListenConn = withHasqlListenConn, initialConfig = HasqlConfig {preparedStatements = True}}
 
 -- | The hasql database monad.
 newtype HasqlDb (registry :: JobPayloadRegistry) m a = HasqlDb
@@ -246,4 +246,4 @@ createHasqlEnvWithPool _proxy = createEnvWithPool hasqlDriver
 -- | Enable or disable prepared statements on the hot path. On by default. Needs direct
 -- connections or a pooler that supports them.
 setPreparedStatements :: Bool -> HasqlEnv registry -> HasqlEnv registry
-setPreparedStatements flag env = env {driverConfig = HasqlConfig flag}
+setPreparedStatements flag env = env {driverConfig = HasqlConfig {preparedStatements = flag}}

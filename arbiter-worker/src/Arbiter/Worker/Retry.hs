@@ -13,10 +13,10 @@ import Data.Text qualified as T
 import UnliftIO (MonadUnliftIO, liftIO, tryAny)
 import UnliftIO.Async (Async, race, withAsync)
 import UnliftIO.Concurrent (threadDelay)
-import UnliftIO.STM (TVar, atomically, checkSTM, readTVar, readTVarIO)
+import UnliftIO.STM (TVar, atomically, checkSTM)
 
 import Arbiter.Worker.Logger (LogConfig, LogLevel (..), tryLog)
-import Arbiter.Worker.WorkerState (WorkerState (..))
+import Arbiter.Worker.WorkerState (WorkerState, isShuttingDown)
 
 -- | Wait between attempts of a retried infrastructure thread.
 retryBackoffMicros :: Int
@@ -41,10 +41,10 @@ spawnRetried stateVar logCfg queue label action =
   where
     loop = tryAny action >>= either onFailure pure
     onFailure exception = do
-      stopping <- (== ShuttingDown) <$> readTVarIO stateVar
+      stopping <- atomically (isShuttingDown stateVar)
       unless stopping $ do
         tryLog logCfg Error $ label <> " error (retrying): " <> displayEx exception
         -- Shutdown wins the race.
         race awaitShutdown (liftIO (threadDelay retryBackoffMicros))
           >>= either pure (const loop)
-    awaitShutdown = atomically (readTVar stateVar >>= checkSTM . (== ShuttingDown))
+    awaitShutdown = atomically (isShuttingDown stateVar >>= checkSTM)

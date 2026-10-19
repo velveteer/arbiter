@@ -12,12 +12,11 @@ module Arbiter.Core.Operations.Workers
 
 import Data.Aeson (Value)
 import Data.Int (Int32, Int64)
-import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import Data.Time (NominalDiffTime)
 import Data.UUID.Types (UUID)
 
-import Arbiter.Core.Exceptions (throwParsing)
+import Arbiter.Core.Exceptions (orThrowParsing)
 import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.MonadArbiter (MonadArbiter, countOr0)
 import Arbiter.Core.MonadArbiter qualified as MA
@@ -43,15 +42,14 @@ registerWorker
   -- ^ Free-form metadata
   -> m (Maybe Bool)
 registerWorker schema workerId queue host threads staleThreshold metadata =
-  listToMaybe
-    <$> MA.executeQuery
-      (Sql.upsertWorkerSQL schema workerId queue host threads (realToFrac staleThreshold) metadata)
+  MA.queryMaybe
+    (Sql.upsertWorkerSQL schema workerId queue host threads (realToFrac staleThreshold) metadata)
 
 -- | Record a heartbeat and return the worker's effective pause state (worker or queue).
 -- 'Nothing' when the worker has no registry row.
 heartbeatWorker :: (MonadArbiter m) => SchemaName -> UUID -> m (Maybe Bool)
 heartbeatWorker schema workerId =
-  listToMaybe <$> MA.executeQuery (Sql.heartbeatWorkerSQL schema workerId)
+  MA.queryMaybe (Sql.heartbeatWorkerSQL schema workerId)
 
 -- | Set a worker's pause flag and notify the worker.
 setWorkerPaused :: (MonadArbiter m) => SchemaName -> UUID -> Bool -> m Int64
@@ -71,7 +69,7 @@ deregisterWorker schema workerId =
 -- | Whether the worker registry holds this identity.
 workerRegistered :: (MonadArbiter m) => SchemaName -> UUID -> m Bool
 workerRegistered schema workerId =
-  or <$> MA.executeQuery (Sql.workerRegisteredSQL schema workerId)
+  MA.queryAny (Sql.workerRegisteredSQL schema workerId)
 
 -- | List workers, optionally filtered by queue and heartbeat age.
 listWorkers
@@ -85,7 +83,7 @@ listWorkers schema queue liveSecs = do
   traverse decodeHealth rows
   where
     decodeHealth (worker, rawHealth) = do
-      health <- either throwParsing pure (workerHealthFromText rawHealth)
+      health <- orThrowParsing (workerHealthFromText rawHealth)
       pure worker {health}
 
 -- | Delete workers whose last heartbeat is older than their stale threshold.

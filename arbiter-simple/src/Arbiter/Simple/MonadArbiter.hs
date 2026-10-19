@@ -42,7 +42,7 @@ import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
 import Data.Int (Int64)
-import Data.Text.Encoding qualified as T
+import Data.Text.Encoding qualified as TE
 import Database.PostgreSQL.Simple (Connection)
 import Database.PostgreSQL.Simple qualified as PG
 import Database.PostgreSQL.Simple.FromField (FromField (..), ResultError (..), returnError, typeOid)
@@ -61,25 +61,32 @@ simpleExecuteQuery
   :: (HasPoolState Connection m, MonadUnliftIO m)
   => MA.Query a
   -> m [a]
-simpleExecuteQuery query = do
-  let sql = Query $ T.encodeUtf8 (MA.qSql query)
-      params = MA.qParams query
-      parser = runCodec interpretNullCol (MA.qDecode query)
-  withConn $ \conn -> liftIO $ case params of
-    [] -> PG.queryWith_ parser conn sql
-    _ -> PG.queryWith parser conn sql (map someParamToAction params)
+simpleExecuteQuery query =
+  runSplit (PG.queryWith_ parser) (PG.queryWith parser) query
+  where
+    parser = runCodec interpretNullCol (MA.qDecode query)
 
 -- | Run a statement, returning rows affected.
 simpleExecuteStatement
   :: (HasPoolState Connection m, MonadUnliftIO m)
   => MA.Query a
   -> m Int64
-simpleExecuteStatement query = do
-  let sql = Query $ T.encodeUtf8 (MA.qSql query)
-      params = MA.qParams query
-  withConn $ \conn -> liftIO $ case params of
-    [] -> PG.execute_ conn sql
-    _ -> PG.execute conn sql (map someParamToAction params)
+simpleExecuteStatement = runSplit PG.execute_ PG.execute
+
+-- | Run a query on a pooled connection. The first runner takes a query with no
+-- parameters. The second takes the encoded parameters.
+runSplit
+  :: (HasPoolState Connection m, MonadUnliftIO m)
+  => (Connection -> Query -> IO r)
+  -> (Connection -> Query -> [Action] -> IO r)
+  -> MA.Query a
+  -> m r
+runSplit bare withParams query =
+  withConn $ \conn -> liftIO $ case MA.qParams query of
+    [] -> bare conn sql
+    params -> withParams conn sql (map someParamToAction params)
+  where
+    sql = Query (TE.encodeUtf8 (MA.qSql query))
 
 interpretNullCol :: NullCol a -> RowParser a
 interpretNullCol (NotNull _ col) = withColField col (\from _ -> from <$> field)
@@ -116,15 +123,12 @@ withColField CText k = k id id
 withColField CBool k = k id id
 withColField CTimestamptz k = k id id
 withColField CJsonb k = k id id
-withColField CStored k = k storedJson (RawJson . storedBytes)
+withColField CStored k = k (\(RawJson bytes) -> Stored bytes) (RawJson . storedBytes)
 withColField CFloat8 k = k id id
 withColField CUuid k = k id id
 
 -- | JSON bytes passed through a @json@ or @jsonb@ column without parsing.
 newtype RawJson = RawJson ByteString
-
-storedJson :: RawJson -> Stored payload
-storedJson (RawJson bytes) = Stored bytes
 
 instance FromField RawJson where
   fromField f mdata

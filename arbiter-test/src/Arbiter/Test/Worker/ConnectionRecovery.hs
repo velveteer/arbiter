@@ -2,7 +2,7 @@
 {-# LANGUAGE TypeFamilies #-}
 
 -- | Connection failure recovery tests, instantiated for each backend.
-module Arbiter.Worker.TestKit.ConnectionRecovery (connectionRecoverySpec) where
+module Arbiter.Test.Worker.ConnectionRecovery (connectionRecoverySpec) where
 
 import Arbiter.Core.Codec (Col (CInt4), col)
 import Arbiter.Core.HighLevel (QueueOperation, RegistryAdmissionPolicies)
@@ -30,7 +30,11 @@ import UnliftIO.Async (withAsync)
 
 import Arbiter.Test.Poll (bumpRef, waitUntil)
 import Arbiter.Test.Setup (execQuery, terminateBackendsMatching, terminatePid)
-import Arbiter.Worker.TestKit.Backend (TestBackend (..))
+import Arbiter.Test.Worker.Backend (TestBackend (..))
+
+-- | A pause for the workers to reconnect after the kill.
+reconnectMicros :: Int
+reconnectMicros = 7_000_000
 
 -- | Connection recovery suite. The queue under test declares @()@ as its result type.
 -- It terminates other connections on the database whose query names the schema.
@@ -78,7 +82,7 @@ connectionRecoverySpec TestBackend {schema, connStr, mkSimple, mkFreshEnv, destr
 
           terminateBackendsMatching connStr ("%" <> schema <> "%")
 
-          threadDelay 7_000_000
+          threadDelay reconnectMicros
 
           insertJobsDirect
             spare

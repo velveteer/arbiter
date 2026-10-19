@@ -28,6 +28,7 @@ module Arbiter.Core.Sql.Jobs
   , buildDLQOrderBy
   , buildArchiveOrderBy
   , countDLQFilteredSQL
+  , countWhereSQL
   , jobColsExceptId
   , dlqCarriedCols
   , requeuedCols
@@ -65,6 +66,7 @@ import Arbiter.Core.Job.Types (JobRead, JobStatus, Stored)
 import Arbiter.Core.Sql.Groups (settleGroupLocksCte)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen, rows)
+import Arbiter.Core.Sql.Tree (wakeParentCte)
 import Arbiter.Core.SqlLiterals (attemptsLeftSQL, defaultMaxAttemptsSQL, minMaxAttemptsSQL)
 
 -- | A narrowing predicate on a job listing. Filters combine with AND.
@@ -263,14 +265,14 @@ claimablePred alias =
 
 -- | The job read columns plus the derived @status@ column, aliased @job@, for filtering.
 jobsWithStatusSubquery :: SchemaName -> TableName -> Text
-jobsWithStatusSubquery schema tableName =
-  let tbl = jobQueueTable schema tableName
+jobsWithStatusSubquery schemaName tableName =
+  let tbl = jobQueueTable schemaName tableName
    in [text|(SELECT ${jobColumns}, ${jobStatusCaseSQL} AS status FROM ${tbl}) job|]
 
 -- | List filtered jobs without the derived status.
 listJobsFilteredSQL :: SchemaName -> TableName -> Query () -> Text -> Int64 -> Int64 -> Query (JobRead (Stored payload))
-listJobsFilteredSQL schema tableName whereFrag orderBy limit offset =
-  let tbl = jobQueueTable schema tableName
+listJobsFilteredSQL schemaName tableName whereFrag orderBy limit offset =
+  let tbl = jobQueueTable schemaName tableName
    in rows
         (jobRowCodec tableName)
         [sql|
@@ -282,8 +284,8 @@ listJobsFilteredSQL schema tableName whereFrag orderBy limit offset =
 
 -- | List filtered jobs with @status@ as a trailing column. The caller attaches the row decoder.
 listJobsWithStatusSQL :: SchemaName -> TableName -> Query () -> Text -> Int64 -> Int64 -> Query ()
-listJobsWithStatusSQL schema tableName whereFrag orderBy limit offset =
-  let sub = jobsWithStatusSubquery schema tableName
+listJobsWithStatusSQL schemaName tableName whereFrag orderBy limit offset =
+  let sub = jobsWithStatusSubquery schemaName tableName
    in [sql|
         SELECT * FROM ${sub}
         ${whereFrag}
@@ -292,21 +294,21 @@ listJobsWithStatusSQL schema tableName whereFrag orderBy limit offset =
 
 -- | Count filtered jobs through the status subquery.
 countJobsFilteredSQL :: SchemaName -> TableName -> Query () -> Query Int64
-countJobsFilteredSQL schema tableName whereFrag =
-  let sub = jobsWithStatusSubquery schema tableName
-   in [sql|SELECT COUNT(*) AS @{count :: CInt8} FROM ${sub} ${whereFrag}|]
+countJobsFilteredSQL schemaName tableName whereFrag =
+  let sub = jobsWithStatusSubquery schemaName tableName
+   in countWhereSQL sub whereFrag
 
 -- | Fetch a single job by id with its derived @status@ trailing column. The caller attaches the row decoder.
 getJobByIdWithStatusSQL :: SchemaName -> TableName -> Int64 -> Query ()
-getJobByIdWithStatusSQL schema tableName jobId =
-  let sub = jobsWithStatusSubquery schema tableName
+getJobByIdWithStatusSQL schemaName tableName jobId =
+  let sub = jobsWithStatusSubquery schemaName tableName
    in [sql|SELECT * FROM ${sub} WHERE id = #{jobId :: CInt8}|]
 
 -- | List DLQ jobs under a dynamic WHERE and an @orderBy@ from 'buildDLQOrderBy'.
 listDLQFilteredSQL
   :: SchemaName -> TableName -> Query () -> Text -> Int64 -> Int64 -> Query (Int64, UTCTime, JobRead (Stored payload))
-listDLQFilteredSQL schema tableName whereFrag orderBy limit offset =
-  let dlqTbl = jobQueueDLQTable schema tableName
+listDLQFilteredSQL schemaName tableName whereFrag orderBy limit offset =
+  let dlqTbl = jobQueueDLQTable schemaName tableName
    in rows
         (dlqRowCodec tableName)
         [sql|
@@ -394,11 +396,15 @@ buildDLQOrderBy = buildOrderBy dlqSortColumnName dlqColumnNulls DlqFailedAt DlqI
 buildArchiveOrderBy :: Maybe ArchiveSortColumn -> Maybe SortDir -> Text
 buildArchiveOrderBy = buildOrderBy archiveSortColumnName archiveColumnNulls ArchiveCompletedAt ArchiveId
 
+-- | Count the rows of @src@ under a dynamic WHERE.
+countWhereSQL :: Text -> Query () -> Query Int64
+countWhereSQL src whereFrag = [sql|SELECT COUNT(*) AS @{count :: CInt8} FROM ${src} ${whereFrag}|]
+
 -- | Count DLQ jobs under a dynamic WHERE.
 countDLQFilteredSQL :: SchemaName -> TableName -> Query () -> Query Int64
-countDLQFilteredSQL schema tableName whereFrag =
-  let dlqTbl = jobQueueDLQTable schema tableName
-   in [sql|SELECT COUNT(*) AS @{count :: CInt8} FROM ${dlqTbl} ${whereFrag}|]
+countDLQFilteredSQL schemaName tableName whereFrag =
+  let dlqTbl = jobQueueDLQTable schemaName tableName
+   in countWhereSQL dlqTbl whereFrag
 
 -- | The job read columns, in codec order, for SELECT and RETURNING.
 jobColumns :: Text
@@ -512,8 +518,8 @@ replaceableGuard tbl dlqTbl =
 
 -- | Insert a job. The write fragment carries the column list and parameters.
 insertJobSQL :: SchemaName -> TableName -> Query () -> Query (JobRead (Stored payload))
-insertJobSQL schema tableName valuesFrag =
-  let tbl = jobQueueTable schema tableName
+insertJobSQL schemaName tableName valuesFrag =
+  let tbl = jobQueueTable schemaName tableName
    in rows
         (jobRowCodec tableName)
         [sql|
@@ -526,9 +532,9 @@ insertJobSQL schema tableName valuesFrag =
 -- and childless in the main queue and the DLQ. @ON CONFLICT DO UPDATE@ fires the
 -- groups UPDATE trigger, which maintains a cross-group move.
 insertJobReplaceSQL :: SchemaName -> TableName -> Query () -> Query (JobRead (Stored payload))
-insertJobReplaceSQL schema tableName valuesFrag =
-  let tbl = jobQueueTable schema tableName
-      dlqTbl = jobQueueDLQTable schema tableName
+insertJobReplaceSQL schemaName tableName valuesFrag =
+  let tbl = jobQueueTable schemaName tableName
+      dlqTbl = jobQueueDLQTable schemaName tableName
       guard = replaceableGuard tbl dlqTbl
       dedupSet = dedupUpdateSet tbl
    in rows
@@ -545,19 +551,19 @@ insertJobReplaceSQL schema tableName valuesFrag =
 -- conflict. A replace-dedup job updates an idle existing row. A row whose parent
 -- is absent is skipped.
 insertJobsBatchSQL :: SchemaName -> TableName -> Query () -> Query (JobRead (Stored payload))
-insertJobsBatchSQL schema tableName batchSrc =
-  rows (jobRowCodec tableName) (insertJobsBatchBase schema tableName batchSrc [text|RETURNING ${jobColumns}|])
+insertJobsBatchSQL schemaName tableName batchSrc =
+  rows (jobRowCodec tableName) (insertJobsBatchBase schemaName tableName batchSrc [text|RETURNING ${jobColumns}|])
 
 -- | 'insertJobsBatchSQL' with no @RETURNING@.
 insertJobsBatchSQL_ :: SchemaName -> TableName -> Query () -> Query ()
-insertJobsBatchSQL_ schema tableName batchSrc =
-  insertJobsBatchBase schema tableName batchSrc ""
+insertJobsBatchSQL_ schemaName tableName batchSrc =
+  insertJobsBatchBase schemaName tableName batchSrc ""
 
 -- | Batch insert with dedup and replaceable-job handling, plus a caller's @RETURNING@.
 insertJobsBatchBase :: SchemaName -> TableName -> Query () -> Text -> Query ()
-insertJobsBatchBase schema tableName batchSrc returning =
-  let tbl = jobQueueTable schema tableName
-      dlqTbl = jobQueueDLQTable schema tableName
+insertJobsBatchBase schemaName tableName batchSrc returning =
+  let tbl = jobQueueTable schemaName tableName
+      dlqTbl = jobQueueDLQTable schemaName tableName
       guard = replaceableGuard tbl dlqTbl
       dedupSet = dedupUpdateSet tbl
    in [sql|
@@ -577,8 +583,8 @@ insertJobsBatchBase schema tableName batchSrc returning =
 
 -- | Fetch a job by id.
 getJobByIdSQL :: SchemaName -> TableName -> Int64 -> Query (JobRead (Stored payload))
-getJobByIdSQL schema tableName jobId =
-  let tbl = jobQueueTable schema tableName
+getJobByIdSQL schemaName tableName jobId =
+  let tbl = jobQueueTable schemaName tableName
    in rows
         (jobRowCodec tableName)
         [sql|
@@ -589,8 +595,8 @@ getJobByIdSQL schema tableName jobId =
 
 -- | Fetch a job by its dedup key. The partial unique index guarantees at most one row.
 getJobByDedupKeySQL :: SchemaName -> TableName -> Text -> Query (JobRead (Stored payload))
-getJobByDedupKeySQL schema tableName key =
-  let tbl = jobQueueTable schema tableName
+getJobByDedupKeySQL schemaName tableName key =
+  let tbl = jobQueueTable schemaName tableName
    in rows
         (jobRowCodec tableName)
         [sql|
@@ -602,9 +608,10 @@ getJobByDedupKeySQL schema tableName key =
 -- | Delete a job by id. Refuses one with children, which 'Arbiter.Core.Sql.Tree.cancelJobCascadeSQL' takes.
 -- A deleted child with no siblings left resumes its parent for a completion round.
 cancelJobSQL :: SchemaName -> TableName -> Int64 -> Query Int64
-cancelJobSQL schema tableName jobId =
-  let tbl = jobQueueTable schema tableName
-      groupLocks = settleGroupLocksCte schema tableName "cancel" ["wake_parent"]
+cancelJobSQL schemaName tableName jobId =
+  let tbl = jobQueueTable schemaName tableName
+      wakeParent = wakeParentCte tbl "cancel"
+      groupLocks = settleGroupLocksCte schemaName tableName "cancel" ["wake_parent"]
    in [sql|
         WITH cancel AS (
           DELETE FROM ${tbl}
@@ -612,18 +619,7 @@ cancelJobSQL schema tableName jobId =
             AND NOT EXISTS (SELECT 1 FROM ${tbl} child WHERE child.parent_id = #{jobId :: CInt8})
           RETURNING id, parent_id, group_key
         ),
-        wake_parent AS (
-          UPDATE ${tbl}
-          SET suspended = FALSE, updated_at = NOW()
-          WHERE id = (SELECT parent_id FROM cancel WHERE parent_id IS NOT NULL)
-            AND suspended = TRUE
-            AND NOT EXISTS (
-              SELECT 1 FROM ${tbl} child
-              WHERE child.parent_id = (SELECT parent_id FROM cancel WHERE parent_id IS NOT NULL)
-                AND child.id NOT IN (SELECT id FROM cancel)
-            )
-          RETURNING id, group_key
-        ),
+        ${wakeParent},
         ${groupLocks}
         SELECT (SELECT count(*) FROM cancel) AS @{result :: CInt8}
         FROM (SELECT count(*) FROM group_locks) held
@@ -631,5 +627,5 @@ cancelJobSQL schema tableName jobId =
 
 -- | @UNION ALL@ of @body@ over each job table, passing its raw name and schema-qualified reference.
 unionAllOverQueueTables :: SchemaName -> [TableName] -> (TableName -> Text -> Text) -> Text
-unionAllOverQueueTables schema tableNames body =
-  T.intercalate " UNION ALL " (map (\tableName -> body tableName (jobQueueTable schema tableName)) tableNames)
+unionAllOverQueueTables schemaName tableNames body =
+  T.intercalate " UNION ALL " (map (\tableName -> body tableName (jobQueueTable schemaName tableName)) tableNames)

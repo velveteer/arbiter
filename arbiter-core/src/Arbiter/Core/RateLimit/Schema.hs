@@ -42,7 +42,7 @@ import Arbiter.Core.Job.Schema
   , statementTriggerSQL
   )
 import Arbiter.Core.RateLimit.Spec (Durability (..), RateLimitPolicy (..))
-import Arbiter.Core.SqlLiterals (doubleLiteral, sharedTable, textLiteral)
+import Arbiter.Core.SqlLiterals (dollarQuote, doubleLiteral, sharedTable, textLiteral)
 
 -- | Qualified name of the app-global policies table.
 arbiterRateLimitPoliciesTable :: SchemaName -> Text
@@ -246,7 +246,3 @@ createThrottledIndexSQL schemaName tableName =
 -- | Base name of a queue's bucket-seeding trigger functions and triggers.
 bucketTriggerBase :: TableName -> Text
 bucketTriggerBase tableName = "ensure_" <> tableName <> "_rate_limit_buckets"
-
--- | The plpgsql function-body delimiter.
-dollarQuote :: Text
-dollarQuote = "$$"

@@ -24,7 +24,7 @@ import Orville.PostgreSQL.Raw.Connection (destroyIdleConnections)
 
 import Arbiter.Orville.OrvilleDb (OrvilleDb, OrvilleEnv (..), runOrvilleDb, toOrvilleConnectionOptions)
 
--- Test environment combining schema name, table name, and OrvilleState
+-- | The Orville backend environment for one test schema.
 data OrvilleTestEnv (registry :: JobPayloadRegistry) = OrvilleTestEnv
   { testSchema :: Text
   , testTableName :: Text
@@ -39,7 +39,6 @@ type TestOrville registry = OrvilleDb registry (ReaderT O.OrvilleState IO)
 
 setupOrvilleTest :: ByteString -> Text -> Text -> Int -> IO (OrvilleTestEnv registry)
 setupOrvilleTest connStr schemaName tableName maxConns = do
-  -- Setup DDL using arbiter-test helper
   TestSetup.setupOnce connStr schemaName tableName False
   createOrvilleTestEnv connStr schemaName tableName maxConns
 

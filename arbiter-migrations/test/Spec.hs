@@ -398,10 +398,14 @@ timedOut :: MigrationResult String -> Bool
 timedOut (MigrationError message) = "Timed out waiting on the arbiter migration lock" `isInfixOf` message
 timedOut MigrationSuccess = False
 
+-- | The most time to wait for a reconciliation event.
+eventTimeoutMicros :: Int
+eventTimeoutMicros = 1_000_000
+
 -- | The next event for the reconciliation queue, within a second. Every schema in the
 -- database shares the channel.
 nextEvent :: PG.Connection -> IO (Maybe ByteString)
-nextEvent lconn = timeout 1_000_000 own
+nextEvent lconn = timeout eventTimeoutMicros own
   where
     own = do
       payload <- notificationData <$> getNotification lconn

@@ -246,20 +246,23 @@ const STATUS_COUNTS = {
   cancelled: 'cancelledJobs',
 };
 
+// A Bootstrap subtle background with its matching emphasis text.
+export const tone = (color) => `bg-${color}-subtle text-${color}-emphasis`;
+
 const STATUS_BADGES = {
-  suspended: 'bg-warning-subtle text-warning-emphasis',
-  cancelled: 'bg-dark-subtle text-dark-emphasis',
-  in_flight: 'bg-primary-subtle text-primary-emphasis',
-  backoff: 'bg-danger-subtle text-danger-emphasis',
-  scheduled: 'bg-secondary-subtle text-secondary-emphasis',
-  throttled: 'bg-info-subtle text-info-emphasis',
-  exhausted: 'bg-danger-subtle text-danger-emphasis',
-  ready: 'bg-success-subtle text-success-emphasis',
+  suspended: tone('warning'),
+  cancelled: tone('dark'),
+  in_flight: tone('primary'),
+  backoff: tone('danger'),
+  scheduled: tone('secondary'),
+  throttled: tone('info'),
+  exhausted: tone('danger'),
+  ready: tone('success'),
   blocked: 'blocked-badge',
 };
 
 export function statusBadgeClass(status) {
-  return STATUS_BADGES[status] || 'bg-secondary-subtle text-secondary-emphasis';
+  return STATUS_BADGES[status] || tone('secondary');
 }
 
 // Tooltips for the queue measures on the queue list and the queue page.

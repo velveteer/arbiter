@@ -8,7 +8,6 @@ module Arbiter.Worker.Results
   , storeEncodedResults
   ) where
 
-import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.Job.Types (JobRead, parentId, primaryKey, queueName)
 import Arbiter.Core.JobResult (EncodeJobResult, decodeJobResult, encodeJobResult)
 import Arbiter.Core.MonadArbiter (MonadArbiter, ResultOf, getSchema)
@@ -80,11 +79,11 @@ storeEncodedResult job mVal = do
 -- child results and one the archived roots.
 storeEncodedResults
   :: (MonadArbiter m)
-  => SchemaName
-  -> [(JobRead payload, Maybe Value)]
+  => [(JobRead payload, Maybe Value)]
   -> m ()
-storeEncodedResults _ [] = pure ()
-storeEncodedResults schemaName pairs@((firstJob, _) : _) = do
+storeEncodedResults [] = pure ()
+storeEncodedResults pairs@((firstJob, _) : _) = do
+  schemaName <- getSchema
   let (childRows, rootRows) = partitionEithers (mapMaybe resultRow pairs)
       queue = queueName firstJob
   void $ Ops.insertResultsBatch schemaName queue childRows

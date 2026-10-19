@@ -22,8 +22,9 @@ import Arbiter.Core.QueueRegistry (TableForPayload)
 import Arbiter.Core.Sql.Query (rawRows)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Monad (forM, forM_, replicateM, replicateM_, void, when)
+import Control.Monad (replicateM, replicateM_, void, when)
 import Control.Monad.IO.Class (liftIO)
+import Data.Foldable (for_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int64)
 import Data.List (sort)
@@ -32,12 +33,37 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (addUTCTime, getCurrentTime)
+import Data.Traversable (for)
 import GHC.TypeLits (KnownSymbol)
 import Test.Hspec
 import UnliftIO.Async (mapConcurrently, replicateConcurrently_, withAsync)
 
 import Arbiter.Test.Poll (bumpRef)
 import Arbiter.Test.StateMachine (holViolations, installHolDetector, removeHolDetector)
+
+-- | A pause after an empty claim, before the next claim.
+drainIdleMicros :: Int
+drainIdleMicros = 10_000
+
+-- | A pause into the lease, before the extension.
+beforeExtendMicros :: Int
+beforeExtendMicros = 1_000_000
+
+-- | Past the original lease.
+pastOriginalLeaseMicros :: Int
+pastOriginalLeaseMicros = 2_000_000
+
+-- | Past a 0.2 s lease.
+pastShortLeaseMicros :: Int
+pastShortLeaseMicros = 400_000
+
+-- | Past a 1 s lease.
+pastOneSecondLeaseMicros :: Int
+pastOneSecondLeaseMicros = 1_200_000
+
+-- | How long a claimer holds a job before the ack.
+holdBeforeAckMicros :: Int
+holdBeforeAckMicros = 50_000
 
 -- | Claim and ack jobs in a loop until no more are available.
 -- Backs off with 10ms delay between empty claim attempts, gives up
@@ -54,14 +80,14 @@ claimAckLoop claim maxStreak onJob = go 0
     go streak = do
       jobs <- claim
       if null jobs
-        then when (streak < maxStreak) $ threadDelay 10_000 >> go (streak + 1)
-        else forM_ jobs onJob >> go 0
+        then when (streak < maxStreak) $ threadDelay drainIdleMicros >> go (streak + 1)
+        else for_ jobs onJob >> go 0
 
 -- | Claim and run jobs until a claim returns none.
 drainAll :: IO [a] -> (a -> IO ()) -> IO ()
 drainAll claim onJob = do
   jobs <- claim
-  if null jobs then pure () else forM_ jobs onJob >> drainAll claim onJob
+  if null jobs then pure () else for_ jobs onJob >> drainAll claim onJob
 
 -- | Find duplicate entries in a list. O(n log n).
 findDuplicates :: (Ord a) => [a] -> [a]
@@ -128,11 +154,11 @@ concurrencySpec mkMessage runM = do
       let job = head claimed1
 
       -- Wait 1 second, then extend visibility by 10 more seconds
-      threadDelay 1_000_000
+      threadDelay beforeExtendMicros
       void $ runM env (HL.setVisibilityTimeout 10 job)
 
       -- Wait 2 more seconds, past the original timeout.
-      threadDelay 2_000_000
+      threadDelay pastOriginalLeaseMicros
 
       -- The extended visibility blocks a claim.
       claimed2 <- runM env (HL.claimNextVisibleJobs 1 2) :: IO [JobRead payload]
@@ -159,7 +185,7 @@ concurrencySpec mkMessage runM = do
           release <- newEmptyMVar
           withAsync
             ( runM env $ withDbTransaction $ do
-                forM_ locked (lockJobRow "")
+                for_ locked (lockJobRow "")
                 liftIO $ putMVar held () >> takeMVar release
             )
             $ \_ -> do
@@ -206,7 +232,7 @@ concurrencySpec mkMessage runM = do
           [ setMaxAttempts (Just 1) $ defaultGroupedJob ("exhausted-" <> T.pack (show i)) (mkMessage "old") | i <- [1 .. 12 :: Int]
           ]
       exhausted <- runM env (HL.claimNextVisibleJobs 12 60) :: IO [JobRead payload]
-      forM_ exhausted $ \job -> void $ runM env (HL.setVisibilityTimeout 0 job)
+      for_ exhausted $ \job -> void $ runM env (HL.setVisibilityTimeout 0 job)
       Just healthy <- runM env $ HL.insertJob (defaultGroupedJob "healthy" (mkMessage "healthy"))
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       map primaryKey claimed `shouldBe` [primaryKey healthy]
@@ -220,7 +246,7 @@ concurrencySpec mkMessage runM = do
           ]
       exhausted <- runM env (HL.claimNextVisibleJobs 12 0.2) :: IO [JobRead payload]
       length exhausted `shouldBe` 12
-      threadDelay 400_000
+      threadDelay pastShortLeaseMicros
       Just healthy <- runM env $ HL.insertJob (defaultGroupedJob "healthy-due" (mkMessage "healthy"))
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       map primaryKey claimed `shouldBe` [primaryKey healthy]
@@ -232,8 +258,8 @@ concurrencySpec mkMessage runM = do
           [defaultGroupedJob ("flagged-due-" <> T.pack (show i)) (mkMessage "old") | i <- [1 .. 12 :: Int]]
       flagged <- runM env (HL.claimNextVisibleJobs 12 1) :: IO [JobRead payload]
       length flagged `shouldBe` 12
-      runM env $ withDbTransaction $ forM_ flagged $ \job -> HL.forceCancelJob @payload (primaryKey job)
-      threadDelay 1_200_000
+      runM env $ withDbTransaction $ for_ flagged $ \job -> HL.forceCancelJob @payload (primaryKey job)
+      threadDelay pastOneSecondLeaseMicros
       Just healthy <- runM env $ HL.insertJob (defaultGroupedJob "healthy-flagged" (mkMessage "healthy"))
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       map primaryKey claimed `shouldBe` [primaryKey healthy]
@@ -274,7 +300,7 @@ concurrencySpec mkMessage runM = do
       insertedRef <- newIORef (0 :: Int)
       processedRef <- newIORef (Set.empty :: Set.Set Int64)
 
-      forM_ [(1 :: Int) .. numIterations] $ \_ -> do
+      for_ [(1 :: Int) .. numIterations] $ \_ -> do
         -- Insert 5 jobs in one group
         void
           $ runM env
@@ -300,7 +326,7 @@ concurrencySpec mkMessage runM = do
 
         -- Ack the racy claims, then drain the rest, recording every processed id.
         let record job = atomicModifyIORef' processedRef (\acc -> (Set.insert (primaryKey job) acc, ()))
-        forM_ (concat results) $ \job -> record job >> void (runM env (HL.ackJob job))
+        for_ (concat results) $ \job -> record job >> void (runM env (HL.ackJob job))
         drainAll (runM env (HL.claimNextVisibleJobs 100 60) :: IO [JobRead payload]) $
           \job -> record job >> void (runM env (HL.ackJob job))
 
@@ -364,7 +390,7 @@ raceConditionSpec mkMessage runM = do
             jobsPerGroup = 10
             numWorkers = 40
 
-        forM_ [1 .. numGroups] $ \(groupIndex :: Int) -> do
+        for_ [1 .. numGroups] $ \(groupIndex :: Int) -> do
           let groupName = "stress-group-" <> T.pack (show groupIndex)
           void
             $ runM env
@@ -410,7 +436,7 @@ raceConditionSpec mkMessage runM = do
                         claimed <- runM env (HL.claimNextVisibleJobs 10 60) :: IO [JobRead payload]
                         let ids = Set.fromList $ map primaryKey claimed
                         atomicModifyIORef' claimedRef (\acc -> (Set.union acc ids, ()))
-                        forM_ claimed $ \job -> runM env (HL.ackJob job)
+                        for_ claimed $ \job -> runM env (HL.ackJob job)
                     )
               )
           pure ()
@@ -467,7 +493,7 @@ raceConditionSpec mkMessage runM = do
                 case claimed of
                   [] -> pure 0
                   (job : _) -> do
-                    threadDelay 50_000
+                    threadDelay holdBeforeAckMicros
                     rows <- runM env (HL.ackJob job)
                     pure (fromIntegral rows :: Int)
 
@@ -482,7 +508,7 @@ raceConditionSpec mkMessage runM = do
             jobsPerGroup = 20
             numWorkers = 25
 
-        forM_ [1 .. numGroups] $ \(groupIndex :: Int) -> do
+        for_ [1 .. numGroups] $ \(groupIndex :: Int) -> do
           let groupName = "batch-stress-" <> T.pack (show groupIndex)
           void
             $ runM env
@@ -510,7 +536,7 @@ raceConditionSpec mkMessage runM = do
         gapCount <- newIORef (0 :: Int)
 
         replicateM_ numRounds $ do
-          forM_ [1 .. numGroups] $ \(groupIndex :: Int) ->
+          for_ [1 .. numGroups] $ \(groupIndex :: Int) ->
             void
               $ runM env
               $ HL.insertJobsBatch
@@ -522,7 +548,7 @@ raceConditionSpec mkMessage runM = do
               ( \workerId -> do
                   claimed <- concatMap NE.toList <$> runM env (HL.claimNextVisibleJobsBatched 10 3 60) :: IO [JobRead payload]
                   atomicModifyIORef' resultsRef (\acc -> ((workerId, map (\job -> (groupKey job, primaryKey job)) claimed) : acc, ()))
-                  forM_ claimed $ \job -> runM env (HL.ackJob job)
+                  for_ claimed $ \job -> runM env (HL.ackJob job)
               )
               [1 .. numWorkers]
 
@@ -559,7 +585,7 @@ raceConditionSpec mkMessage runM = do
             numBatchedWorkers = 10
             numSingleWorkers = 10
 
-        forM_ [1 .. numGroups] $ \(groupIndex :: Int) -> do
+        for_ [1 .. numGroups] $ \(groupIndex :: Int) -> do
           let groupName = "mixed-mode-" <> T.pack (show groupIndex)
           void
             $ runM env
@@ -591,7 +617,7 @@ raceConditionSpec mkMessage runM = do
         let numIterations = 100
             numRacingWorkers = 10
 
-        successCounts <- forM [1 .. numIterations] $ \(_ :: Int) -> do
+        successCounts <- for [1 .. numIterations] $ \(_ :: Int) -> do
           -- Insert a job
           void $ runM env $ HL.insertJob (defaultJob (mkMessage "ack-race"))
 

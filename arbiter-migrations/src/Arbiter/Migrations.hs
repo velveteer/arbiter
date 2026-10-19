@@ -81,6 +81,7 @@ import Arbiter.Core.Job.Schema
   , createParentIdIndexSQL
   , createResultsTableSQL
   , createSchemaSQL
+  , dlqSuffix
   , dropEventStreamingFunctionSQL
   , eventStreamingAdoptedObjectComment
   , eventStreamingDLQTriggerName
@@ -351,12 +352,12 @@ runMigrationsTrackedForTables
   -> AdmissionSeeds
   -- ^ Admission policy rows to seed
   -> IO (MigrationResult String)
-runMigrationsTrackedForTables connStr schemaName tableNames config seeds =
-  case validateRegistryNames schemaName (map fst tableNames) of
+runMigrationsTrackedForTables connStr schemaName tableAdmissions config seeds =
+  case validateRegistryNames schemaName (map fst tableAdmissions) of
     Left err -> pure (MigrationError (T.unpack err))
     Right () -> bracket (connectPostgreSQL connStr) close $ \conn ->
       withMigrationLock conn schemaName (migrationLockTimeout config) $
-        migrateSchema conn schemaName tableNames config seeds
+        migrateSchema conn schemaName tableAdmissions config seeds
 
 -- | Hold the schema's session-level migration lock for the run. Replicas that migrate at
 -- the same time run one after another. A session lock spans the reconciles, which run
@@ -400,17 +401,16 @@ migrateSchema
   -> MigrationConfig
   -> AdmissionSeeds
   -> IO (MigrationResult String)
-migrateSchema conn schemaName tableNames config seeds = do
-  withConnection conn $ \libpqConn ->
-    LibPQ.disableNoticeReporting libpqConn
+migrateSchema conn schemaName tableAdmissions config seeds = do
+  withConnection conn LibPQ.disableNoticeReporting
 
   -- A failed CREATE is fine when the schema exists.
   result <- try $ executeSQL conn (createSchemaSQL schemaName)
   case result of
     Right _ -> pure ()
     Left (createError :: PG.SqlError) -> do
-      exists <- schemaExists conn schemaName
-      unless exists $
+      present <- schemaExists conn schemaName
+      unless present $
         ioError
           ( userError $
               "Failed to create schema "
@@ -423,11 +423,10 @@ migrateSchema conn schemaName tableNames config seeds = do
                 <> show createError
           )
 
-  withConnection conn $ \libpqConn ->
-    LibPQ.enableNoticeReporting libpqConn
+  withConnection conn LibPQ.enableNoticeReporting
 
   let schemaMigrations = schemaLevelMigrations schemaName
-      tableMigrations = concatMap (uncurry (jobQueueMigrationsForTable schemaName)) tableNames
+      tableMigrations = concatMap (uncurry (jobQueueMigrationsForTable schemaName)) tableAdmissions
       migrations = schemaMigrations <> tableMigrations
       migrationTableName = encodeUtf8 $ schemaName <> ".schema_migrations"
       options =
@@ -445,7 +444,7 @@ migrateSchema conn schemaName tableNames config seeds = do
           reconcileRateLimitPolicies conn schemaName (seedRateLimitPolicies seeds)
           reconcileConcurrencyPolicies conn schemaName (seedConcurrencyPolicies seeds)
           reconcileRateLimitDurability conn schemaName (rateLimitDurability config)
-          reconcileOptionalTriggers conn schemaName (map fst tableNames) config
+          reconcileOptionalTriggers conn schemaName (map fst tableAdmissions) config
       case reconciled of
         Right () -> pure MigrationSuccess
         -- A reconcile throws on a conflicting prefix or a failed ALTER. Async exceptions propagate.
@@ -532,11 +531,9 @@ reconcileRateLimitDurability conn schemaName durability = do
   let target = case durability of
         Durable -> "p" :: Text
         Unlogged -> "u"
-  case rows of
-    (Only current : _)
-      | current /= target ->
-          executeSQL conn (alterRateLimitsDurabilitySQL schemaName durability)
-    _ -> pure ()
+  traverse_
+    (\(Only current) -> when (current /= target) $ executeSQL conn (alterRateLimitsDurabilitySQL schemaName durability))
+    (listToMaybe rows)
 
 -- | Reconcile optional triggers schema-wide after tracked migrations. Install or drop
 -- each option's objects to match the config. Drop objects for queues outside the
@@ -571,12 +568,13 @@ reconcileOptionalTriggers conn schemaName tables config =
 
     installEventStream table = do
       mainCurrent <- triggerIsCurrent table (eventStreamingTriggerName table) eventStreamingObjectComment
-      dlqCurrent <- triggerIsCurrent (table <> "_dlq") (eventStreamingDLQTriggerName table) eventStreamingObjectComment
+      dlqCurrent <- triggerIsCurrent (table <> dlqSuffix) (eventStreamingDLQTriggerName table) eventStreamingObjectComment
       unless (mainCurrent && dlqCurrent) $
         executeSQL conn (createEventStreamingTriggersSQL schemaName table)
 
     triggerIsCurrent table trigger marker =
       exists
+        conn
         ( "SELECT EXISTS (SELECT 1 "
             <> triggerJoins
             <> "WHERE namespace.nspname = ? AND relation.relname = ? AND trigger.tgname = ? \
@@ -586,22 +584,21 @@ reconcileOptionalTriggers conn schemaName tables config =
 
     eventFunctionIsMarked =
       exists
-        "SELECT EXISTS (SELECT 1 FROM pg_proc function JOIN pg_namespace namespace ON namespace.oid = function.pronamespace \
-        \WHERE namespace.nspname = ? AND function.proname = ? AND function.pronargs = 0 \
-        \AND obj_description(function.oid, 'pg_proc') LIKE ?)"
+        conn
+        ( "SELECT EXISTS (SELECT 1 "
+            <> functionJoins
+            <> "WHERE namespace.nspname = ? AND function.proname = ? AND function.pronargs = 0 \
+               \AND obj_description(function.oid, 'pg_proc') LIKE ?)"
+        )
         (schemaName, eventStreamingFunctionName, eventStreamingObjectCommentPrefix <> "%")
 
     eventFunctionHasTriggers =
       exists
+        conn
         "SELECT EXISTS (SELECT 1 FROM pg_trigger trigger JOIN pg_proc function ON function.oid = trigger.tgfoid \
         \JOIN pg_namespace namespace ON namespace.oid = function.pronamespace \
         \WHERE namespace.nspname = ? AND function.proname = ? AND NOT trigger.tgisinternal)"
         (schemaName, eventStreamingFunctionName)
-
-    exists :: (PG.ToRow params) => Query -> params -> IO Bool
-    exists sql params = do
-      rows <- query conn sql params
-      pure (maybe False fromOnly (listToMaybe rows))
 
     dropTriggersMarked marker keep =
       executeRendered
@@ -618,12 +615,12 @@ reconcileOptionalTriggers conn schemaName tables config =
       dropTriggersMarked notifyObjectCommentPrefix keep
       -- A function that still carries a trigger stays.
       executeRendered
-        "SELECT format('DROP FUNCTION IF EXISTS %I.%I();', namespace.nspname, function.proname) \
-        \FROM pg_proc function \
-        \JOIN pg_namespace namespace ON namespace.oid = function.pronamespace \
-        \WHERE namespace.nspname = ? AND obj_description(function.oid, 'pg_proc') LIKE ? AND function.pronargs = 0 \
-        \AND NOT (function.proname::text = ANY(?::text[])) \
-        \AND NOT EXISTS (SELECT 1 FROM pg_trigger trigger WHERE trigger.tgfoid = function.oid AND NOT trigger.tgisinternal)"
+        ( "SELECT format('DROP FUNCTION IF EXISTS %I.%I();', namespace.nspname, function.proname) "
+            <> functionJoins
+            <> "WHERE namespace.nspname = ? AND obj_description(function.oid, 'pg_proc') LIKE ? AND function.pronargs = 0 \
+               \AND NOT (function.proname::text = ANY(?::text[])) \
+               \AND NOT EXISTS (SELECT 1 FROM pg_trigger trigger WHERE trigger.tgfoid = function.oid AND NOT trigger.tgisinternal)"
+        )
         (schemaName, notifyObjectCommentPrefix <> "%", PGArray (map notifyFunctionName keep))
 
     -- Objects installed before arbiter stamped markers carry no comment. Adoption
@@ -632,23 +629,23 @@ reconcileOptionalTriggers conn schemaName tables config =
     -- lookalike stays foreign.
     adoptUnmarkedObjects = do
       executeRendered
-        "SELECT format('COMMENT ON FUNCTION %I.%I() IS %L;', namespace.nspname, function.proname, ?::text) \
-        \FROM pg_proc function \
-        \JOIN pg_namespace namespace ON namespace.oid = function.pronamespace \
-        \WHERE namespace.nspname = ? AND function.proname = ANY(?::text[]) AND function.pronargs = 0 \
-        \AND obj_description(function.oid, 'pg_proc') IS NULL"
+        ( commentFunctionSelect
+            <> functionJoins
+            <> "WHERE namespace.nspname = ? AND function.proname = ANY(?::text[]) AND function.pronargs = 0 \
+               \AND obj_description(function.oid, 'pg_proc') IS NULL"
+        )
         (notifyAdoptedObjectComment, schemaName, PGArray (map notifyFunctionName tables))
       adoptTriggers notifyAdoptedObjectComment (map notifyTriggerName tables) tables
       adoptTriggers eventStreamingAdoptedObjectComment eventTriggerNames eventTables
       -- The shared function is adopted when one of its triggers is.
       executeRendered
-        "SELECT format('COMMENT ON FUNCTION %I.%I() IS %L;', namespace.nspname, function.proname, ?::text) \
-        \FROM pg_proc function \
-        \JOIN pg_namespace namespace ON namespace.oid = function.pronamespace \
-        \WHERE namespace.nspname = ? AND function.proname = ? AND function.pronargs = 0 \
-        \AND obj_description(function.oid, 'pg_proc') IS NULL \
-        \AND EXISTS (SELECT 1 FROM pg_trigger trigger WHERE trigger.tgfoid = function.oid AND NOT trigger.tgisinternal \
-        \AND obj_description(trigger.oid, 'pg_trigger') LIKE ?)"
+        ( commentFunctionSelect
+            <> functionJoins
+            <> "WHERE namespace.nspname = ? AND function.proname = ? AND function.pronargs = 0 \
+               \AND obj_description(function.oid, 'pg_proc') IS NULL \
+               \AND EXISTS (SELECT 1 FROM pg_trigger trigger WHERE trigger.tgfoid = function.oid AND NOT trigger.tgisinternal \
+               \AND obj_description(trigger.oid, 'pg_trigger') LIKE ?)"
+        )
         ( eventStreamingAdoptedObjectComment
         , schemaName
         , eventStreamingFunctionName
@@ -664,7 +661,7 @@ reconcileOptionalTriggers conn schemaName tables config =
         )
         (marker, schemaName, PGArray triggerNames, PGArray relNames)
 
-    eventTables = concatMap (\table -> [table, table <> "_dlq"]) tables
+    eventTables = concatMap (\table -> [table, table <> dlqSuffix]) tables
 
     eventTriggerNames =
       map fst legacyEventStreamingTriggers
@@ -686,6 +683,20 @@ triggerJoins =
   \JOIN pg_class relation ON relation.oid = trigger.tgrelid \
   \JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace "
 
+-- | The catalog joins the function sweeps share.
+functionJoins :: Query
+functionJoins = "FROM pg_proc function JOIN pg_namespace namespace ON namespace.oid = function.pronamespace "
+
+-- | A @COMMENT ON FUNCTION@ statement per matched row, stamping the first parameter.
+commentFunctionSelect :: Query
+commentFunctionSelect = "SELECT format('COMMENT ON FUNCTION %I.%I() IS %L;', namespace.nspname, function.proname, ?::text) "
+
+-- | Whether a single-row boolean probe returns true.
+exists :: (PG.ToRow params) => PG.Connection -> Query -> params -> IO Bool
+exists conn sql params = do
+  rows <- query conn sql params
+  pure (maybe False fromOnly (listToMaybe rows))
+
 -- | A @DROP TRIGGER@ statement per matched row.
 dropTriggerSelect :: Query
 dropTriggerSelect = "SELECT format('DROP TRIGGER IF EXISTS %I ON %I.%I;', trigger.tgname, namespace.nspname, relation.relname) "
@@ -699,20 +710,22 @@ commentTriggerSelect =
 -- event-streaming objects are reconciled after the migrations run.
 schemaLevelMigrations :: SchemaName -> [MigrationCommand]
 schemaLevelMigrations schemaName =
-  [ MigrationScript "create-cron-schedules" (encodeUtf8 $ createCronSchedulesTableSQL schemaName)
-  , MigrationScript "cron-schedules-add-timezone" (encodeUtf8 $ addTimezoneColumnSQL schemaName)
-  , MigrationScript "cron-schedules-add-queue-name" (encodeUtf8 $ addQueueNameColumnSQL schemaName)
-  , MigrationScript "cron-schedules-add-run-requested" (encodeUtf8 $ addRunRequestedColumnSQL schemaName)
-  , MigrationScript "cron-schedules-add-last-manual-run" (encodeUtf8 $ addLastManualRunColumnSQL schemaName)
-  , MigrationScript "create-arbiter-workers" (encodeUtf8 $ createWorkersTableSQL schemaName)
-  , MigrationScript "create-arbiter-queues" (encodeUtf8 $ createQueuesTableSQL schemaName)
-  , MigrationScript "create-arbiter-gates" (encodeUtf8 $ createGatesTableSQL schemaName)
-  , MigrationScript "arbiter-gates-add-metadata" (encodeUtf8 $ addGateMetadataColumnSQL schemaName)
-  , MigrationScript "create-arbiter-rate-limit-policies" (encodeUtf8 $ createRateLimitPoliciesTableSQL schemaName)
-  , MigrationScript "create-arbiter-rate-limits" (encodeUtf8 $ createRateLimitsTableSQL schemaName)
-  , MigrationScript "create-arbiter-concurrency-policies" (encodeUtf8 $ createConcurrencyPoliciesTableSQL schemaName)
-  , MigrationScript "create-arbiter-concurrency" (encodeUtf8 $ createConcurrencyTableSQL schemaName)
+  [ script "create-cron-schedules" createCronSchedulesTableSQL
+  , script "cron-schedules-add-timezone" addTimezoneColumnSQL
+  , script "cron-schedules-add-queue-name" addQueueNameColumnSQL
+  , script "cron-schedules-add-run-requested" addRunRequestedColumnSQL
+  , script "cron-schedules-add-last-manual-run" addLastManualRunColumnSQL
+  , script "create-arbiter-workers" createWorkersTableSQL
+  , script "create-arbiter-queues" createQueuesTableSQL
+  , script "create-arbiter-gates" createGatesTableSQL
+  , script "arbiter-gates-add-metadata" addGateMetadataColumnSQL
+  , script "create-arbiter-rate-limit-policies" createRateLimitPoliciesTableSQL
+  , script "create-arbiter-rate-limits" createRateLimitsTableSQL
+  , script "create-arbiter-concurrency-policies" createConcurrencyPoliciesTableSQL
+  , script "create-arbiter-concurrency" createConcurrencyTableSQL
   ]
+  where
+    script name sql = MigrationScript name (encodeUtf8 (sql schemaName))
 
 -- | One queue's tracked migrations, each under its own version identifier.
 -- The optional notify and event-streaming objects are reconciled after the migrations run.
@@ -785,6 +798,5 @@ jobQueueMigrationsForTable schemaName tableName admission =
 
 -- | Whether a schema exists.
 schemaExists :: PG.Connection -> SchemaName -> IO Bool
-schemaExists conn schemaName = do
-  rows <- query conn "SELECT 1 FROM pg_namespace WHERE nspname = ?" (Only schemaName) :: IO [Only Int]
-  pure (not (null rows))
+schemaExists conn schemaName =
+  exists conn "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ?)" (Only schemaName)

@@ -102,6 +102,14 @@ instance HasConcurrency CLPayload2 where
 
 type CLReg2 = '[Queue "clq1" CLPayload, Queue "clq2" CLPayload2]
 
+-- | The most time a prune may take next to an open enqueue.
+pruneTimeoutMicros :: Int
+pruneTimeoutMicros = 5_000_000
+
+-- | A pause for the reconcile to run against the open claim.
+reconcileWaitMicros :: Int
+reconcileWaitMicros = 200_000
+
 -- | Table name for 'CLReg', shared across backends.
 concurrencyTable :: Text
 concurrencyTable = "arbiter_concurrency_test"
@@ -417,7 +425,7 @@ concurrencyLimitSpec runM = do
       liftIO $ takeMVar release
     takeMVar entered
     -- The open enqueue holds the key's shared advisory lock. Prune returns without it.
-    pruned <- timeout 5000000 (prune env)
+    pruned <- timeout pruneTimeoutMicros (prune env)
     pruned `shouldBe` Just 0
     inFlight env (fullKey "skip" "a") `shouldReturn` Just 0
     putMVar release ()
@@ -442,7 +450,7 @@ concurrencyLimitSpec runM = do
       pure ()
     takeMVar entered
     -- Prune sees both keys dead. It takes a and skips the held b.
-    pruned <- timeout 5000000 (prune env)
+    pruned <- timeout pruneTimeoutMicros (prune env)
     pruned `shouldBe` Just 1
     inFlight env (fullKey "dk" "a") `shouldReturn` Nothing
     putMVar pruneDone ()
@@ -547,7 +555,7 @@ concurrencyLimitSpec runM = do
       liftIO $ takeMVar release
     takeMVar claimed `shouldReturn` 1
     reconciler <- async (reconcile env)
-    threadDelay 200000
+    threadDelay reconcileWaitMicros
     putMVar release ()
     wait claimer
     wait reconciler
@@ -577,7 +585,7 @@ concurrencyLimitSpec runM = do
       liftIO $ takeMVar release
     takeMVar claimed `shouldReturn` 1
     putMVar resume ()
-    threadDelay 200000
+    threadDelay reconcileWaitMicros
     putMVar release ()
     wait claimer
     wait reconciler

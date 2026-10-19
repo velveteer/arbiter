@@ -42,7 +42,7 @@ import Arbiter.Core.Job.Schema
   , jobQueueTable
   , maintenanceFunctionNames
   )
-import Arbiter.Core.SqlLiterals (intLiteral, sharedTable, textLiteral)
+import Arbiter.Core.SqlLiterals (dollarQuote, intLiteral, sharedTable, textLiteral)
 
 -- | Qualified name of the global per-key in-flight count table.
 arbiterConcurrencyTable :: SchemaName -> Text
@@ -295,7 +295,3 @@ upsertConcurrencyPolicyRowSQL schemaName policy =
 -- | Base name of a queue's concurrency trigger functions and triggers.
 concurrencyTriggerBase :: TableName -> Text
 concurrencyTriggerBase tableName = "maintain_" <> tableName <> "_concurrency"
-
--- | The plpgsql function-body delimiter.
-dollarQuote :: Text
-dollarQuote = "$$"

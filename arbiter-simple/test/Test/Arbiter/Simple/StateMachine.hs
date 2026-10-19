@@ -5,7 +5,7 @@
 module Test.Arbiter.Simple.StateMachine (spec) where
 
 import Arbiter.Core.QueueRegistry (Queue)
-import Arbiter.Test.Setup (cleanupData, createPoolOf, setupOnce)
+import Arbiter.Test.Setup (cleanupData, createPoolOf, setupOnce, stateMachinePoolSize)
 import Arbiter.Test.StateMachine (SMPayload, stateMachineSpec)
 import Data.ByteString (ByteString)
 import Data.Pool (withResource)
@@ -26,7 +26,7 @@ type SMRegistry = '[Queue "arbiter_simple_sm_test" SMPayload]
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
-  pool <- runIO (createPoolOf 40 connStr)
+  pool <- runIO (createPoolOf stateMachinePoolSize connStr)
   env <- runIO (createSimpleEnvWithPool (Proxy @SMRegistry) pool testSchema)
   let run :: forall a. SimpleDb SMRegistry IO a -> IO a
       run = runSimpleDb env

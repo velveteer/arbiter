@@ -11,6 +11,7 @@ author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Web
 build-type:      Simple
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
 extra-doc-files: README.md
 homepage:        https://github.com/velveteer/arbiter
 bug-reports:     https://github.com/velveteer/arbiter/issues
@@ -35,7 +36,7 @@ executable arbiter-demo
   main-is:        Main.hs
   hs-source-dirs: .
   build-depends:
-    , aeson                                 >=2.2
+    , aeson                                 >=2.2   && <2.3
     , arbiter-core                          >=0.1   && <0.2
     , arbiter-migrations                    >=0.1   && <0.2
     , arbiter-otel                          >=0.1   && <0.2
@@ -44,22 +45,22 @@ executable arbiter-demo
     , arbiter-servant-ui                    >=0.1   && <0.2
     , arbiter-simple                        >=0.1   && <0.2
     , arbiter-worker                        >=0.1   && <0.2
-    , async                                 >=2.2
+    , async                                 >=2.2   && <2.3
     , base                                  >=4.20  && <5
-    , bytestring                            >=0.10.12
+    , bytestring                            >=0.10.12 && <0.13
     , hs-opentelemetry-api                  >=1.0   && <1.1
     , hs-opentelemetry-instrumentation-wai  >=1.0   && <1.1
     , openapi3                              >=3.2   && <3.3
-    , postgresql-simple                     >=0.6
-    , random                                >=1.2
+    , postgresql-simple                     >=0.6   && <0.8
+    , random                                >=1.2   && <1.4
     , servant-server                        >=0.19  && <0.21
     , servant-swagger-ui                    >=0.3.5 && <0.4
-    , text                                  >=1.2
-    , time                                  >=1.12
-    , unix                                  >=2.7
+    , text                                  >=1.2   && <2.2
+    , time                                  >=1.12  && <1.16
+    , unix                                  >=2.7   && <2.9
     , unordered-containers                  >=0.2   && <0.3
-    , wai-cors                              >=0.2
-    , wai-extra                             >=3.0
+    , wai-cors                              >=0.2   && <0.3
+    , wai-extra                             >=3.0   && <3.2
     , warp                                  >=3.3   && <3.5
 
   ghc-options:    -threaded -rtsopts -with-rtsopts=-N

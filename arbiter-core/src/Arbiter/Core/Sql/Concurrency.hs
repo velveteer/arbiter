@@ -41,8 +41,8 @@ import Arbiter.Core.Sql.Query (Query, rows)
 -- | Set a concurrency policy's operator override limit. @Nothing@ leaves it untouched.
 -- @Just v@ writes @v@ (a null clears the override back to the default).
 updateConcurrencyPolicyOverridesSQL :: SchemaName -> Maybe (Maybe Int32) -> Text -> Query ()
-updateConcurrencyPolicyOverridesSQL schema mLimit prefix =
-  let policies = arbiterConcurrencyPoliciesTable schema
+updateConcurrencyPolicyOverridesSQL schemaName mLimit prefix =
+  let policies = arbiterConcurrencyPoliciesTable schemaName
       touch = isJust mLimit
       limit = join mLimit
    in [sql|
@@ -55,15 +55,15 @@ updateConcurrencyPolicyOverridesSQL schema mLimit prefix =
 
 -- | Every concurrency_key held by a live job, unioned across the queue tables.
 liveConcurrencyKeysUnion :: SchemaName -> [TableName] -> Text
-liveConcurrencyKeysUnion schema tableNames =
-  unionAllOverQueueTables schema tableNames $ \_ table ->
+liveConcurrencyKeysUnion schemaName tableNames =
+  unionAllOverQueueTables schemaName tableNames $ \_ table ->
     [text|SELECT concurrency_key FROM ${table} WHERE concurrency_key IS NOT NULL|]
 
 -- | Lock count rows with no live job, in the triggers' key order. Returns the locked keys.
 lockDeadConcurrencyKeysSQL :: SchemaName -> [TableName] -> Query Text
-lockDeadConcurrencyKeysSQL schema tableNames =
-  let concTbl = arbiterConcurrencyTable schema
-      live = liveConcurrencyKeysUnion schema tableNames
+lockDeadConcurrencyKeysSQL schemaName tableNames =
+  let concTbl = arbiterConcurrencyTable schemaName
+      live = liveConcurrencyKeysUnion schemaName tableNames
    in [sql|
         SELECT @{concurrency_key :: CText}
         FROM ${concTbl} counts
@@ -76,9 +76,9 @@ lockDeadConcurrencyKeysSQL schema tableNames =
 
 -- | Delete the passed locked keys that are still dead under a fresh snapshot.
 pruneLockedConcurrencyKeysSQL :: SchemaName -> [TableName] -> [Text] -> Query ()
-pruneLockedConcurrencyKeysSQL schema tableNames lockedKeys =
-  let concTbl = arbiterConcurrencyTable schema
-      live = liveConcurrencyKeysUnion schema tableNames
+pruneLockedConcurrencyKeysSQL schemaName tableNames lockedKeys =
+  let concTbl = arbiterConcurrencyTable schemaName
+      live = liveConcurrencyKeysUnion schemaName tableNames
    in [sql|
         DELETE FROM ${concTbl} counts
         WHERE counts.concurrency_key = ANY(#{lockedKeys :: [CText]})
@@ -100,8 +100,8 @@ tryLockDeadConcurrencyAdvisorySQL deadKeys =
 
 -- | Lock every count row in key order.
 lockConcurrencyCountsSQL :: SchemaName -> Query Text
-lockConcurrencyCountsSQL schema =
-  let concTbl = arbiterConcurrencyTable schema
+lockConcurrencyCountsSQL schemaName =
+  let concTbl = arbiterConcurrencyTable schemaName
    in [sql|
         SELECT @{concurrency_key :: CText} FROM ${concTbl} ORDER BY concurrency_key FOR UPDATE
       |]
@@ -110,9 +110,9 @@ lockConcurrencyCountsSQL schema =
 -- has none. Writes the rows the caller locked and fresh inserts. Run after
 -- 'lockConcurrencyCountsSQL' in one transaction. Returns the number repaired.
 reconcileConcurrencyCountsSQL :: SchemaName -> [TableName] -> [Text] -> Query Int64
-reconcileConcurrencyCountsSQL schema tableNames heldKeys =
-  let concTbl = arbiterConcurrencyTable schema
-      union = unionAllOverQueueTables schema tableNames $ \_ table ->
+reconcileConcurrencyCountsSQL schemaName tableNames heldKeys =
+  let concTbl = arbiterConcurrencyTable schemaName
+      union = unionAllOverQueueTables schemaName tableNames $ \_ table ->
         [text|SELECT concurrency_key, claimed_by, concurrency_prefix FROM ${table} WHERE concurrency_key IS NOT NULL|]
    in [sql|
         WITH live AS (
@@ -149,15 +149,15 @@ reconcileConcurrencyCountsSQL schema tableNames heldKeys =
 
 -- | Whether a concurrency policy exists for a prefix.
 concurrencyPolicyExistsSQL :: SchemaName -> Text -> Query Bool
-concurrencyPolicyExistsSQL schema prefix =
-  let tbl = arbiterConcurrencyPoliciesTable schema
+concurrencyPolicyExistsSQL schemaName prefix =
+  let tbl = arbiterConcurrencyPoliciesTable schemaName
    in [sql|SELECT EXISTS (SELECT 1 FROM ${tbl} WHERE prefix_id = #{prefix :: CText}) AS @{result :: CBool}|]
 
 -- | The policy views, every policy or the one a prefix names.
 concurrencyPoliciesSQL :: SchemaName -> Maybe Text -> Query ConcurrencyPolicyView
-concurrencyPoliciesSQL schema mPrefix =
-  let policies = arbiterConcurrencyPoliciesTable schema
-      counts = arbiterConcurrencyTable schema
+concurrencyPoliciesSQL schemaName mPrefix =
+  let policies = arbiterConcurrencyPoliciesTable schemaName
+      counts = arbiterConcurrencyTable schemaName
    in rows
         concurrencyPolicyViewCodec
         [sql|
@@ -180,9 +180,9 @@ concurrencyPoliciesSQL schema mPrefix =
 
 -- | List a prefix's keys with effective cap and in-flight fill fraction, paginated.
 listConcurrencyKeysSQL :: SchemaName -> Text -> Int64 -> Int64 -> Query ConcurrencyKeyView
-listConcurrencyKeysSQL schema prefix limit offset =
-  let policies = arbiterConcurrencyPoliciesTable schema
-      counts = arbiterConcurrencyTable schema
+listConcurrencyKeysSQL schemaName prefix limit offset =
+  let policies = arbiterConcurrencyPoliciesTable schemaName
+      counts = arbiterConcurrencyTable schemaName
       effLimit = effectivePolicyCol "policy" "limit"
    in rows
         concurrencyKeyViewCodec
@@ -202,15 +202,15 @@ listConcurrencyKeysSQL schema prefix limit offset =
 
 -- | Whether any concurrency key exists.
 concurrencyHasAnyKeySQL :: SchemaName -> Query Bool
-concurrencyHasAnyKeySQL schema =
-  let concTbl = arbiterConcurrencyTable schema
+concurrencyHasAnyKeySQL schemaName =
+  let concTbl = arbiterConcurrencyTable schemaName
    in [sql|SELECT EXISTS (SELECT 1 FROM ${concTbl}) AS @{present :: CBool}|]
 
 -- | Whether a crash truncated the count table (a live keyed job has no count row).
 concurrencyCountsStaleSQL :: SchemaName -> [TableName] -> Query Bool
-concurrencyCountsStaleSQL schema tableNames =
-  let concTbl = arbiterConcurrencyTable schema
-      keyed = liveConcurrencyKeysUnion schema tableNames
+concurrencyCountsStaleSQL schemaName tableNames =
+  let concTbl = arbiterConcurrencyTable schemaName
+      keyed = liveConcurrencyKeysUnion schemaName tableNames
    in [sql|
         SELECT EXISTS (
           SELECT 1 FROM ( ${keyed} ) live_key

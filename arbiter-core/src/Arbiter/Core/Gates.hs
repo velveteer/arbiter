@@ -12,6 +12,7 @@ module Arbiter.Core.Gates
   , arbiterGatesTableName
   , createGatesTableSQL
   , addGateMetadataColumnSQL
+  , gateEpochSQL
   ) where
 
 import Data.Text (Text)
@@ -28,13 +29,17 @@ arbiterGatesTable schemaName = sharedTable schemaName arbiterGatesTableName
 arbiterGatesTableName :: Text
 arbiterGatesTableName = "arbiter_gates"
 
+-- | The @last_run_at@ of a gate that has not run.
+gateEpochSQL :: Text
+gateEpochSQL = "'1970-01-01'::timestamptz"
+
 -- | DDL for the @arbiter_gates@ table.
 createGatesTableSQL :: SchemaName -> Text
 createGatesTableSQL schemaName =
   T.unlines
     [ "CREATE TABLE IF NOT EXISTS " <> arbiterGatesTable schemaName <> " ("
     , "  task_name TEXT PRIMARY KEY,"
-    , "  last_run_at TIMESTAMPTZ NOT NULL DEFAULT '1970-01-01'::timestamptz"
+    , "  last_run_at TIMESTAMPTZ NOT NULL DEFAULT " <> gateEpochSQL
     , ");"
     ]
 

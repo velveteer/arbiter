@@ -13,7 +13,7 @@ import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query)
 import Arbiter.Test.Fixtures (TestPayload (..))
 import Arbiter.Test.Operations (operationsSpec)
-import Arbiter.Test.Setup (cleanupOnce, setupOnce)
+import Arbiter.Test.Setup (cleanupOnce, setupOnce, sharedPoolSize)
 import Control.Exception (SomeException, bracket, catch, throwIO)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
@@ -51,7 +51,7 @@ preparedCountSQL = [sql|SELECT @{n :: CInt8} FROM (SELECT count(*) AS n FROM pg_
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
-  sharedPool <- runIO (createHasqlPool 5 connStr)
+  sharedPool <- runIO (createHasqlPool sharedPoolSize connStr)
   mkEnv <- runIO (createHasqlEnvWithPool (Proxy @HasqlOpsTestRegistry) sharedPool testSchema)
   around (\action -> cleanupOnce connStr testSchema testTable >> action mkEnv) $ do
     operationsSpec @TestPayload TestMessage pure runHasqlDb

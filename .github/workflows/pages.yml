@@ -40,11 +40,15 @@ jobs:
             ${{ runner.os }}-ghc-${{ steps.setup.outputs.ghc-version }}-
 
       - name: Build
+        env:
+          KEDGEREE_REV: 40ef4c61d96aa2a43ab77420320cee3609860a92
         run: |
           cabal update
           cabal build all
-          git clone --depth 1 https://github.com/velveteer/kedgeree.git
+          git init kedgeree
           cd kedgeree
+          git fetch --depth 1 https://github.com/velveteer/kedgeree.git "$KEDGEREE_REV"
+          git checkout FETCH_HEAD
           cabal install --project-dir=.
 
       - name: Generate Haddocks

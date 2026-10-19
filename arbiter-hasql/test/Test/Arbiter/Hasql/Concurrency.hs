@@ -9,7 +9,7 @@ import Arbiter.Test.Concurrency
   , raceConditionSpec
   )
 import Arbiter.Test.Fixtures (TestPayload (..))
-import Arbiter.Test.Setup (cleanupOnce, setupOnce)
+import Arbiter.Test.Setup (cleanupOnce, concurrencyPoolSize, setupOnce)
 import Data.ByteString (ByteString)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
@@ -28,7 +28,7 @@ testTable = "arbiter_hasql_concurrency_test"
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
-  sharedPool <- runIO (createHasqlPool 10 connStr)
+  sharedPool <- runIO (createHasqlPool concurrencyPoolSize connStr)
   sharedEnv <- runIO (createHasqlEnvWithPool (Proxy @HasqlConcurrencyTestRegistry) sharedPool testSchema)
   around (\action -> cleanupOnce connStr testSchema testTable >> action sharedEnv) $ do
     concurrencySpec @TestPayload TestMessage runHasqlDb

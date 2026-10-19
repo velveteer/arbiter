@@ -41,7 +41,7 @@ import Arbiter.Core.Worker (arbiterWorkersTable)
 -- Counts follow the 'jobStatusCaseSQL' taxonomy, with blocked rows split out of ready,
 -- and sum to @total_jobs@.
 getQueueStatsSQL :: RowCodec a -> SchemaName -> TableName -> [Text] -> Query a
-getQueueStatsSQL codec schema tableName kinds = rawRows codec (queueStatsSelect DlqByKind schema tableName kinds)
+getQueueStatsSQL codec schemaName tableName kinds = rawRows codec (queueStatsSelect DlqByKind schemaName tableName kinds)
 
 -- | How a stats row counts the DLQ.
 data DlqCount = DlqByKind | DlqTotal
@@ -50,12 +50,12 @@ data DlqCount = DlqByKind | DlqTotal
 -- over the whole table in one pass. @total_row@ marks the whole-table row. A ready
 -- row a claim would skip counts as blocked instead.
 queueStatsSelect :: DlqCount -> SchemaName -> TableName -> [Text] -> Text
-queueStatsSelect dlqCount schema tableName kinds =
-  let tbl = jobQueueTable schema tableName
-      dlqTbl = jobQueueDLQTable schema tableName
+queueStatsSelect dlqCount schemaName tableName kinds =
+  let tbl = jobQueueTable schemaName tableName
+      dlqTbl = jobQueueDLQTable schemaName tableName
       kindExpr = declaredKindSQL kinds
-      heads = groupHeadsSQL schema tableName
-      blocked = blockedExpr schema
+      heads = groupHeadsSQL schemaName tableName
+      blocked = blockedExpr schemaName
       (dlqCte, dlqTotal, dlqKinds) = case dlqCount of
         DlqByKind ->
           ( [text|WITH dlq_by_kind AS (SELECT ${kindExpr} AS kind, COUNT(*)::int8 AS dlq_count FROM ${dlqTbl} GROUP BY 1)|]
@@ -112,11 +112,11 @@ queueStatsSelect dlqCount schema tableName kinds =
 -- head as @head@: behind the head, or behind a full concurrency or rate-limit key.
 -- The CASE keeps the key probes off every row a claim would not consider.
 blockedExpr :: SchemaName -> Text
-blockedExpr schema =
-  let concTbl = arbiterConcurrencyTable schema
-      concPolicies = arbiterConcurrencyPoliciesTable schema
-      buckets = arbiterRateLimitsTable schema
-      rlPolicies = arbiterRateLimitPoliciesTable schema
+blockedExpr schemaName =
+  let concTbl = arbiterConcurrencyTable schemaName
+      concPolicies = arbiterConcurrencyPoliciesTable schemaName
+      buckets = arbiterRateLimitsTable schemaName
+      rlPolicies = arbiterRateLimitPoliciesTable schemaName
       claimable = claimablePred "job"
       concOk = concHeadroomPred concTbl concPolicies "job"
       rlOk = rateLimitHeadroomPred buckets rlPolicies "job"
@@ -136,9 +136,9 @@ gateColumns = ["claimed_by", "concurrency_key", "rate_limit_key", "rate_limit_pr
 
 -- | The id of each open group's head, the row a claim of that group takes first.
 groupHeadsSQL :: SchemaName -> TableName -> Text
-groupHeadsSQL schema tableName =
-  let tbl = jobQueueTable schema tableName
-      groupsTbl = jobQueueGroupsTable schema tableName
+groupHeadsSQL schemaName tableName =
+  let tbl = jobQueueTable schemaName tableName
+      groupsTbl = jobQueueGroupsTable schemaName tableName
       headBatch = groupHeadBatch tbl "summary.group_key" [] headOnly
    in [text|
         SELECT head.id
@@ -178,11 +178,11 @@ declaredKindSQL kinds =
 
 -- | Every queue's stats in one query, tagged by name. Caller guards the empty list.
 allQueueStatsSQL :: RowCodec a -> SchemaName -> [(TableName, [Text])] -> Query a
-allQueueStatsSQL codec schema queueKinds =
-  let queuesTbl = arbiterQueuesTable schema
-      workersTbl = arbiterWorkersTable schema
-   in rawRows codec $ unionAllOverQueueTables schema (map fst queueKinds) $ \tableName _ ->
-        let stats = queueStatsSelect DlqTotal schema tableName (fromMaybe [] (lookup tableName queueKinds))
+allQueueStatsSQL codec schemaName queueKinds =
+  let queuesTbl = arbiterQueuesTable schemaName
+      workersTbl = arbiterWorkersTable schemaName
+   in rawRows codec $ unionAllOverQueueTables schemaName (map fst queueKinds) $ \tableName _ ->
+        let stats = queueStatsSelect DlqTotal schemaName tableName (fromMaybe [] (lookup tableName queueKinds))
          in [text|
           SELECT '${tableName}' AS queue, stats.*,
                  COALESCE((SELECT paused FROM ${queuesTbl} WHERE queue_name = '${tableName}'), FALSE) AS queue_paused,
@@ -205,8 +205,8 @@ allQueueStatsSQL codec schema queueKinds =
 -- | Child counts as @(parent_id, total, suspended)@ per parent, over a set of job ids.
 -- The caller attaches the row decoder.
 countChildrenBatchSQL :: SchemaName -> TableName -> [Int64] -> Query ()
-countChildrenBatchSQL schema tableName jobIds =
-  let tbl = jobQueueTable schema tableName
+countChildrenBatchSQL schemaName tableName jobIds =
+  let tbl = jobQueueTable schemaName tableName
    in [sql|
         SELECT parent_id, COUNT(*) AS count,
                COUNT(*) FILTER (WHERE suspended) AS count_suspended
@@ -222,10 +222,10 @@ countChildrenBatchSQL schema tableName jobIds =
 -- | A page of a queue's open groups from the summary table, largest first, each with
 -- its head: the job that holds the group or that its next claim takes.
 listGroupsSQL :: RowCodec a -> SchemaName -> TableName -> Maybe Text -> Int64 -> Int64 -> Query a
-listGroupsSQL codec schema tableName groupKey limit offset =
-  let groupsTbl = jobQueueGroupsTable schema tableName
+listGroupsSQL codec schemaName tableName groupKey limit offset =
+  let groupsTbl = jobQueueGroupsTable schemaName tableName
       keyFilter = openGroupKeyFilter groupKey
-      heads = groupListHeadSQL schema tableName
+      heads = groupListHeadSQL schemaName tableName
    in rows
         codec
         [sql|
@@ -245,8 +245,8 @@ listGroupsSQL codec schema tableName groupKey limit offset =
 
 -- | The number of open groups 'listGroupsSQL' pages through.
 countGroupsSQL :: SchemaName -> TableName -> Maybe Text -> Query Int64
-countGroupsSQL schema tableName groupKey =
-  let groupsTbl = jobQueueGroupsTable schema tableName
+countGroupsSQL schemaName tableName groupKey =
+  let groupsTbl = jobQueueGroupsTable schemaName tableName
       keyFilter = openGroupKeyFilter groupKey
    in [sql|SELECT COUNT(*)::int8 AS @{count :: CInt8} FROM ${groupsTbl} summary WHERE summary.job_count > 0 ${keyFilter}|]
 
@@ -256,13 +256,13 @@ openGroupKeyFilter = foldMap (\key -> [sql|AND summary.group_key = #{key :: CTex
 -- | A group's head with its status: the job that holds the group, else the first row
 -- a claim takes, and whether a gate holds that row back.
 groupListHeadSQL :: SchemaName -> TableName -> Text
-groupListHeadSQL schema tableName =
-  let tbl = jobQueueTable schema tableName
+groupListHeadSQL schemaName tableName =
+  let tbl = jobQueueTable schemaName tableName
       inFlight = inFlightPredicate "job."
       headBatch = groupHeadBatch tbl "summary.group_key" gateColumns headOnly
       ready = textLiteral (jobStatusToText Ready)
-      concOk = concHeadroomPred (arbiterConcurrencyTable schema) (arbiterConcurrencyPoliciesTable schema) "head_batch"
-      rlOk = rateLimitHeadroomPred (arbiterRateLimitsTable schema) (arbiterRateLimitPoliciesTable schema) "head_batch"
+      concOk = concHeadroomPred (arbiterConcurrencyTable schemaName) (arbiterConcurrencyPoliciesTable schemaName) "head_batch"
+      rlOk = rateLimitHeadroomPred (arbiterRateLimitsTable schemaName) (arbiterRateLimitPoliciesTable schemaName) "head_batch"
    in [text|
         SELECT head.id, head.status, head.blocked
         FROM (

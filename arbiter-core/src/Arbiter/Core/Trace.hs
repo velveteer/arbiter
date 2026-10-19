@@ -110,7 +110,13 @@ currentTraceContext = maybe (pure Nothing) encoded =<< getActiveSpan
         then pure Nothing
         else do
           (parent, state) <- encodeSpanContext activeSpan
-          pure (Just (TraceContext (decodeUtf8 parent) (decodeUtf8 state <$ guard (not (BS.null state)))))
+          pure
+            ( Just
+                TraceContext
+                  { traceparent = decodeUtf8 parent
+                  , tracestate = decodeUtf8 state <$ guard (not (BS.null state))
+                  }
+            )
 
 -- | Resolve the arbiter tracer, or 'Nothing' when nothing is collecting.
 resolveTracer :: (MonadIO m) => m (Maybe Tracer)

@@ -33,6 +33,7 @@ module Arbiter.Core.Exceptions
 
     -- | Internal to the arbiter packages. Not covered by the PVP.
   , throwParsing
+  , orThrowParsing
   , throwInternal
   , throwJobGone
   , throwJobGoneIds
@@ -48,6 +49,8 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.Generics (Generic)
 import UnliftIO.Exception qualified as UE
+
+import Arbiter.Core.Enum (showText)
 
 -- | Decisions a handler can signal by throwing. The worker catches it and retries,
 -- dead-letters or cancels the job.
@@ -153,6 +156,12 @@ instance Exception JobForceCancelled where
   backtraceDesired _ = False
   toException = asyncExceptionToException
   fromException = asyncExceptionFromException
+  displayException (JobForceCancelled cancelled gone) =
+    T.unpack ("job force-cancelled" <> namedJobIds cancelled <> goneNamed)
+    where
+      goneNamed
+        | null gone = ""
+        | otherwise = " (reclaimed or gone" <> namedJobIds gone <> ")"
 
 -- | A batch's claim hooks and handler ran past the pool's maximum job duration. Classified as a retryable failure.
 newtype JobDeadlineExceeded = JobDeadlineExceeded Text
@@ -187,6 +196,10 @@ throwNack = UE.throwIO JobNackException
 throwParsing :: (MonadIO m) => Text -> m a
 throwParsing msg = UE.throwIO (ParsingException msg)
 
+-- | The 'Right' value, or 'throwParsing' on the 'Left' message.
+orThrowParsing :: (MonadIO m) => Either Text a -> m a
+orThrowParsing = either throwParsing pure
+
 -- | Fail on an arbiter-internal error.
 throwInternal :: (MonadIO m) => Text -> m a
 throwInternal msg = UE.throwIO (InternalException msg)
@@ -206,7 +219,7 @@ throwScopedFailure inner ids = UE.throwIO (JobScopedFailure inner ids)
 -- | The ids a signal names, appended to its message. Empty when it names none.
 namedJobIds :: [Int64] -> Text
 namedJobIds [] = ""
-namedJobIds ids = ": " <> T.intercalate ", " (map (T.pack . show) ids)
+namedJobIds ids = ": " <> T.intercalate ", " (map showText ids)
 
 -- | An exception's inner message. It carries no backtrace.
 displayEx :: SomeException -> Text

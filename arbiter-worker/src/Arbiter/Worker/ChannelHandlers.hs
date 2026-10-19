@@ -1,8 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | STM handlers for the worker pool's NOTIFY channels.
--- Each handler decodes the payload and reacts only if the message
--- addresses this worker.
+-- | Handlers for the worker pool's NOTIFY channels. Each ignores a message not for this worker.
 module Arbiter.Worker.ChannelHandlers
   ( handlePauseNotif
   , handleCancelNotif
@@ -18,31 +16,31 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8Lenient)
 import Data.UUID (UUID)
-import UnliftIO (MonadUnliftIO, atomically)
+import UnliftIO (MonadIO, atomically)
 import UnliftIO.STM (TVar)
 import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.Config (WorkerConfig (..), workerStateVar, writePause)
 import Arbiter.Worker.Heartbeat (PoolGuard, recheckJob)
-import Arbiter.Worker.WorkerState (WorkerState (..))
+import Arbiter.Worker.WorkerState (isShuttingDown)
 
 -- | Decode the pause payload and, if it addresses this worker, write 'Arbiter.Worker.Config.pauseVar'.
 handlePauseNotif
-  :: (MonadUnliftIO m)
+  :: (MonadIO m)
   => WorkerConfig n payload
   -> Notification
   -> m ()
 handlePauseNotif config notif =
   case Aeson.decodeStrict (notificationData notif) :: Maybe PausePayload of
     Just (PausePayload wid paused) | wid == workerId config -> atomically $ do
-      state <- STM.readTVar (workerStateVar config)
-      unless (state == ShuttingDown) $ writePause config paused
+      stopping <- isShuttingDown (workerStateVar config)
+      unless stopping $ writePause config paused
     _ -> pure ()
 
 -- | If the cancel payload targets this worker, extend the job's batch now. The
 -- extend finds the cancel and the guard stops the handler.
 handleCancelNotif
-  :: (MonadUnliftIO m)
+  :: (MonadIO m)
   => WorkerConfig n payload
   -> PoolGuard payload
   -> Notification
@@ -54,7 +52,7 @@ handleCancelNotif config guard notif =
 
 -- | Signal the scheduler when a run-now NOTIFY names a schedule this pool owns.
 handleCronRunNotif
-  :: (MonadUnliftIO m)
+  :: (MonadIO m)
   => Set Text
   -- ^ This pool's own cron schedule names
   -> TVar Bool

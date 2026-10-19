@@ -2,7 +2,7 @@
 {-# LANGUAGE TypeFamilies #-}
 
 -- | Reclaimed-job, stolen-job, and handler-exception tests, instantiated for each backend.
-module Arbiter.Worker.TestKit.Reclaim (reclaimSpec) where
+module Arbiter.Test.Worker.Reclaim (reclaimSpec) where
 
 import Arbiter.Core.HighLevel (QueueOperation, RegistryAdmissionPolicies)
 import Arbiter.Core.HighLevel qualified as HL
@@ -26,8 +26,16 @@ import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Test.Hspec
 
 import Arbiter.Test.Poll (bumpRef, waitUntil, withLinkedAsync)
-import Arbiter.Worker.TestKit.Backend (TestBackend (..))
-import Arbiter.Worker.TestKit.Rows (reclaimJob)
+import Arbiter.Test.Worker.Backend (TestBackend (..))
+import Arbiter.Test.Worker.Rows (reclaimJob)
+
+-- | A pause for the worker to settle the job and run its hooks.
+settleMicros :: Int
+settleMicros = 500_000
+
+-- | How long the handler runs after its job is reclaimed.
+afterReclaimMicros :: Int
+afterReclaimMicros = 5_000_000
 
 -- | The tag on the failing payloads. The handler fails each payload with this tag.
 alwaysFailing :: Int
@@ -79,7 +87,7 @@ reclaimSpec TestBackend {schema, table, connStr, mkSimple, mkFailing, mkEnv, mkH
           (runM env $ runWorkerPool configWithHooks)
           $ \_ -> do
             waitUntil 10_000 $ readIORef handlerCompleted
-            threadDelay 500_000
+            threadDelay settleMicros
 
         failureCount <- readIORef failureCalls
         successCount <- readIORef successCalls
@@ -140,7 +148,7 @@ reclaimSpec TestBackend {schema, table, connStr, mkSimple, mkFailing, mkEnv, mkH
 
         let jobHandler _job = liftIO $ do
               reclaimJob connStr schema table jobId
-              threadDelay 5_000_000
+              threadDelay afterReclaimMicros
               atomicModifyIORef' handlerCompleted (\_ -> (True, ()))
 
         config :: WorkerConfig m payload <- transactionalWorkerConfig 10 (mkHandler jobHandler)

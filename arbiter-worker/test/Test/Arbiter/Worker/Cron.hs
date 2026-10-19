@@ -39,7 +39,7 @@ import Arbiter.Worker.Cron
   , resolveTZ
   , truncateToMinute
   )
-import Test.Arbiter.Worker.Fixtures (WorkerTestPayload (..), mkTime)
+import Test.Arbiter.Worker.Fixtures (TaskPayload (..), mkTime)
 
 spec :: Spec
 spec = do
@@ -333,7 +333,7 @@ spec = do
       ticks `shouldSatisfy` elem currentTick
 
     it "Backfill with a non-minute-multiple window still includes the live tick" $ do
-      -- Regression: 90s window puts windowFloor mid-minute, dropping currentTick.
+      -- A 90s window puts windowFloor mid-minute. The live tick stays in.
       let currentTick = mkTime 2025 6 15 12 0 0
           lastChecked = mkTime 2025 6 15 9 0 0
           ticks = enumerateCatchUpTicks (Backfill 90) (Just lastChecked) currentTick

@@ -6,7 +6,7 @@
 -- Build the schema with 'Arbiter.Test.Setup.setupOnce' with notify on. Empty it in
 -- 'mkEnv' and 'mkFreshEnv' with 'Arbiter.Test.Setup.cleanupData' or
 -- 'Arbiter.Test.Setup.cleanupOnce'.
-module Arbiter.Worker.TestKit
+module Arbiter.Test.Worker
   ( workerSpec
   , listenerSpec
   , multiQueueListenerSpec
@@ -118,12 +118,76 @@ import UnliftIO.Async (concurrently_, withAsync)
 
 import Arbiter.Test.Poll (bumpRef, waitUntil)
 import Arbiter.Test.Setup (listenerConnectionCount, quietHubLog, terminateBackendsMatching, withConn)
-import Arbiter.Worker.TestKit.Backend (TestBackend (..))
-import Arbiter.Worker.TestKit.ConnectionRecovery (connectionRecoverySpec)
-import Arbiter.Worker.TestKit.Cron (cronSpec)
-import Arbiter.Worker.TestKit.Deadline (deadlineSpec)
-import Arbiter.Worker.TestKit.Lifecycle (lifecycleSpec)
-import Arbiter.Worker.TestKit.Reclaim (reclaimSpec)
+import Arbiter.Test.Worker.Backend (TestBackend (..))
+import Arbiter.Test.Worker.ConnectionRecovery (connectionRecoverySpec)
+import Arbiter.Test.Worker.Cron (cronSpec)
+import Arbiter.Test.Worker.Deadline (deadlineSpec)
+import Arbiter.Test.Worker.Lifecycle (lifecycleSpec)
+import Arbiter.Test.Worker.Reclaim (reclaimSpec)
+
+-- | How long each handler runs in the worker-count test.
+concurrentHandlerMicros :: Int
+concurrentHandlerMicros = 500_000
+
+-- | A pause for the worker to settle the job and run its hooks.
+settleMicros :: Int
+settleMicros = 300_000
+
+-- | How long each handler runs in the multi-group test.
+groupHandlerMicros :: Int
+groupHandlerMicros = 1_000_000
+
+-- | A handler run longer than the test.
+longHandlerMicros :: Int
+longHandlerMicros = 10_000_000
+
+-- | Longer than two visibility timeouts. The heartbeat keeps the leases alive.
+leaseOutlastMicros :: Int
+leaseOutlastMicros = 8_000_000
+
+-- | A pause for late hooks after the queue drains.
+afterDrainMicros :: Int
+afterDrainMicros = 200_000
+
+-- | A short handler run.
+shortHandlerMicros :: Int
+shortHandlerMicros = 200_000
+
+-- | A handler run that covers several heartbeat ticks.
+heartbeatHandlerMicros :: Int
+heartbeatHandlerMicros = 3_000_000
+
+-- | A batch handler run that covers several heartbeat ticks.
+batchHeartbeatHandlerMicros :: Int
+batchHeartbeatHandlerMicros = 6_000_000
+
+-- | A pause after the inserts, before the worker starts.
+beforeStartMicros :: Int
+beforeStartMicros = 100_000
+
+-- | Longer than one heartbeat tick.
+heartbeatTickMicros :: Int
+heartbeatTickMicros = 1_500_000
+
+-- | A success hook slow enough for a heartbeat tick to run during it.
+slowSuccessHookMicros :: Int
+slowSuccessHookMicros = 400_000
+
+-- | How long the spawn transaction stays open after the ack.
+spawnHoldMicros :: Int
+spawnHoldMicros = 300_000
+
+-- | A pause for the listener to subscribe.
+listenerStartMicros :: Int
+listenerStartMicros = 1_000_000
+
+-- | A pause for the listener to reconnect and subscribe again.
+reconnectMicros :: Int
+reconnectMicros = 3_000_000
+
+-- | A pause in which a wrong wake-up would show.
+strayWakeMicros :: Int
+strayWakeMicros = 500_000
 
 -- | A backend handler that ignores the connection argument.
 plainHandler :: (job -> m r) -> conn -> job -> m r
@@ -172,7 +236,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       config <- mkConfig $ \_job -> do
         active <- liftIO $ atomicModifyIORef' activeRef $ \count -> let count' = count + 1 in (count', count')
         liftIO $ atomicModifyIORef' maxActiveRef $ \maxN -> (max maxN active, ())
-        liftIO $ threadDelay 500_000
+        liftIO $ threadDelay concurrentHandlerMicros
         liftIO $ atomicModifyIORef' activeRef $ \count -> (count - 1, ())
         liftIO $ bumpRef completedRef
       let jobs =
@@ -272,7 +336,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ readIORef doneRef
-        threadDelay 300_000
+        threadDelay settleMicros
         arch <- archived env
         map (payload . Archive.jobSnapshot) arch `shouldBe` []
 
@@ -391,7 +455,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
 
       withAsync (runM env $ runWorkerPool cfg {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ readIORef doneRef
-        threadDelay 300_000
+        threadDelay settleMicros
         arch <- archived env
         map (payload . Archive.jobSnapshot) arch `shouldBe` []
 
@@ -470,7 +534,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ readIORef doneRef
-        threadDelay 300_000
+        threadDelay settleMicros
         arch <- archived env
         map (payload . Archive.jobSnapshot) arch `shouldBe` []
 
@@ -478,7 +542,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       processingRef <- newIORef []
       config <- mkConfig $ \job -> do
         liftIO $ atomicModifyIORef' processingRef $ \groups -> (groupKey job : groups, ())
-        liftIO $ threadDelay 1_000_000
+        liftIO $ threadDelay groupHandlerMicros
       let jobs =
             [ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-1")
             , setGroupKey (Just "g2") $ defaultJob (mkSimple "G2-1")
@@ -550,7 +614,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       let workerCnt = 3
       let jobNames = ["long-" <> T.pack (show @Int index) | index <- [1 .. workerCnt]]
       runM env $ traverse_ (\name -> void $ HL.insertJob (defaultJob (mkSimple name))) jobNames
-      config <- mkConfig $ \_job -> liftIO $ threadDelay 10_000_000
+      config <- mkConfig $ \_job -> liftIO $ threadDelay longHandlerMicros
 
       withAsync
         ( runM env $
@@ -564,7 +628,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
                 }
         )
         $ \_ -> do
-          threadDelay 8_000_000
+          threadDelay leaseOutlastMicros
           reclaimed <-
             runM env $
               HL.claimNextVisibleJobs @payload workerCnt 3
@@ -603,7 +667,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
 
       withAsync (runM env $ runWorkerPool manualConfig) $ \_ -> do
         waitUntil 10_000 $ (== 0) <$> runM env (HL.countJobs @payload)
-        threadDelay 200_000
+        threadDelay afterDrainMicros
 
       successes <- readIORef successRef
       length successes `shouldBe` 0
@@ -623,7 +687,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
 
       withAsync (runM env $ runWorkerPool manualConfig) $ \_ -> do
         waitUntil 10_000 $ (== 0) <$> runM env (HL.countJobs @payload)
-        threadDelay 200_000
+        threadDelay afterDrainMicros
 
       readIORef retryRef `shouldReturn` []
 
@@ -716,7 +780,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       config <- mkConfig $ \job -> do
         active <- liftIO $ atomicModifyIORef' activeRef $ \count -> let count' = count + 1 in (count', count')
         liftIO $ atomicModifyIORef' maxActiveRef $ \maxN -> (max maxN active, ())
-        liftIO $ threadDelay 200_000
+        liftIO $ threadDelay shortHandlerMicros
         liftIO $ atomicModifyIORef' orderRef $ \order -> (payload job : order, ())
         liftIO $ atomicModifyIORef' activeRef $ \count -> (count - 1, ())
       let jobs =
@@ -768,7 +832,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
               { onJobSuccess = \job startTime endTime ->
                   liftIO $ atomicModifyIORef' successRef $ \results -> ((primaryKey job, startTime, endTime) : results, ())
               }
-      config <- mkConfig $ \_job -> liftIO $ threadDelay 200_000
+      config <- mkConfig $ \_job -> liftIO $ threadDelay shortHandlerMicros
       let configWithHooks = config {observabilityHooks = hooks, workerCount = 1, pollInterval = 0.1}
 
       let job = setGroupKey (Just "g1") $ defaultJob (mkSimple "Test")
@@ -791,7 +855,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
               , onJobSuccess = \_ _ _ -> liftIO $ bumpRef successRef
               }
       config <- mkConfig $ \_job -> do
-        liftIO $ threadDelay 200_000
+        liftIO $ threadDelay shortHandlerMicros
         throwRetryable "Test failure"
       let configWithHooks = config {observabilityHooks = hooks, workerCount = 1, pollInterval = 0.1}
 
@@ -814,7 +878,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
               { onJobHeartbeat = \_ _currentTime _startTime ->
                   liftIO $ bumpRef heartbeatRef
               }
-      config <- mkConfig $ \_job -> liftIO $ threadDelay 3_000_000
+      config <- mkConfig $ \_job -> liftIO $ threadDelay heartbeatHandlerMicros
       let configWithHooks =
             config
               { observabilityHooks = hooks
@@ -885,7 +949,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
       let batchedConfig = config {pollInterval = 0.050}
-      threadDelay 100_000
+      threadDelay beforeStartMicros
 
       withAsync (runM env $ runWorkerPool batchedConfig) $ \_ -> do
         waitUntil 10_000 $ (== 1) . length <$> readIORef batchesRef
@@ -909,7 +973,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 2 10 batchHandler
       let batchedConfig = config {pollInterval = 0.050}
-      threadDelay 100_000
+      threadDelay beforeStartMicros
 
       withAsync (runM env $ runWorkerPool batchedConfig) $ \_ -> do
         waitUntil 10_000 $ (== 2) . length <$> readIORef batchesRef
@@ -932,7 +996,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 2 batchHandler
       let batchedConfig = config {pollInterval = 0.050}
-      threadDelay 100_000
+      threadDelay beforeStartMicros
 
       withAsync (runM env $ runWorkerPool batchedConfig) $ \_ -> do
         waitUntil 10_000 $ (== 3) . length <$> readIORef batchSizesRef
@@ -951,7 +1015,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
       let batchedConfig = config {pollInterval = 0.050, jitter = NoJitter}
-      threadDelay 100_000
+      threadDelay beforeStartMicros
 
       withAsync (runM env $ runWorkerPool batchedConfig) $ \_ -> do
         waitUntil 15_000 $ (== 2) <$> readIORef attemptsRef
@@ -967,7 +1031,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
       let batchedConfig = config {pollInterval = 0.050}
-      threadDelay 100_000
+      threadDelay beforeStartMicros
 
       withAsync (runM env $ runWorkerPool batchedConfig) $ \_ -> do
         waitUntil 10_000 $ do
@@ -986,7 +1050,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
       let batchedConfig = config {pollInterval = 0.050, jitter = NoJitter}
-      threadDelay 100_000
+      threadDelay beforeStartMicros
 
       withAsync (runM env $ runWorkerPool batchedConfig) $ \_ -> do
         waitUntil 15_000 $ do
@@ -1021,7 +1085,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
       let batchedConfig = config {pollInterval = 0.1, visibilityTimeout = 2, jobHeartbeatInterval = 1}
-      threadDelay 100_000
+      threadDelay beforeStartMicros
 
       withAsync (runM env $ runWorkerPool batchedConfig) $ \_ -> do
         let names = map mkSimple ["G1-1", "G1-2", "G1-3"]
@@ -1056,7 +1120,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
                   liftIO $ atomicModifyIORef' heartbeatJobsRef $ \jobs -> (primaryKey job : jobs, ())
               }
       let batchHandler jobs cbs = do
-            liftIO $ threadDelay 6_000_000
+            liftIO $ threadDelay batchHeartbeatHandlerMicros
             traverse_ (ack cbs) jobs
       let jobs =
             [ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-1")
@@ -1066,7 +1130,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       let jobIds = map primaryKey insertedJobs
       config <- mkBatchedConfig 1 10 batchHandler
       let batchedConfig = config {observabilityHooks = hooks, pollInterval = 0.050, jobHeartbeatInterval = 1}
-      threadDelay 100_000
+      threadDelay beforeStartMicros
 
       withAsync (runM env $ runWorkerPool batchedConfig) $ \_ -> do
         let countFor jid = length . filter (== jid) <$> readIORef heartbeatJobsRef
@@ -1102,7 +1166,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
       let batchedConfig = config {pollInterval = 0.050, observabilityHooks = hooks, jitter = NoJitter}
-      threadDelay 100_000
+      threadDelay beforeStartMicros
 
       withAsync (runM env $ runWorkerPool batchedConfig) $ \_ -> do
         waitUntil 10_000 $ (== 1) . length <$> readIORef failuresRef
@@ -1123,7 +1187,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
       let batchedConfig = config {pollInterval = 0.050}
-      threadDelay 100_000
+      threadDelay beforeStartMicros
 
       withAsync (runM env $ runWorkerPool batchedConfig) $ \_ -> do
         waitUntil 10_000 $ readIORef processedRef
@@ -1147,7 +1211,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
       let batchedConfig = config {pollInterval = 0.050, observabilityHooks = hooks}
-      threadDelay 100_000
+      threadDelay beforeStartMicros
 
       withAsync (runM env $ runWorkerPool batchedConfig) $ \_ -> do
         waitUntil 10_000 $ (== 3) . length <$> readIORef successRef
@@ -1258,7 +1322,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
         )
         $ \_ -> do
           waitUntil 15_000 $ (>= 2) <$> readIORef callsRef
-          threadDelay 300_000
+          threadDelay settleMicros
           successes <- readIORef successRef
           -- The nack (call 1) fires no success hook. Only the ack (call 2) does.
           length successes `shouldBe` 1
@@ -1275,7 +1339,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
             liftIO $ bumpRef callsRef
             traverse_ (nack cbs) (filter isNacked (toList jobs))
             -- Outlast a heartbeat tick. The tick reads the nack's given-back attempt as a steal.
-            liftIO $ threadDelay 1_500_000
+            liftIO $ threadDelay heartbeatTickMicros
             traverse_ (ack cbs) (filter (not . isNacked) (toList jobs))
       let jobs =
             [ setGroupKey (Just "hb") $ defaultJob (mkSimple "hb-nacked")
@@ -1307,7 +1371,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       let hooks =
             defaultObservabilityHooks
               { onJobSuccess = \job _ _ -> liftIO $ do
-                  threadDelay 400_000
+                  threadDelay slowSuccessHookMicros
                   atomicModifyIORef' successRef $ \seen -> (payload job : seen, ())
               , onJobUnavailable = \job _ ->
                   liftIO $ atomicModifyIORef' unavailableRef $ \seen -> (payload job : seen, ())
@@ -1333,7 +1397,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
         )
         $ \_ -> do
           waitUntil 15_000 $ (>= 3) . length <$> readIORef successRef
-          threadDelay 300_000
+          threadDelay settleMicros
           readIORef successRef >>= (`shouldMatchList` map mkSimple ["hbg-1", "hbg-2", "hbg-3"])
           readIORef unavailableRef `shouldReturn` []
 
@@ -1355,7 +1419,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
           batchHandler jobs cbs = do
             traverse_ (ack cbs) (find ((== mkSimple "fca-done") . payload) jobs)
             liftIO $ atomicModifyIORef' ackedRef (const (True, ()))
-            liftIO $ threadDelay 10_000_000
+            liftIO $ threadDelay longHandlerMicros
       let jobs =
             [ setGroupKey (Just "fca") $ defaultJob (mkSimple "fca-done")
             , setGroupKey (Just "fca") $ defaultJob (mkSimple "fca-cancelled")
@@ -1379,7 +1443,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
           Just victim <- pure (find ((== mkSimple "fca-cancelled") . payload) remaining)
           void $ runM env (HL.forceCancelJob @payload (primaryKey victim))
           waitUntil 15_000 $ (== 1) . length <$> readIORef cancelledRef
-          threadDelay 300_000
+          threadDelay settleMicros
 
       readIORef successRef >>= (`shouldBe` [mkSimple "fca-done"])
       readIORef cancelledRef >>= (`shouldBe` [mkSimple "fca-cancelled"])
@@ -1405,7 +1469,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
               (\job -> failRetry cbs job "transient")
               (find ((== mkSimple "fcr-retried") . payload) jobs)
             liftIO $ atomicModifyIORef' failedRef (const (True, ()))
-            liftIO $ threadDelay 10_000_000
+            liftIO $ threadDelay longHandlerMicros
       let jobs =
             [ setGroupKey (Just "fcr") $ defaultJob (mkSimple "fcr-retried")
             , setGroupKey (Just "fcr") $ defaultJob (mkSimple "fcr-cancelled")
@@ -1432,7 +1496,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
           Just victim <- pure (find ((== mkSimple "fcr-cancelled") . payload) remaining)
           void $ runM env (HL.forceCancelJob @payload (primaryKey victim))
           waitUntil 15_000 $ (== 1) . length <$> readIORef cancelledRef
-          threadDelay 300_000
+          threadDelay settleMicros
 
       readIORef retriedRef >>= (`shouldBe` [mkSimple "fcr-retried"])
       readIORef cancelledRef >>= (`shouldBe` [mkSimple "fcr-cancelled"])
@@ -1622,7 +1686,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
       let batchedConfig = config {pollInterval = 0.050}
-      threadDelay 100_000
+      threadDelay beforeStartMicros
 
       withAsync (runM env $ runWorkerPool batchedConfig) $ \_ ->
         waitUntil 10_000 $ readIORef processedRef
@@ -1644,7 +1708,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 3 10 batchHandler
       let batchedConfig = config {pollInterval = 0.050}
-      threadDelay 100_000
+      threadDelay beforeStartMicros
 
       withAsync (runM env $ runWorkerPool batchedConfig) $ \_ -> do
         waitUntil 10_000 $ (== 1) . length <$> readIORef batchSizesRef
@@ -1668,7 +1732,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 4 10 batchHandler
       let batchedConfig = config {pollInterval = 0.050}
-      threadDelay 100_000
+      threadDelay beforeStartMicros
 
       withAsync (runM env $ runWorkerPool batchedConfig) $ \_ -> do
         waitUntil 10_000 $ (== 3) . length <$> readIORef batchPayloadsRef
@@ -2011,7 +2075,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
             void $ HL.spawnChildren job (defaultJob (mkSimple "sp18-child") :| [])
             void $ HL.ackJob job
             liftIO $ putMVar spawnHeld ()
-            liftIO $ threadDelay 300_000
+            liftIO $ threadDelay spawnHoldMicros
         )
         ( takeMVar spawnHeld
             >> void (runM env (HL.moveToDLQ "operator pulled the tree" job))
@@ -2126,7 +2190,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
               }
           handler jobs _cbs = do
             liftIO $ atomicModifyIORef' startedRef (\_ -> (length jobs, ()))
-            liftIO $ threadDelay 10_000_000
+            liftIO $ threadDelay longHandlerMicros
       Right (parent :| children) <-
         runM env
           $ HL.insertJobTree
@@ -2141,7 +2205,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
           waitUntil 10_000 $ (== 2) <$> readIORef startedRef
           void $ runM env (HL.forceCancelJob @payload (primaryKey parent))
           waitUntil 10_000 $ (== 2) . length <$> readIORef cancelledRef
-          threadDelay 300_000
+          threadDelay settleMicros
 
       cancelled <- readIORef cancelledRef
       cancelled `shouldMatchList` map primaryKey children
@@ -2210,7 +2274,7 @@ listenerSpec TestBackend {schema, connStr, mkSimple, mkEnv, pollOnly, mkHandler,
         config :: WorkerConfig m payload <- runM env $ transactionalWorkerConfig 1 (mkHandler (bumping ref))
         let workerConfig = config {workerCount = 1, pollInterval = 300, jitter = NoJitter}
         withAsync (runM env $ runWorkerPool workerConfig) $ \_ -> do
-          threadDelay 1_000_000
+          threadDelay listenerStartMicros
           runM env $ void $ HL.insertJob $ setGroupKey (Just "g1") $ defaultJob (mkSimple "notify")
           waitUntil 5_000 $ (== 1) <$> readIORef ref
           readIORef ref >>= (`shouldBe` 1)
@@ -2220,9 +2284,9 @@ listenerSpec TestBackend {schema, connStr, mkSimple, mkEnv, pollOnly, mkHandler,
         config :: WorkerConfig m payload <- runM env $ transactionalWorkerConfig 1 (mkHandler (bumping ref))
         let workerConfig = config {workerCount = 1, pollInterval = 300, jitter = NoJitter}
         withAsync (runM env $ runWorkerPool workerConfig) $ \_ -> do
-          threadDelay 1_000_000
+          threadDelay listenerStartMicros
           terminateBackendsMatching connStr ("LISTEN%" <> schema <> "%")
-          threadDelay 3_000_000
+          threadDelay reconnectMicros
           runM env $ void $ HL.insertJob $ setGroupKey (Just "g1") $ defaultJob (mkSimple "after-reconnect")
           waitUntil 8_000 $ (== 1) <$> readIORef ref
           readIORef ref >>= (`shouldBe` 1)
@@ -2336,15 +2400,15 @@ multiQueueListenerSpec TestBackend {table = tableA, connStr, mkSimple = mkPayloa
             poolB = cfgB {workerCount = 1, pollInterval = 300, jitter = NoJitter}
         withAsync (runM env $ runWorkerPool poolA) $ \_ ->
           withAsync (runM env $ runWorkerPool poolB) $ \_ -> do
-            threadDelay 1_000_000
+            threadDelay listenerStartMicros
             runM env $ void $ HL.insertJob (defaultJob (mkPayloadA "a1"))
             waitUntil 5_000 $ (== 1) <$> readIORef refA
-            threadDelay 500_000
+            threadDelay strayWakeMicros
             readIORef refB >>= (`shouldBe` 0)
 
             runM env $ void $ HL.insertJob (defaultJob (mkPayloadB "b1"))
             waitUntil 5_000 $ (== 1) <$> readIORef refB
-            threadDelay 500_000
+            threadDelay strayWakeMicros
             readIORef refA >>= (`shouldBe` 1)
 
       it "routes a NOTIFY only to the owning queue's channel handler" $ \env ->
@@ -2361,7 +2425,7 @@ multiQueueListenerSpec TestBackend {table = tableA, connStr, mkSimple = mkPayloa
             waitUntil 5_000 (atomically ready)
             notifyChannel connStr (Schema.notificationChannelForTable tableA)
             waitUntil 5_000 $ (== 1) <$> readIORef refA
-            threadDelay 500_000
+            threadDelay strayWakeMicros
             readIORef refA >>= (`shouldBe` 1)
             readIORef refB >>= (`shouldBe` 0)
 

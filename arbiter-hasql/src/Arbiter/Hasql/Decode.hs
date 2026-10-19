@@ -3,8 +3,7 @@ module Arbiter.Hasql.Decode
   ( hasqlRowDecoder
   ) where
 
-import Arbiter.Core.Codec (Col (..), NullCol (..), RowCodec, runCodec)
-import Arbiter.Core.Job.Types.Internal (Stored (..))
+import Arbiter.Core.MonadArbiter (Col (..), NullCol (..), RowCodec, Stored (..), runCodec)
 import Hasql.Decoders qualified as D
 
 -- | Decode all rows through the codec.

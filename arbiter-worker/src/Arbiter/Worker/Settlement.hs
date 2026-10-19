@@ -87,7 +87,7 @@ poolEffects config statements consumeSpan = do
                 let jobsToAck = map fst pairs
                 acked <- Set.fromList <$> Ops.ackJobsBatchWith (Ops.statementsAck statements) jobsToAck
                 let ackedJob = (`Set.member` acked) . Job.primaryKey
-                storeEncodedResults schemaName (filter (ackedJob . fst) pairs)
+                storeEncodedResults (filter (ackedJob . fst) pairs)
                 pure (partition ackedJob jobsToAck)
           , effectFail = \(UnliftIO runIn) failure job ->
               runIn $ withDbTransaction $ handleJobFailure config Ops.TakeLocks failure job

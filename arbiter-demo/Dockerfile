@@ -1,8 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# Multi-stage build for the arbiter demo server. Build context is the repo
-# root (the binary embeds arbiter-servant-ui/static at compile time via
-# embedDir, and cabal.project references every local package).
+# Multi-stage build for the arbiter demo server. Build context is the repo root.
 #
 #   docker build -f arbiter-demo/Dockerfile -t arbiter-demo .
 

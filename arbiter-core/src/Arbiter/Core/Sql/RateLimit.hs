@@ -29,6 +29,7 @@ import NeatInterpolation (text)
 
 import Arbiter.Core.Admission (effectivePolicyCol)
 import Arbiter.Core.Codec (rateLimitBucketCodec, rateLimitPolicyViewCodec)
+import Arbiter.Core.Enum (showText)
 import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueTable)
 import Arbiter.Core.RateLimit.Schema (arbiterRateLimitPoliciesTable, arbiterRateLimitsTable)
 import Arbiter.Core.RateLimit.Stats (RateLimitBucketView, RateLimitPolicyView)
@@ -44,9 +45,9 @@ defaultThrottleWaitSeconds = 0.5
 -- | Add @amount@ to a key's bucket, clamped to @[0, max]@, seeding an absent bucket at
 -- full. A no-op without a policy.
 addRateLimitTokensSQL :: SchemaName -> Text -> Text -> Double -> Query ()
-addRateLimitTokensSQL schema prefix key amount =
-  let buckets = arbiterRateLimitsTable schema
-      policies = arbiterRateLimitPoliciesTable schema
+addRateLimitTokensSQL schemaName prefix key amount =
+  let buckets = arbiterRateLimitsTable schemaName
+      policies = arbiterRateLimitPoliciesTable schemaName
       effMax = effectivePolicyCol "policy" "max_tokens"
       effRefill = effectivePolicyCol "policy" "refill_amount"
       effInterval = effectivePolicyCol "policy" "interval"
@@ -75,9 +76,9 @@ addRateLimitTokensSQL schema prefix key amount =
 
 -- | Delete idle buckets that have refilled to max.
 pruneRateLimitBucketsSQL :: SchemaName -> Double -> Query ()
-pruneRateLimitBucketsSQL schema idleSeconds =
-  let buckets = arbiterRateLimitsTable schema
-      policies = arbiterRateLimitPoliciesTable schema
+pruneRateLimitBucketsSQL schemaName idleSeconds =
+  let buckets = arbiterRateLimitsTable schemaName
+      policies = arbiterRateLimitPoliciesTable schemaName
       effMax = effectivePolicyCol "policy" "max_tokens"
    in [sql|
         DELETE FROM ${buckets} bucket
@@ -90,9 +91,9 @@ pruneRateLimitBucketsSQL schema idleSeconds =
 -- | Refill a prefix's buckets to full. The fixed-window reset, which also wakes jobs,
 -- is 'Arbiter.Core.HighLevel.resetRateLimitBuckets'.
 resetRateLimitBucketsSQL :: SchemaName -> Text -> Query ()
-resetRateLimitBucketsSQL schema prefix =
-  let buckets = arbiterRateLimitsTable schema
-      policies = arbiterRateLimitPoliciesTable schema
+resetRateLimitBucketsSQL schemaName prefix =
+  let buckets = arbiterRateLimitsTable schemaName
+      policies = arbiterRateLimitPoliciesTable schemaName
       effMax = effectivePolicyCol "policy" "max_tokens"
    in [sql|
         UPDATE ${buckets} bucket
@@ -104,27 +105,27 @@ resetRateLimitBucketsSQL schema prefix =
 -- | Clear the rate-limit deferral on a prefix's throttled jobs. One statement over
 -- all given queue tables.
 wakeThrottledJobsSQL :: SchemaName -> [TableName] -> Text -> Query Int64
-wakeThrottledJobsSQL schema tableNames prefix =
-  wakeThrottledAcrossSQL [wakeThrottledBody schema tableName prefix mempty | tableName <- tableNames]
+wakeThrottledJobsSQL schemaName tableNames prefix =
+  wakeThrottledAcrossSQL [wakeThrottledBody schemaName tableName prefix mempty | tableName <- tableNames]
 
 -- | Like 'wakeThrottledJobsSQL' but for one key, after a top-up.
 wakeThrottledJobsForKeySQL :: SchemaName -> [TableName] -> Text -> Text -> Query Int64
-wakeThrottledJobsForKeySQL schema tableNames prefix key =
+wakeThrottledJobsForKeySQL schemaName tableNames prefix key =
   wakeThrottledAcrossSQL
-    [wakeThrottledBody schema tableName prefix [sql|AND rate_limit_key = #{key :: CText}|] | tableName <- tableNames]
+    [wakeThrottledBody schemaName tableName prefix [sql|AND rate_limit_key = #{key :: CText}|] | tableName <- tableNames]
 
 -- | One wake UPDATE CTE per queue table, summed.
 wakeThrottledAcrossSQL :: [Query ()] -> Query Int64
 wakeThrottledAcrossSQL bodies =
-  let named = [(T.pack ("wake_" <> show index), body) | (index, body) <- zip [0 :: Int ..] bodies]
+  let named = [("wake_" <> showText index, body) | (index, body) <- zip [0 :: Int ..] bodies]
       wakeCtes = sepBy ", " [[sql|${cteName} AS (${body} RETURNING 1)|] | (cteName, body) <- named]
       total = T.intercalate " + " [[text|(SELECT COUNT(*) FROM ${cteName})|] | (cteName, _) <- named]
    in [sql|WITH ${wakeCtes} SELECT (${total})::int8 AS @{count :: CInt8}|]
 
 -- | Shared wake UPDATE for a prefix, optionally narrowed by @keyFrag@ (e.g. one key).
 wakeThrottledBody :: SchemaName -> TableName -> Text -> Query () -> Query ()
-wakeThrottledBody schema tableName prefix keyFrag =
-  let tbl = jobQueueTable schema tableName
+wakeThrottledBody schemaName tableName prefix keyFrag =
+  let tbl = jobQueueTable schemaName tableName
    in [sql|
         UPDATE ${tbl}
         SET not_visible_until = NOW(), throttled_until = NULL, updated_at = NOW()
@@ -159,16 +160,16 @@ refilledBucketTokens =
 
 -- | Whether a rate-limit policy exists for a prefix.
 rateLimitPolicyExistsSQL :: SchemaName -> Text -> Query Bool
-rateLimitPolicyExistsSQL schema prefix =
-  let tbl = arbiterRateLimitPoliciesTable schema
+rateLimitPolicyExistsSQL schemaName prefix =
+  let tbl = arbiterRateLimitPoliciesTable schemaName
    in [sql|SELECT EXISTS (SELECT 1 FROM ${tbl} WHERE prefix_id = #{prefix :: CText}) AS @{result :: CBool}|]
 
 -- | The policy views, every policy or the one a prefix names.
 rateLimitPoliciesSQL :: SchemaName -> [TableName] -> Maybe Text -> Query RateLimitPolicyView
-rateLimitPoliciesSQL schema tableNames mPrefix =
-  let policies = arbiterRateLimitPoliciesTable schema
-      buckets = arbiterRateLimitsTable schema
-      throttledPerTable = unionAllOverQueueTables schema tableNames $ \tableName table ->
+rateLimitPoliciesSQL schemaName tableNames mPrefix =
+  let policies = arbiterRateLimitPoliciesTable schemaName
+      buckets = arbiterRateLimitsTable schemaName
+      throttledPerTable = unionAllOverQueueTables schemaName tableNames $ \tableName table ->
         let queue = textLiteral tableName
          in [text|
           SELECT ${queue} AS queue, rate_limit_prefix AS prefix, COUNT(*)::int8 AS throttled
@@ -221,9 +222,9 @@ rateLimitPoliciesSQL schema tableNames mPrefix =
 -- | List a prefix's buckets with effective max and lazily-refilled fill fraction,
 -- paginated.
 listRateLimitBucketsSQL :: SchemaName -> Text -> Int64 -> Int64 -> Query RateLimitBucketView
-listRateLimitBucketsSQL schema prefix limit offset =
-  let policies = arbiterRateLimitPoliciesTable schema
-      buckets = arbiterRateLimitsTable schema
+listRateLimitBucketsSQL schemaName prefix limit offset =
+  let policies = arbiterRateLimitPoliciesTable schemaName
+      buckets = arbiterRateLimitsTable schemaName
       effMax = effectivePolicyCol "policy" "max_tokens"
    in rows
         rateLimitBucketCodec
@@ -248,8 +249,8 @@ listRateLimitBucketsSQL schema prefix limit offset =
 -- @Just v@ writes @v@ (a null clears the override back to the default).
 updateRateLimitPolicyOverridesSQL
   :: SchemaName -> Maybe (Maybe Double) -> Maybe (Maybe Double) -> Maybe (Maybe Double) -> Text -> Query ()
-updateRateLimitPolicyOverridesSQL schema mMax mRefill mInterval prefix =
-  let policies = arbiterRateLimitPoliciesTable schema
+updateRateLimitPolicyOverridesSQL schemaName mMax mRefill mInterval prefix =
+  let policies = arbiterRateLimitPoliciesTable schemaName
       setMax = isJust mMax
       maxTokens = join mMax
       setRefill = isJust mRefill

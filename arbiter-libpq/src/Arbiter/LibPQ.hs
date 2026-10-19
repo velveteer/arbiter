@@ -39,7 +39,7 @@ connectDriver =
 libPQListenConn :: PQ.Connection -> ListenConn
 libPQListenConn conn =
   ListenConn
-    { listenNotifies = fmap (fmap (Notification <$> PQ.notifyRelname <*> PQ.notifyExtra)) (PQ.notifies conn)
+    { listenNotifies = fmap (Notification <$> PQ.notifyRelname <*> PQ.notifyExtra) <$> PQ.notifies conn
     , listenSocket = PQ.socket conn
     , listenConsumeInput = PQ.consumeInput conn
     , listenExec = PQ.exec conn >=> execOutcome PQ.CommandOk PQ.resultStatus

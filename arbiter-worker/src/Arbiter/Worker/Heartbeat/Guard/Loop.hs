@@ -288,9 +288,10 @@ settle guard issued currentTime byJob (entry, live) = do
       cancelledJobs = [jobId | JobCancelled jobId <- verdicts]
       stolenJobs = [jobId | JobReclaimed jobId _ _ <- verdicts]
       gone = Set.fromList [jobId | JobGone jobId <- verdicts]
-      extended = filter (maybe False renewed . verdictOf) pendingLive
+      isRenewed = any renewed . verdictOf
+      extended = filter isRenewed pendingLive
       leaseFrom status
-        | all (maybe False renewed . verdictOf) pendingLive = addTime (configTimeout config) issued
+        | all isRenewed pendingLive = addTime (configTimeout config) issued
         | otherwise = leaseAt status
       cadence lease = addTime (heartbeatWait (configInterval config) True (lease `diffTime` issued)) issued
       -- A first sighting can be an ack not yet recorded. The next extend confirms it.

@@ -25,7 +25,6 @@ module Arbiter.Servant.Server
   ) where
 
 import Arbiter.Core.CronSchedule qualified as CS
-import Arbiter.Core.Exceptions (throwParsing)
 import Arbiter.Core.Health qualified as Health
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema qualified as Schema
@@ -172,6 +171,14 @@ runDb config = liftIO . serverRun config
 -- | 404 body for a job id that matches no row.
 jobNotFound :: LBS.ByteString
 jobNotFound = "Job not found"
+
+-- | 404 body for a DLQ id that matches no row.
+dlqJobNotFound :: LBS.ByteString
+dlqJobNotFound = "DLQ job not found"
+
+-- | 404 body for an archive id that matches no row.
+archivedJobNotFound :: LBS.ByteString
+archivedJobNotFound = "Archived job not found"
 
 -- | Answer a handler that decided its own error.
 noContentOr :: Either ServerError () -> Handler NoContent
@@ -368,7 +375,7 @@ insertJobHandler tableName config (ApiJobWrite jobWrite) = do
       (Just fresh, _) -> pure (Right fresh)
       (Nothing, Just (IgnoreDuplicate duplicateKey)) ->
         maybe (Left vanished) Right
-          <$> (Ops.getJobByDedupKey schemaName tableName duplicateKey >>= traverse (either throwParsing pure . Ops.decodeRow))
+          <$> (Ops.getJobByDedupKey schemaName tableName duplicateKey >>= traverse Ops.typedRow)
       _ -> pure (Left blocked)
   either throwError (pure . JobResponse) found
   where
@@ -553,7 +560,7 @@ dlqServer table config =
     { listDLQ = listDLQHandler @registry @payload table config
     , retryFromDLQ = retryFromDLQHandler @registry @payload table config
     , deleteDLQ = deleteDLQHandler @registry table config
-    , deleteDLQBatch = deleteDLQBatchHandler @registry table config
+    , deleteDLQBatch = deleteBatchHandler config (`Ops.deleteDLQJobsBatch` table)
     }
 
 -- | List DLQ jobs with pagination and composable filters.
@@ -604,7 +611,7 @@ retryFromDLQHandler tableName config dlqId edit =
     missing = refuse <$> Ops.dlqJobExists schemaName tableName dlqId
     refuse exists
       | exists = Left err409 {errBody = "Cannot retry: parent job no longer exists (not in queue or DLQ)"}
-      | otherwise = Left err404 {errBody = "DLQ job not found"}
+      | otherwise = Left err404 {errBody = dlqJobNotFound}
 
 -- | Delete a job from DLQ permanently.
 deleteDLQHandler
@@ -615,19 +622,16 @@ deleteDLQHandler
   -> Int64
   -> Handler NoContent
 deleteDLQHandler tableName config dlqId =
-  mutateOr404 config "DLQ job not found" $ \schemaName -> Ops.deleteDLQJob schemaName tableName dlqId
+  mutateOr404 config dlqJobNotFound $ \schemaName -> Ops.deleteDLQJob schemaName tableName dlqId
 
--- | Batch delete jobs from DLQ permanently.
-deleteDLQBatchHandler
-  :: forall registry m
-   . (HasRegistry m registry)
-  => Text
-  -> ArbiterServerConfig m registry
+-- | Delete a batch of rows by primary key with this statement.
+deleteBatchHandler
+  :: ArbiterServerConfig m registry
+  -> (Text -> [Int64] -> m Int64)
   -> BatchDeleteRequest
   -> Handler BatchDeleteResponse
-deleteDLQBatchHandler tableName config (BatchDeleteRequest dlqIds) = do
-  let schemaName = serverSchema config
-  rowsDeleted <- runDb config $ Ops.deleteDLQJobsBatch schemaName tableName dlqIds
+deleteBatchHandler config deleteRows (BatchDeleteRequest rowIds) = do
+  rowsDeleted <- runDb config $ deleteRows (serverSchema config) rowIds
   pure $ BatchDeleteResponse {deleted = rowsDeleted}
 
 -- | Archive API handler for a specific table.
@@ -642,7 +646,7 @@ archiveServer table config =
     { listArchive = listArchiveHandler @registry @payload table config
     , reEnqueueArchive = reEnqueueArchiveHandler @registry @payload table config
     , deleteArchive = deleteArchiveHandler @registry table config
-    , deleteArchiveBatch = deleteArchiveBatchHandler @registry table config
+    , deleteArchiveBatch = deleteBatchHandler config (`Ops.deleteArchiveJobsBatch` table)
     }
 
 -- | List archived jobs with pagination and composable filters.
@@ -690,7 +694,7 @@ reEnqueueArchiveHandler tableName config archiveId edit = do
   let schemaName = serverSchema config
       reEnqueue = Ops.reEnqueueFromArchiveWithPayload schemaName tableName archiveId (editPayload <$> edit)
   NoContent
-    <$ orNotFound config (withDbTransaction (reEnqueue >>= traverse (Ops.typedRow @payload))) "Archived job not found"
+    <$ orNotFound config (withDbTransaction (reEnqueue >>= traverse (Ops.typedRow @payload))) archivedJobNotFound
 
 -- | Purge one archived job by its archive primary key.
 deleteArchiveHandler
@@ -701,20 +705,7 @@ deleteArchiveHandler
   -> Int64
   -> Handler NoContent
 deleteArchiveHandler tableName config archiveId =
-  mutateOr404 config "Archived job not found" $ \schemaName -> Ops.deleteArchiveJob schemaName tableName archiveId
-
--- | Bulk-purge archived jobs by archive primary key.
-deleteArchiveBatchHandler
-  :: forall registry m
-   . (HasRegistry m registry)
-  => Text
-  -> ArbiterServerConfig m registry
-  -> BatchDeleteRequest
-  -> Handler BatchDeleteResponse
-deleteArchiveBatchHandler tableName config (BatchDeleteRequest archiveIds) = do
-  let schemaName = serverSchema config
-  rowsDeleted <- runDb config $ Ops.deleteArchiveJobsBatch schemaName tableName archiveIds
-  pure $ BatchDeleteResponse {deleted = rowsDeleted}
+  mutateOr404 config archivedJobNotFound $ \schemaName -> Ops.deleteArchiveJob schemaName tableName archiveId
 
 -- | Stats API handler for a specific table.
 statsServer
@@ -753,9 +744,8 @@ getAllStatsHandler
   -> [(Text, [Text])]
   -> Handler AllStatsResponse
 getAllStatsHandler config queueKinds =
-  liftIO $ cachedFor (statsCacheTtl config) (allQueueStatsCache config) $ do
-    let schemaName = serverSchema config
-    AllStatsResponse <$> runDb config (Ops.getAllQueueStats schemaName queueKinds)
+  cachedRead config (allQueueStatsCache config) AllStatsResponse $
+    Ops.getAllQueueStats (serverSchema config) queueKinds
 
 -- | Table API handlers for a specific table.
 tableServer
@@ -979,12 +969,10 @@ setQueuePausedHandler
   -> Text
   -> Bool
   -> Handler NoContent
-setQueuePausedHandler config queue pauseFlag = do
-  let schemaName = serverSchema config
-  void . runDb config $ Ops.setQueuePaused schemaName queue pauseFlag
+setQueuePausedHandler config queue pauseFlag =
   -- The landing overview shows each queue's paused flag.
-  invalidate (allQueueStatsCache config)
-  NoContent <$ invalidate (queueStatsCache config)
+  invalidating (queueStatsCache config) . invalidating (allQueueStatsCache config) $
+    NoContent <$ runDb config (Ops.setQueuePaused (serverSchema config) queue pauseFlag)
 
 -- | Serve the SSE stream as a raw WAI application. Each client registers on the
 -- backend's shared listener for the response's lifetime and gets a @connected@
@@ -1087,7 +1075,7 @@ updateCronScheduleHandler config name update = do
 
   case result of
     Left err -> throwError err400 {errBody = LBS.fromStrict (encodeUtf8 err)}
-    Right Nothing -> throwError err404 {errBody = "Cron schedule not found"}
+    Right Nothing -> throwError err404 {errBody = cronScheduleNotFound}
     Right (Just row) -> flip cronScheduleView row <$> liftIO getCurrentTime
 
 -- | Request an out-of-band run of a cron schedule. A disabled schedule is
@@ -1102,7 +1090,7 @@ runCronScheduleHandler config name = do
   let schemaName = serverSchema config
   outcome <- runDb config $ Ops.requestCronRun schemaName name
   case outcome of
-    Ops.RunReqNotFound -> throwError err404 {errBody = "Cron schedule not found"}
+    Ops.RunReqNotFound -> throwError err404 {errBody = cronScheduleNotFound}
     Ops.RunReqDisabled -> throwError err409 {errBody = "Cron schedule is disabled"}
     Ops.RunReqPending -> throwError err409 {errBody = "Cron schedule already has a run pending"}
     Ops.RunReqStamped -> pure NoContent
@@ -1202,7 +1190,7 @@ probeHealth config = cachedFor healthCacheTtl (healthCache config) $ do
   started <- getCurrentTime
   probed <- tryAny (timeout healthProbeMicros (runDb config Health.getPgDbHealth))
   finished <- getCurrentTime
-  let elapsedMs = realToFrac (diffUTCTime finished started) * 1000
+  let elapsedMs = realToFrac (diffUTCTime finished started) * millisPerSecond
       reached = fromRight Nothing probed
   pure
     HealthResponse
@@ -1222,6 +1210,10 @@ healthCacheTtl = 2
 -- string needs its own @connect_timeout@.
 healthProbeMicros :: Int
 healthProbeMicros = 5_000_000
+
+-- | Milliseconds in one second.
+millisPerSecond :: Double
+millisPerSecond = 1000
 
 -- | Stats are read live by default.
 defaultStatsCacheTtl :: NominalDiffTime
@@ -1281,6 +1273,10 @@ invalidate cell = liftIO $ atomically $ modifyTVar' (cacheEntries cell) $ \(epoc
 invalidating :: CacheCell a -> Handler b -> Handler b
 invalidating cell mutation = mutation <* invalidate cell
 
+-- | Run a read through a stats-TTL cache cell and wrap its result.
+cachedRead :: ArbiterServerConfig m registry -> CacheCell a -> (b -> a) -> m b -> Handler a
+cachedRead config cell wrap action = liftIO $ cachedFor (statsCacheTtl config) cell (wrap <$> runDb config action)
+
 -- | List policies with bucket stats and currently-throttled job counts.
 listRateLimitsHandler
   :: forall registry m
@@ -1288,9 +1284,11 @@ listRateLimitsHandler
   => ArbiterServerConfig m registry
   -> Handler RateLimitPoliciesResponse
 listRateLimitsHandler config =
-  liftIO $ cachedFor (statsCacheTtl config) (rateLimitPoliciesCache config) $ do
-    views <- runDb config HL.listRateLimitPolicies
-    pure $ RateLimitPoliciesResponse {policies = views}
+  cachedRead
+    config
+    (rateLimitPoliciesCache config)
+    (\views -> RateLimitPoliciesResponse {policies = views})
+    HL.listRateLimitPolicies
 
 -- | List a prefix's buckets with fill levels, paginated (default 100, max 1000).
 listRateLimitBucketsHandler
@@ -1326,6 +1324,10 @@ orNotFound config action notFound =
 -- | 404 body for a rate-limit prefix that matches no policy.
 rateLimitPolicyNotFound :: LBS.ByteString
 rateLimitPolicyNotFound = "Rate-limit policy not found"
+
+-- | 404 body for a cron name that matches no schedule.
+cronScheduleNotFound :: LBS.ByteString
+cronScheduleNotFound = "Cron schedule not found"
 
 -- | Set or clear a policy's override params, then return the updated view.
 updateRateLimitPolicyHandler
@@ -1420,9 +1422,11 @@ listConcurrencyHandler
   => ArbiterServerConfig m registry
   -> Handler ConcurrencyPoliciesResponse
 listConcurrencyHandler config =
-  liftIO $ cachedFor (statsCacheTtl config) (concurrencyPoliciesCache config) $ do
-    views <- runDb config HL.listConcurrencyPolicies
-    pure $ ConcurrencyPoliciesResponse {policies = views}
+  cachedRead
+    config
+    (concurrencyPoliciesCache config)
+    (\views -> ConcurrencyPoliciesResponse {policies = views})
+    HL.listConcurrencyPolicies
 
 -- | List a prefix's keys with in-flight fill levels, paginated (default 100, max 1000).
 listConcurrencyKeysHandler
@@ -1446,7 +1450,7 @@ updateConcurrencyPolicyHandler
 updateConcurrencyPolicyHandler config prefix upd@(ConcurrencyPolicyUpdate mLimit) = do
   when (any (< 0) (join mLimit)) $ throwError err400 {errBody = "override limit must be >= 0"}
   -- An absent overrideLimit reads the view without rewriting the row.
-  let action = traverse_ (\_ -> HL.updateConcurrencyPolicyOverrides prefix upd) mLimit >> HL.getConcurrencyPolicy prefix
+  let action = when (isJust mLimit) (void (HL.updateConcurrencyPolicyOverrides prefix upd)) >> HL.getConcurrencyPolicy prefix
   invalidating (concurrencyPoliciesCache config) $
     orNotFound config action "Concurrency policy not found"
 

@@ -47,7 +47,9 @@ import NeatInterpolation (text)
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry, SpecName, SpecPayload)
 import Arbiter.Core.Selector (Selector, field, usePolicy)
 
--- Keys -----------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
+-- Keys
+-- ---------------------------------------------------------------------------
 
 -- | The stored key text, @prefix:suffix@.
 prefixedKeyText :: Text -> Text -> Text
@@ -65,7 +67,9 @@ prefixedKeyParseJSON name mkKey = withObject name $ \obj -> mkKey <$> obj .: "pr
 splitPrefixedSuffix :: Text -> Text -> Text
 splitPrefixedSuffix prefix key = T.drop (T.length prefix + 1) key
 
--- Policies and selectors -----------------------------------------------------
+-- ---------------------------------------------------------------------------
+-- Policies and selectors
+-- ---------------------------------------------------------------------------
 
 -- | A policy that admits jobs under a named prefix.
 class (Ord p) => AdmissionPolicy p where
@@ -86,7 +90,9 @@ selectBy
 selectBy mkKey pol suffix =
   (\policy suffixText -> Just (mkKey (policyPrefixOf policy) suffixText)) <$> usePolicy pol <*> field suffix
 
--- SQL fragments ---------------------------------------------------------------
+-- ---------------------------------------------------------------------------
+-- SQL fragments
+-- ---------------------------------------------------------------------------
 
 -- | The effective (override-or-default) column of the policy at @alias@.
 effectivePolicyCol :: Text -> Text -> Text
@@ -104,7 +110,9 @@ policyUpsertSQL policiesTable prefixLit defaults =
       setClause = T.intercalate ", " (map (excludedAssignment . fst) defaults)
    in [text|INSERT INTO ${policiesTable} (prefix_id, ${names}) VALUES (${prefixLit}, ${values}) ON CONFLICT (prefix_id) DO UPDATE SET ${setClause};|]
 
--- Registry reflection --------------------------------------------------------
+-- ---------------------------------------------------------------------------
+-- Registry reflection
+-- ---------------------------------------------------------------------------
 
 -- | The policies of kind @p@ a single payload's selector can reach. Each feature
 -- provides an instance from its t'Arbiter.RateLimit.HasRateLimit' \/

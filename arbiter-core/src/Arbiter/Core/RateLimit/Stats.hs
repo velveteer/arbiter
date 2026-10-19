@@ -12,14 +12,14 @@ module Arbiter.Core.RateLimit.Stats
   , RateLimitPolicyUpdate (..)
   ) where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.:?), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.:!), (.:?), (.=))
 import Data.Aeson qualified as Aeson
 import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Time (UTCTime)
 import GHC.Generics (Generic)
 
-import Arbiter.Core.Json (explicitOptionalField, patchOptions)
+import Arbiter.Core.Json (patchOptions)
 
 -- | A policy with its default and override params plus live bucket and throttle
 -- stats. Each effective param is its @override*@ field when set, else its @default*@ field.
@@ -114,6 +114,6 @@ instance ToJSON RateLimitPolicyUpdate where
 instance FromJSON RateLimitPolicyUpdate where
   parseJSON = withObject "RateLimitPolicyUpdate" $ \obj ->
     RateLimitPolicyUpdate
-      <$> explicitOptionalField obj "overrideMaxTokens"
-      <*> explicitOptionalField obj "overrideRefillAmount"
-      <*> explicitOptionalField obj "overrideInterval"
+      <$> obj .:! "overrideMaxTokens"
+      <*> obj .:! "overrideRefillAmount"
+      <*> obj .:! "overrideInterval"

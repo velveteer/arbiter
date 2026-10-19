@@ -101,7 +101,6 @@ import Data.Aeson
   , object
   , pairs
   , withObject
-  , (.!=)
   , (.:)
   , (.:?)
   , (.=)
@@ -232,9 +231,9 @@ instance (FromJSON payload) => FromJSON (JobRead payload) where
       <*> obj .:? "parentId"
       <*> obj .:? "parentState"
       <*> (toTraceContext <$> obj .:? "traceparent" <*> obj .:? "tracestate")
-      <*> obj .:? "suspended" .!= False
+      <*> obj .: "suspended"
       <*> obj .:? "claimedBy"
-      <*> obj .:? "claimSeq" .!= 0
+      <*> obj .: "claimSeq"
       <*> obj .:? "archiveFor"
       <*> (PayloadKeys <$> obj .:? "kind" <*> obj .:? "rateLimit" <*> obj .:? "concurrency")
 

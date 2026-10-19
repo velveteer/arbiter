@@ -19,10 +19,10 @@ import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
 import Arbiter.Test.Fixtures (QueueAPayload (..), QueueBPayload (..), WorkerTestPayload (..))
 import Arbiter.Test.Poll (bumpRef, waitUntil, withLinkedAsync)
 import Arbiter.Test.Setup (addQueueTable, cleanupData, cleanupOnce, createPoolOf, createSharedPool, setupOnce)
+import Arbiter.Test.Worker qualified as TestKit
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
 import Arbiter.Worker.Config (WorkerConfig (..), transactionalWorkerConfig)
-import Arbiter.Worker.TestKit qualified as TestKit
 import Control.Concurrent (threadDelay)
 import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
@@ -44,6 +44,10 @@ import Arbiter.Simple
   , runSimpleDb
   , useDedicatedListener
   )
+
+-- | A pause for the listener to subscribe.
+listenerStartMicros :: Int
+listenerStartMicros = 1_000_000
 
 -- | Build the schema and one env over a shared pool, then run a suite over the backend.
 withSimpleBackend
@@ -115,7 +119,7 @@ dedicatedListenerSpec connStr =
       config <- transactionalWorkerConfig 1 handler
       let workerConfig = config {workerCount = 1, pollInterval = 300, jitter = NoJitter}
       withLinkedAsync (runSimpleDb env $ runWorkerPool workerConfig) $ \_ -> do
-        threadDelay 1_000_000
+        threadDelay listenerStartMicros
         runSimpleDb env
           $ void
           $ HL.insertJob

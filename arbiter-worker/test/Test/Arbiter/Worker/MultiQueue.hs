@@ -19,7 +19,7 @@ import Arbiter.Worker
   , runSelectedWorkerPools
   , transactionalWorkerConfig
   )
-import Test.Arbiter.Worker.Fixtures (WorkerTestPayload)
+import Test.Arbiter.Worker.Fixtures (TaskPayload)
 
 newtype FailingDb a = FailingDb {runFailingDb :: IO a}
   deriving newtype (Applicative, Functor, Monad, MonadFail, MonadIO, MonadUnliftIO)
@@ -28,7 +28,7 @@ data PoolFailure = PoolFailure
   deriving stock (Eq, Show)
   deriving anyclass (Exception)
 
-type FailingRegistry = '[Queue "failing_queue" WorkerTestPayload]
+type FailingRegistry = '[Queue "failing_queue" TaskPayload]
 
 instance MonadArbiter FailingDb where
   type RegistryOf FailingDb = FailingRegistry
@@ -46,14 +46,14 @@ spec :: Spec
 spec =
   describe "multi-pool lifecycle" $ do
     it "rejects selected queues without a configured pool" $ do
-      let handler :: JobHandler FailingDb WorkerTestPayload ()
+      let handler :: JobHandler FailingDb TaskPayload ()
           handler _ = pure ()
       config <- transactionalWorkerConfig 1 handler
       runFailingDb (runSelectedWorkerPools ["missing_queue"] [namedWorkerPool config])
         `shouldThrow` (\(WorkerPoolSelectionException message) -> message == "No worker pool configured for: missing_queue")
 
     it "rethrows the first pool failure after winding down its peers" $ do
-      let handler :: JobHandler FailingDb WorkerTestPayload ()
+      let handler :: JobHandler FailingDb TaskPayload ()
           handler _ = pure ()
       first <- transactionalWorkerConfig 1 handler
       peer <- transactionalWorkerConfig 1 handler

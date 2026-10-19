@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 
--- | Covers two paths 'Arbiter.Worker.TestKit.workerSpec' cannot reach. One is a
+-- | Covers two paths 'Arbiter.Test.Worker.workerSpec' cannot reach. One is a
 -- plain non-@Maybe@ result type. The other is a @Queue@ entry whose
 -- 'Arbiter.Core.ResultOf' is @()@.
 module Test.Arbiter.Simple.PlainResult (spec) where

@@ -88,12 +88,6 @@ module Arbiter.Servant.Types
   , ConcurrencyPolicyUpdate (..)
   , PgDbHealth (..)
   , GroupSummary (..)
-
-    -- * Internal
-
-    -- | Internal to the arbiter packages. Not covered by the PVP.
-  , bodylessContentType
-  , jobLeasePairs
   ) where
 
 import Arbiter.Core.Concurrency.Stats
@@ -247,7 +241,7 @@ newtype Items a = Items
   { items :: [a]
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving (FromJSON, ToJSON) via Generically (Items a)
 
 -- | A page of archived jobs.
 type ArchiveResponse payload = Page (Archive.ArchiveJob (Stored payload))
@@ -488,7 +482,7 @@ newtype BatchInsertRequest payload = BatchInsertRequest
   { jobs :: [ApiJobWrite payload]
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving (FromJSON, ToJSON) via Generically (BatchInsertRequest payload)
 
 -- | Response body for batch job insert.
 data BatchInsertResponse payload = BatchInsertResponse

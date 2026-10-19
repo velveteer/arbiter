@@ -39,7 +39,6 @@ import UnliftIO
   , checkSTM
   , liftIO
   , readTVar
-  , readTVarIO
   , registerDelay
   , tryAny
   , writeTVar
@@ -47,7 +46,7 @@ import UnliftIO
 
 import Arbiter.Worker.Cron.Types
 import Arbiter.Worker.Logger (FailureGates, LogConfig, LogLevel (..), newFailureGates, tryLog, tryReportedOn)
-import Arbiter.Worker.WorkerState (WorkerState (..))
+import Arbiter.Worker.WorkerState (WorkerState (..), isShuttingDown)
 
 -- | Upsert the default expression, overlap, timezone and initial enabled flag of
 -- each 'CronJob' into the @cron_schedules@ table. Preserves user overrides. An
@@ -89,7 +88,7 @@ runCronScheduler logCfg stateVar runNowVar schemaName queueName jobs = do
   initCronSchedules logCfg queueName jobs
   cronLog <- newCronLog logCfg
   startupNow <- liftIO getCurrentTime
-  shuttingDown <- (== ShuttingDown) <$> readTVarIO stateVar
+  shuttingDown <- atomically (isShuttingDown stateVar)
   unless shuttingDown $ do
     processRunRequests cronLog schemaName jobs startupNow
     processCronCatchUp cronLog schemaName queueName jobs startupNow
@@ -130,16 +129,15 @@ processCronCatchUp
   -> UTCTime
   -- ^ Current wall-clock time
   -> m ()
-processCronCatchUp cronLog schemaName queueName jobs now = do
-  let currentTick = truncateToMinute now
-  traverse_ (processOneCron currentTick) jobs
+processCronCatchUp cronLog schemaName queueName jobs now = traverse_ processOneCron jobs
   where
-    processOneCron currentTick cron = do
+    currentTick = truncateToMinute now
+    processOneCron cron = do
       void $ tryCron cronLog ("Cron '" <> name cron <> "' tick") $ do
         mRow <- Ops.getCronScheduleByName schemaName (name cron)
-        completed <- processOne mRow currentTick cron
+        completed <- processOne mRow cron
         when completed $ void $ Ops.touchCronChecked schemaName [name cron] currentTick
-    processOne mRow currentTick cron = case resolveAndParse cron mRow of
+    processOne mRow cron = case resolveAndParse cron mRow of
       Disabled -> pure True
       ParseError expr err -> do
         logCron cronLog Error $
@@ -214,7 +212,7 @@ enumerateCatchUpTicks (Backfill window) (Just lastChecked) currentTick =
   let truncatedLast = truncateToMinute lastChecked
       -- Truncate the window floor to a minute boundary.
       windowFloor = truncateToMinute (addUTCTime (negate window) currentTick)
-      startMinute = max (addUTCTime 60 truncatedLast) windowFloor
+      startMinute = max (addUTCTime oneMinute truncatedLast) windowFloor
    in enumMinutes startMinute currentTick
 
 -- | Result of resolving a schedule's effective config (code defaults +
@@ -278,12 +276,13 @@ processRunRequests cronLog schemaName jobs now = do
   traverse_ (fireRequested . Set.fromList) scan
   where
     fireRequested requested =
-      traverse_ (claimAndFire (truncateToMinute now)) (filter (\cron -> Set.member (name cron) requested) jobs)
+      traverse_ claimAndFire (filter (\cron -> Set.member (name cron) requested) jobs)
+    tick = truncateToMinute now
     -- Every run-now failure is reported.
-    claimAndFire tick cron = do
+    claimAndFire cron = do
       outcome <- tryAny . withDbTransaction $ do
         claimed <- Ops.claimCronRun schemaName (name cron)
-        maybe (pure NotRequested) (fireClaimed tick cron) claimed
+        maybe (pure NotRequested) (fireClaimed cron) claimed
       case outcome of
         Left exception ->
           logCron cronLog Error $ "Cron '" <> name cron <> "' run-now aborted: " <> displayEx exception
@@ -292,7 +291,7 @@ processRunRequests cronLog schemaName jobs now = do
           logCron cronLog Info $ "Cron '" <> name cron <> "' run-now fired at " <> formatMinute tick
         Right Skipped ->
           logCron cronLog Warning $ "Cron '" <> name cron <> "' run-now skipped, a job is already active"
-    fireClaimed tick cron row = do
+    fireClaimed cron row = do
       let key = case effectiveOverlapFor cron row of
             SkipOverlap -> Just (IgnoreDuplicate (skipOverlapKey (name cron)))
             AllowOverlap -> Nothing
@@ -327,7 +326,7 @@ tryCron cronLog = tryReportedOn (cronLogConfig cronLog) Error (cronLogGates cron
 mkDedupKeyFromParts :: Text -> OverlapPolicy -> UTCTime -> Text
 mkDedupKeyFromParts jobName overlapPolicy tick = case overlapPolicy of
   SkipOverlap -> skipOverlapKey jobName
-  AllowOverlap -> "arbiter_cron:" <> jobName <> ":" <> formatMinute tick
+  AllowOverlap -> skipOverlapKey jobName <> ":" <> formatMinute tick
 
 -- | The tick-independent key a 'SkipOverlap' schedule reuses. At most one of its
 -- jobs is active.
@@ -339,10 +338,10 @@ maxTickDelayMicros :: Int
 maxTickDelayMicros = 120_000_000
 
 -- | Delay in microseconds until the next minute boundary, clamped to
--- @[0, 120_000_000]@ (two minutes).
+-- zero through 'maxTickDelayMicros'.
 computeDelayMicros :: UTCTime -> Int
 computeDelayMicros now =
-  let nextMinute = truncateToMinute (addUTCTime 60 now)
+  let nextMinute = truncateToMinute (addUTCTime oneMinute now)
    in max 0 (min maxTickDelayMicros (Ops.micros (diffUTCTime nextMinute now)))
 
 -- | Why the scheduler woke.

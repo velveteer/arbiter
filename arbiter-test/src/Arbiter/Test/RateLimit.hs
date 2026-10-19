@@ -65,7 +65,6 @@ import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
-import Database.PostgreSQL.Simple (close, connectPostgreSQL)
 import GHC.Generics (Generic)
 import Hedgehog (Gen, assert, check, evalIO, forAll, property, withTests, (===))
 import Hedgehog.Gen qualified as Gen
@@ -73,7 +72,7 @@ import Hedgehog.Range qualified as Range
 import Test.Hspec
 import UnliftIO.Async (mapConcurrently)
 
-import Arbiter.Test.Setup (drainWith, execStatement, execute_)
+import Arbiter.Test.Setup (drainWith, execStatement, execute_, withConn)
 
 -- | A payload keyed by tenant, with a per-job token cost.
 data RLPayload = RLPayload
@@ -102,10 +101,8 @@ rateLimitTable = "arbiter_ratelimit_test"
 
 -- | Upsert the registry's reflected policy rows into a schema.
 setupRateLimitPolicy :: ByteString -> Text -> IO ()
-setupRateLimitPolicy connStr schema = do
-  conn <- connectPostgreSQL connStr
+setupRateLimitPolicy connStr schema = withConn connStr $ \conn ->
   traverse_ (execute_ conn . upsertRateLimitPolicyRowSQL schema) (Set.toList (registryRateLimitPolicies @RLReg))
-  close conn
 
 job :: Text -> JobWrite RLPayload
 job tenant = defaultJob (RLPayload tenant 1)

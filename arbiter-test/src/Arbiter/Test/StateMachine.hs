@@ -101,6 +101,26 @@ import UnliftIO.Async (async, link, mapConcurrently, mapConcurrently_, wait, wit
 import Arbiter.Test.Poll (bumpRef)
 import Arbiter.Test.Setup (execute_, seedConcurrencyPolicySQL, toQuery)
 
+-- | Past a 1 s lease.
+pastLeaseMicros :: Int
+pastLeaseMicros = 2_000_000
+
+-- | Past the 1 s lease of the crashed workers.
+crashedLeaseLapseMicros :: Int
+crashedLeaseLapseMicros = 1_500_000
+
+-- | Past a 1 s schedule delay.
+pastScheduleMicros :: Int
+pastScheduleMicros = 1_500_000
+
+-- | A pause for the statement to park on the held lock.
+parkMicros :: Int
+parkMicros = 300_000
+
+-- | A pause for the claim to lock its key before the holder reaches for it.
+claimReachMicros :: Int
+claimReachMicros = 600_000
+
 -- | Constraints the runner of 'stateMachineSpec' must satisfy.
 type ArbiterC m =
   ( KnownSymbol (TableForPayload SMPayload (RegistryOf m))
@@ -2155,7 +2175,7 @@ dedupReplaceStaleLeaseGuard run schema table withConn reset = do
   let job = setDedupKey (Just (ReplaceDuplicate "drsl-key")) $ defaultGroupedJob "drslg" (smPayload "drsl")
   void (run (HL.insertJob job))
   _ <- run (HL.claimNextVisibleJobsAs 1 1 (UUID.fromWords 0 0 0 1) :: sm [JobRead SMPayload])
-  threadDelay 2_000_000
+  threadDelay pastLeaseMicros
   void (run (HL.insertJob job))
   stale <-
     countQuery withConn $
@@ -2213,7 +2233,7 @@ reclaimGuard run reset = do
   let insClaimExpire group = do
         void (run (mkInsert @sm id (Just group) Nothing 0 Nothing))
         _ <- run (HL.claimNextVisibleJobs 1 1 :: sm [JobRead SMPayload])
-        threadDelay 2_000_000
+        threadDelay pastLeaseMicros
       claim1 = run (HL.claimNextVisibleJobs 1 60 :: sm [JobRead SMPayload])
   -- Through the next_due trigger path alone.
   reset
@@ -2243,7 +2263,7 @@ expiredLeaseDriftGuard run schema table withConn reset = do
   void (run (mkInsert @sm id (Just "drift-lapse") Nothing 0 Nothing))
   claimed <- run (HL.claimNextVisibleJobs 1 1 :: sm [JobRead SMPayload])
   length claimed `shouldBe` 1
-  threadDelay 2_000_000
+  threadDelay pastLeaseMicros
   driftViolations schema table withConn >>= (`shouldBe` [])
 
 -- | Deterministic checks for 'Ops.runGated'. A second caller within the interval
@@ -2293,7 +2313,7 @@ concurrentReclaimGuard run schema table withConn reset = do
     let total = length ids
     -- Claim with a 1s lease and abandon, simulating crashed workers.
     void (run (HL.claimNextVisibleJobs total 1 :: sm [JobRead SMPayload]))
-    threadDelay 1_500_000
+    threadDelay crashedLeaseLapseMicros
     -- Race workers to reclaim and ack until drained, recording every acked id.
     acked <- newIORef []
     let drain = do
@@ -2353,7 +2373,7 @@ scheduledDueGuard run reset = do
   void (run (mkInsert @sm id Nothing (Just 1) 0 Nothing))
   early <- run (HL.claimNextVisibleJobs 5 60 :: sm [JobRead SMPayload])
   length early `shouldBe` 0
-  threadDelay 1_500_000
+  threadDelay pastScheduleMicros
   due <- run (HL.claimNextVisibleJobs 5 60 :: sm [JobRead SMPayload])
   length due `shouldBe` 2
 
@@ -2471,9 +2491,9 @@ deferralLockOrderGuard run schema table withConn reset = do
   takeMVar held
   -- The ordered scan locks cap-a:s, then parks on the held cap-b:s.
   reconciler <- async (void (run (HL.reconcileConcurrencyCounts :: sm Int64)))
-  threadDelay 300_000
+  threadDelay parkMicros
   claimer <- async (run (HL.claimNextVisibleJobsAs 10 60 smWorker :: sm [JobRead SMPayload]))
-  threadDelay 300_000
+  threadDelay parkMicros
   putMVar release ()
   wait holder
   claimedJobs <- wait claimer
@@ -2523,7 +2543,7 @@ deferralClaimedByFlipGuard run schema table withConn reset = do
     PG.begin conn
     lockConcurrencyKey conn concTbl "cap-a:s"
     putMVar held ()
-    threadDelay 600_000
+    threadDelay claimReachMicros
     lockConcurrencyKey conn concTbl "cap-c:s"
     PG.commit conn
   takeMVar held

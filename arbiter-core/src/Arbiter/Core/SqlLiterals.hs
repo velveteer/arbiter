@@ -15,11 +15,13 @@ module Arbiter.Core.SqlLiterals
   , maxIdentifierBytes
   , sharedTable
   , lockGroupKeyOnConflictSQL
+  , dollarQuote
   ) where
 
 import Data.Text (Text)
 import Data.Text qualified as T
 
+import Arbiter.Core.Enum (showText)
 import Arbiter.Core.Job.Types (defaultMaxAttempts, minMaxAttempts)
 
 -- | A single-quoted SQL text literal, escaping embedded quotes.
@@ -33,12 +35,12 @@ quoteIdentifier ident = "\"" <> T.replace "\"" "\"\"" ident <> "\""
 -- | A @double precision@ literal. Non-finite values are emitted quoted and cast.
 doubleLiteral :: Double -> Text
 doubleLiteral value
-  | isNaN value || isInfinite value = "'" <> T.pack (show value) <> "'::double precision"
-  | otherwise = T.pack (show value)
+  | isNaN value || isInfinite value = "'" <> showText value <> "'::double precision"
+  | otherwise = showText value
 
 -- | An integer literal.
 intLiteral :: (Integral a) => a -> Text
-intLiteral value = T.pack (show (toInteger value))
+intLiteral value = showText (toInteger value)
 
 -- | 'defaultMaxAttempts' as a SQL literal.
 defaultMaxAttemptsSQL :: Text
@@ -64,3 +66,7 @@ sharedTable schemaName tableName = quoteIdentifier schemaName <> "." <> tableNam
 -- @DO UPDATE@ takes the lock. @WHERE FALSE@ skips the write.
 lockGroupKeyOnConflictSQL :: Text
 lockGroupKeyOnConflictSQL = "ON CONFLICT (group_key) DO UPDATE SET group_key = EXCLUDED.group_key WHERE FALSE"
+
+-- | The plpgsql function-body delimiter.
+dollarQuote :: Text
+dollarQuote = "$$"

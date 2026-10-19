@@ -12,13 +12,13 @@ module Arbiter.Core.Concurrency.Stats
   , ConcurrencyPolicyUpdate (..)
   ) where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.:?), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.:!), (.:?), (.=))
 import Data.Aeson qualified as Aeson
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 
-import Arbiter.Core.Json (explicitOptionalField, patchOptions)
+import Arbiter.Core.Json (patchOptions)
 
 -- | A concurrency policy with its default and override limits plus live key and
 -- in-flight stats. The effective cap is @overrideLimit@ when set, else @defaultLimit@.
@@ -89,4 +89,4 @@ instance ToJSON ConcurrencyPolicyUpdate where
 -- clears the override.
 instance FromJSON ConcurrencyPolicyUpdate where
   parseJSON = withObject "ConcurrencyPolicyUpdate" $ \obj ->
-    ConcurrencyPolicyUpdate <$> explicitOptionalField obj "overrideLimit"
+    ConcurrencyPolicyUpdate <$> obj .:! "overrideLimit"

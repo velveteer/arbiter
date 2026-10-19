@@ -1,5 +1,4 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_HADDOCK not-home #-}
 
 -- | Internal to the arbiter packages. Not covered by the PVP.
@@ -87,7 +86,11 @@ instance AdmissionPolicy ConcurrencyPolicy where
 -- floored at 1. Pause it with @'Arbiter.Concurrency.setConcurrencyLimit' policy {cpLimit = 0}@.
 -- The prefix must not contain @:@, the key separator. The migration enforces this.
 concurrencyPolicy :: Text -> Int32 -> ConcurrencyPolicy
-concurrencyPolicy prefix limit = ConcurrencyPolicy prefix (max 1 limit)
+concurrencyPolicy prefix limit = ConcurrencyPolicy {cpPrefix = prefix, cpLimit = max minConcurrencyLimit limit}
+
+-- | The lowest per-key limit a policy takes.
+minConcurrencyLimit :: Int32
+minConcurrencyLimit = 1
 
 -- | A selective description of the concurrency key for a payload. Evaluation
 -- returns the job key. Static inspection returns the reachable policies.

@@ -1,3 +1,5 @@
+{-# LANGUAGE LambdaCase #-}
+
 -- | Pause-aware consumer loop the dispatcher drives off the shared listener.
 module Arbiter.Worker.NotificationListener
   ( runNotificationConsumer
@@ -30,17 +32,13 @@ runNotificationConsumer readState pollDelay notifVar wakeTrigger action = do
   where
     pollMicros = Ops.micros pollDelay
 
-    loop = do
-      command <- nextCommand
-      case command of
-        Halt -> pure ()
-        PauseCmd -> do
-          next <- awaitUnpause
-          case next of
-            Halt -> pure ()
-            _ -> action Nothing *> loop
-        NotificationRecv notification -> action (Just notification) *> loop
-        TimerExpired -> action Nothing *> loop
+    loop = nextCommand >>= step
+
+    step = \case
+      Halt -> pure ()
+      PauseRecv -> awaitUnpause >>= step
+      NotificationRecv notification -> action (Just notification) *> loop
+      TimerExpired -> action Nothing *> loop
 
     nextCommand = do
       delayVar <- STM.registerDelay pollMicros
@@ -48,7 +46,7 @@ runNotificationConsumer readState pollDelay notifVar wakeTrigger action = do
         status <- readState
         case status of
           ShuttingDown -> pure Halt
-          Paused -> pure PauseCmd
+          Paused -> pure PauseRecv
           Running ->
             consumeNotification
               `STM.orElse` timerExpired delayVar
@@ -63,19 +61,15 @@ runNotificationConsumer readState pollDelay notifVar wakeTrigger action = do
           Running -> pure TimerExpired
 
     consumeNotification = do
-      mNotif <- STM.readTVar notifVar
-      case mNotif of
-        Just notification -> do
-          STM.writeTVar notifVar Nothing
-          pure (NotificationRecv notification)
-        Nothing -> STM.retrySTM
+      notification <- STM.readTVar notifVar >>= maybe STM.retrySTM pure
+      STM.writeTVar notifVar Nothing
+      pure (NotificationRecv notification)
 
-    timerExpired delayVar = do
-      isExpired <- STM.readTVar delayVar
-      if isExpired then pure TimerExpired else STM.retrySTM
+    timerExpired delayVar =
+      TimerExpired <$ (STM.readTVar delayVar >>= STM.checkSTM)
 
 data Command
   = Halt
-  | PauseCmd
+  | PauseRecv
   | NotificationRecv Notification
   | TimerExpired

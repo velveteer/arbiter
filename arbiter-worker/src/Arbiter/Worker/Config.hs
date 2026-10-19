@@ -72,7 +72,7 @@ import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.BackoffStrategy (BackoffStrategy, Jitter (..), exponentialBackoff)
 import Arbiter.Worker.Cron (CronJob)
-import Arbiter.Worker.Logger (LogConfig (..), defaultLogConfig)
+import Arbiter.Worker.Logger (LogConfig, defaultLogConfig, withIdentity)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
 -- | Which reaper op a maintenance report came from.
@@ -411,6 +411,42 @@ withMaintenance
 withMaintenance report cfg =
   cfg {onMaintenance = \operation count -> report operation count `andThen` onMaintenance cfg operation count}
 
+-- | Gap between polls when no notification arrives.
+defaultPollInterval :: NominalDiffTime
+defaultPollInterval = 5
+
+-- | Time a claimed job stays invisible to other workers.
+defaultVisibilityTimeout :: NominalDiffTime
+defaultVisibilityTimeout = 60
+
+-- | Gap between job lease renewals.
+defaultJobHeartbeatInterval :: NominalDiffTime
+defaultJobHeartbeatInterval = 30
+
+-- | Gap between worker registry heartbeats.
+defaultWorkerHeartbeatInterval :: NominalDiffTime
+defaultWorkerHeartbeatInterval = 10
+
+-- | Base of the default exponential backoff.
+defaultBackoffBase :: Double
+defaultBackoffBase = 2.0
+
+-- | Cap of the default exponential backoff.
+defaultBackoffCap :: NominalDiffTime
+defaultBackoffCap = 1_048_576
+
+-- | Time in-flight jobs get to finish at shutdown.
+defaultGracefulShutdownTimeout :: NominalDiffTime
+defaultGracefulShutdownTimeout = 30
+
+-- | Gap between reaper passes.
+defaultReaperInterval :: NominalDiffTime
+defaultReaperInterval = 300
+
+-- | Age after which a silent worker counts as stale.
+defaultWorkerStaleThreshold :: NominalDiffTime
+defaultWorkerStaleThreshold = 300
+
 -- | Gap the bucket prune and the concurrency reconcile-and-prune keep.
 defaultMaintenanceSparseInterval :: NominalDiffTime
 defaultMaintenanceSparseInterval = 3600
@@ -431,7 +467,7 @@ mkDefaultConfig
   -> m (WorkerConfig n payload)
 mkDefaultConfig workerCnt mode = do
   heartbeatTMVar <- newEmptyTMVarIO
-  shutdownTVar <- newTVarIO Running
+  stateTVar <- newTVarIO Running
   pauseTVar <- newTVarIO False
   pauseEpochTVar <- newTVarIO 0
   listenerReadyTVar <- newTVarIO False
@@ -443,40 +479,36 @@ mkDefaultConfig workerCnt mode = do
     WorkerConfig
       { workerCount = workerCnt
       , handlerMode = mode
-      , pollInterval = 5
-      , visibilityTimeout = 60
-      , jobHeartbeatInterval = 30
+      , pollInterval = defaultPollInterval
+      , visibilityTimeout = defaultVisibilityTimeout
+      , jobHeartbeatInterval = defaultJobHeartbeatInterval
       , maxJobDuration = Nothing
-      , workerHeartbeatInterval = 10
-      , backoffStrategy = exponentialBackoff 2.0 1_048_576
+      , workerHeartbeatInterval = defaultWorkerHeartbeatInterval
+      , backoffStrategy = exponentialBackoff defaultBackoffBase defaultBackoffCap
       , jitter = EqualJitter
       , observabilityHooks = defaultObservabilityHooks
       , onMaintenance = \_ _ -> pure ()
       , workerRuntime =
           WorkerRuntime
-            { runtimeStateVar = shutdownTVar
+            { runtimeStateVar = stateTVar
             , runtimePauseVar = pauseTVar
             , runtimePauseEpoch = pauseEpochTVar
             , runtimeHeartbeatSignal = heartbeatTMVar
             , runtimeListenerReadyVar = listenerReadyTVar
             }
       , livenessFile = Just livenessPath
-      , gracefulShutdownTimeout = Just 30
-      , logConfig = withWorkerIdContext uuid defaultLogConfig
+      , gracefulShutdownTimeout = Just defaultGracefulShutdownTimeout
+      , logConfig = withIdentity ("worker_id" .= uuid) defaultLogConfig
       , cronJobs = []
-      , reaperInterval = 300
+      , reaperInterval = defaultReaperInterval
       , reaperSparseInterval = defaultMaintenanceSparseInterval
       , reaperBucketIdle = defaultMaintenanceBucketIdle
       , reaperTimeout = defaultMaintenanceTimeout
       , workerId = uuid
       , workerHost = Just (T.pack host)
       , workerMetadata = Nothing
-      , workerStaleThreshold = 300
+      , workerStaleThreshold = defaultWorkerStaleThreshold
       }
-
-withWorkerIdContext :: UUID -> LogConfig -> LogConfig
-withWorkerIdContext workerId logCfg =
-  logCfg {identityContext = identityContext logCfg <> ["worker_id" .= workerId]}
 
 -- | Run\/shutdown state for a pool.
 workerStateVar :: WorkerConfig n payload -> TVar WorkerState

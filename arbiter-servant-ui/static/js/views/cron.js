@@ -255,16 +255,16 @@ export const CronView = {
               <div class="d-flex flex-column">
                 <div class="d-flex flex-wrap align-items-center gap-1">
                   <span class="font-monospace text-truncate cell-shrink" :title="expression(s)">{{ expression(s) }}</span>
-                  <span v-if="overridden(s, 'overrideExpression')" class="badge bg-info-subtle text-info-emphasis">override</span>
+                  <span v-if="overridden(s, 'overrideExpression')" :class="tone('info')" class="badge">override</span>
                 </div>
                 <small class="text-muted">{{ describe(expression(s)) }}</small>
               </div>
             </td>
-            <td>{{ overlapLabel(overlap(s)) }} <span v-if="overridden(s, 'overrideOverlap')" class="badge bg-info-subtle text-info-emphasis">override</span></td>
+            <td>{{ overlapLabel(overlap(s)) }} <span v-if="overridden(s, 'overrideOverlap')" :class="tone('info')" class="badge">override</span></td>
             <td>
               <div class="d-flex align-items-center gap-1">
                 <span class="text-truncate cell-shrink" :title="timezone(s)">{{ timezone(s) }}</span>
-                <span v-if="overridden(s, 'overrideTimezone')" class="badge bg-info-subtle text-info-emphasis">override</span>
+                <span v-if="overridden(s, 'overrideTimezone')" :class="tone('info')" class="badge">override</span>
               </div>
             </td>
             <td>
@@ -275,8 +275,8 @@ export const CronView = {
             <td class="text-nowrap" :title="formatTime(s.nextRunAt)"><tick>{{ nextRun(s) }}</tick></td>
             <td>
               <span class="text-nowrap d-block" :title="formatTime(lastFired(s).at)"><tick>{{ formatAge(lastFired(s).at, 'Never') }}</tick></span>
-              <span v-if="lastFired(s).manual" class="badge bg-secondary-subtle text-secondary-emphasis me-1" title="Last fired by a manual run, not the schedule">manual</span>
-              <span v-if="pending(s)" class="badge bg-warning-subtle text-warning-emphasis" title="A manual run is waiting for a worker pool to claim it">run pending</span>
+              <span v-if="lastFired(s).manual" :class="tone('secondary')" class="badge me-1" title="Last fired by a manual run, not the schedule">manual</span>
+              <span v-if="pending(s)" :class="tone('warning')" class="badge" title="A manual run is waiting for a worker pool to claim it">run pending</span>
             </td>
             <td class="text-nowrap" :title="formatTime(s.lastCheckedAt)"><tick>{{ formatAge(s.lastCheckedAt, 'Never') }}</tick></td>
             <td class="cell-actions">
@@ -289,7 +289,7 @@ export const CronView = {
     </div>
 
     <drawer :d="d" :title="d.cur ? d.cur.name : 'Schedule'" :status="d.cur ? (d.cur.enabled ? 'enabled' : 'disabled') : ''"
-      :status-class="d.cur?.enabled ? 'bg-success-subtle text-success-emphasis' : 'bg-secondary-subtle text-secondary-emphasis'" :sticky="edit.on">
+      :status-class="d.cur?.enabled ? tone('success') : tone('secondary')" :sticky="edit.on">
       <template #actions>
         <action-menu v-if="d.cur" :disabled="busy.has(d.cur.name)" v-slot="{ close }"><cron-menu :s="d.cur" :close="close"/></action-menu>
       </template>

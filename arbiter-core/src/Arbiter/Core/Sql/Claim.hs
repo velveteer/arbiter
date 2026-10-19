@@ -609,13 +609,13 @@ groupOverfetchFactor = 10
 -- and woken rollup parents included. Each gate's CTEs render from the 'ClaimAdmission' flags.
 -- The caller attaches the row decoder.
 claimJobsBatchedSQL :: SchemaName -> TableName -> ClaimAdmission -> Int -> Int -> NominalDiffTime -> UUID -> Query ()
-claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSeconds =
-  let tbl = jobQueueTable schema tableName
-      groupsTbl = jobQueueGroupsTable schema tableName
-      buckets = arbiterRateLimitsTable schema
-      concTbl = arbiterConcurrencyTable schema
-      concPolicies = arbiterConcurrencyPoliciesTable schema
-      rlPolicies = arbiterRateLimitPoliciesTable schema
+claimJobsBatchedSQL schemaName tableName admission batchSize maxBatches timeoutSeconds =
+  let tbl = jobQueueTable schemaName tableName
+      groupsTbl = jobQueueGroupsTable schemaName tableName
+      buckets = arbiterRateLimitsTable schemaName
+      concTbl = arbiterConcurrencyTable schemaName
+      concPolicies = arbiterConcurrencyPoliciesTable schemaName
+      rlPolicies = arbiterRateLimitPoliciesTable schemaName
       batchLimit = intLiteral batchSize
       batchBudget = intLiteral maxBatches
       timeout = doubleLiteral (realToFrac timeoutSeconds)

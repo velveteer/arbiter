@@ -3,7 +3,7 @@
 {-# OPTIONS_GHC -Wno-x-partial #-}
 
 -- | Worker lifecycle tests, instantiated for each backend.
-module Arbiter.Worker.TestKit.Lifecycle
+module Arbiter.Test.Worker.Lifecycle
   ( lifecycleSpec
   ) where
 
@@ -102,8 +102,8 @@ import UnliftIO.Async qualified as Async
 
 import Arbiter.Test.Poll (bumpRef, waitUntil, withLinkedAsync)
 import Arbiter.Test.Setup (execStatement, execute_, toQuery, withConn)
-import Arbiter.Worker.TestKit.Backend (TestBackend (..))
-import Arbiter.Worker.TestKit.Rows (reclaimJob, updateJob)
+import Arbiter.Test.Worker.Backend (TestBackend (..))
+import Arbiter.Test.Worker.Rows (reclaimJob, updateJob)
 
 -- | Worker lifecycle suite. The queue under test declares @Maybe [Text]@ as its result type.
 lifecycleSpec
@@ -236,7 +236,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
             handler _job = do
               liftIO $ atomicModifyIORef' startedRef $ \_ -> (True, ())
               -- Simulate long-running job
-              liftIO $ threadDelay 2_000_000
+              liftIO $ threadDelay inFlightJobMicros
               liftIO $ atomicModifyIORef' completedRef $ \_ -> (True, ())
 
         -- Insert a job
@@ -276,7 +276,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
             handler _job = do
               liftIO $ atomicModifyIORef' startedRef $ \_ -> (True, ())
               -- Very long running job that exceeds timeout
-              liftIO $ threadDelay 10_000_000 -- 10 seconds
+              liftIO $ threadDelay overrunJobMicros
               liftIO $ atomicModifyIORef' completedRef $ \_ -> (True, ())
 
         -- Insert a job
@@ -335,7 +335,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
           withLinkedAsync (runM env $ runWorkerPool cfg) $ \worker -> do
             waitUntil 10_000 claimWaiting
             shutdownWorkerPool cfg
-            threadDelay 500_000
+            threadDelay shutdownSignalMicros
             PG.commit lockConn
             Async.wait worker
 
@@ -347,7 +347,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
     describe "Liveness Probe" $ do
       it "creates a health check file when liveness is enabled" $ \env -> do
         let handler :: JobRead payload -> m ()
-            handler _job = liftIO $ threadDelay 500_000
+            handler _job = liftIO $ threadDelay shortHandlerMicros
 
         -- Get system temp directory and create liveness file path
         tmpDir <- Dir.getTemporaryDirectory
@@ -833,7 +833,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         let handler :: JobRead payload -> m ()
             handler _job = do
               liftIO $ writeIORef startedRef True
-              liftIO $ threadDelay 2_500_000
+              liftIO $ threadDelay drainingHandlerMicros
 
         baseConfig :: WorkerConfig m payload <- transactionalWorkerConfig 1 (mkHandler (noResult handler))
         let config =
@@ -856,7 +856,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
           shutdownWorkerPool config
           _ <- runM env $ Ops.deregisterWorker schema wid
           -- The job's lease extensions keep the registry heartbeat ticking.
-          threadDelay 1_500_000
+          threadDelay drainTicksMicros
           registered `shouldReturn` False
           Async.wait worker
 
@@ -883,7 +883,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
           waitUntil 5_000 $ (== Paused) <$> getWorkerState config
 
           -- Sit past stale_threshold_secs while paused.
-          threadDelay 2_000_000
+          threadDelay pastStaleWhilePausedMicros
           void $ runM env $ Ops.sweepStaleWorkers schema
 
           rows <- runM env $ Ops.listWorkers schema (Just table) Nothing
@@ -903,12 +903,12 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
           waitUntil 5_000 $ (== Running) <$> getWorkerState config
           waitUntil 10_000 $ getListenerReady config
           -- Let the tick the startup claim signalled pass.
-          threadDelay 2_500_000
+          threadDelay startupTickMicros
 
           void $ runM env $ Ops.deregisterWorker schema wid
           -- The pause fans out per registry row. A worker without one hears nothing.
           void $ runM env $ Ops.setQueuePaused schema table True
-          threadDelay 300_000
+          threadDelay pauseLandMicros
           getWorkerState config `shouldReturn` Running
 
           -- A claim signals the heartbeat, whose tick finds the row gone and re-registers.
@@ -926,15 +926,14 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
             registry = schema <> ".arbiter_workers"
             hidden = schema <> ".arbiter_workers_hidden"
 
-        conn <- PG.connectPostgreSQL connStr
-        execute_ conn ("ALTER TABLE " <> registry <> " RENAME TO arbiter_workers_hidden")
-        let restore = execute_ conn ("ALTER TABLE " <> hidden <> " RENAME TO arbiter_workers")
-        withLinkedAsync (runM env $ runWorkerPool config) $ \_ -> do
-          (threadDelay 500_000 *> getWorkerState config) `finally` restore >>= (`shouldBe` Paused)
-          waitUntil 5_000 $ (== Running) <$> getWorkerState config
-          rows <- runM env $ Ops.listWorkers schema (Just table) Nothing
-          map WR.workerId rows `shouldContain` [wid]
-        PG.close conn
+        withConn connStr $ \conn -> do
+          execute_ conn ("ALTER TABLE " <> registry <> " RENAME TO arbiter_workers_hidden")
+          let restore = execute_ conn ("ALTER TABLE " <> hidden <> " RENAME TO arbiter_workers")
+          withLinkedAsync (runM env $ runWorkerPool config) $ \_ -> do
+            (threadDelay registrationAttemptMicros *> getWorkerState config) `finally` restore >>= (`shouldBe` Paused)
+            waitUntil 5_000 $ (== Running) <$> getWorkerState config
+            rows <- runM env $ Ops.listWorkers schema (Just table) Nothing
+            map WR.workerId rows `shouldContain` [wid]
 
     describe "Queue pause" $ do
       it "stamps paused_at on first pause and clears it on resume" $ \env -> do
@@ -956,7 +955,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         let original = Q.pausedAt first
         original `shouldSatisfy` isJust
 
-        threadDelay 1_100_000 -- 1.1s, enough for NOW() to differ
+        threadDelay clockAdvanceMicros
         void $ runM env $ Ops.setQueuePaused schema table True
         Just second <- runM env $ Ops.getQueue schema table
         Q.pausedAt second `shouldBe` original
@@ -972,7 +971,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
           $ Ops.registerWorker schema staleWid table Nothing (Just 1) 300 Nothing
 
         -- Age both rows past the query threshold, then bump only the live row.
-        threadDelay 1_200_000
+        threadDelay pastListThresholdMicros
         void $ runM env $ Ops.heartbeatWorker schema liveWid
 
         -- No liveness filter returns both rows.
@@ -1043,12 +1042,12 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
                 void $ Ops.heartbeatWorker schema (workerId config)
                 liftIO $ takeMVar released
           withAsync holdRow $ \_ -> do
-            threadDelay 1_500_000
+            threadDelay heartbeatBlockMicros
             void $ runM env $ Ops.setQueuePaused schema table True
             waitUntil 5_000 $ (== Paused) <$> getWorkerState config
             putMVar released ()
             -- The blocked heartbeat completes here, one interval before the next.
-            threadDelay 500_000
+            threadDelay heartbeatLandMicros
             getWorkerState config `shouldReturn` Paused
 
       it "claims immediately on unpause without waiting another poll cycle" $ \env -> do
@@ -1138,7 +1137,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         let handler :: JobRead payload -> m ()
             handler _job = do
               liftIO $ writeIORef startedRef True
-              liftIO $ threadDelay 30_000_000
+              liftIO $ threadDelay stuckHandlerMicros
               liftIO $ writeIORef completedRef True
 
         baseConfig :: WorkerConfig m payload <- transactionalWorkerConfig 1 (mkHandler (noResult handler))
@@ -1192,9 +1191,9 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
           cancelled <- runM env $ Ops.forceCancelJob schema table (primaryKey job)
           cancelled `shouldBe` 1
           -- Let cancellation propagate.
-          threadDelay 500_000
+          threadDelay cancelPropagateMicros
           countBefore <- readIORef counterRef
-          threadDelay 500_000
+          threadDelay counterWindowMicros
           countAfter <- readIORef counterRef
           -- The counter freezes. A live handler bumps it millions of times in 500ms.
           countAfter `shouldBe` countBefore
@@ -1207,7 +1206,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         completedRef <- newIORef False
         let batchHandler _jobs _cbs = do
               liftIO $ writeIORef startedRef True
-              liftIO $ threadDelay 30_000_000
+              liftIO $ threadDelay stuckHandlerMicros
               liftIO $ writeIORef completedRef True
 
         let jobs =
@@ -1218,7 +1217,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         let firstId = primaryKey (head inserted)
 
         config :: WorkerConfig m payload <- batchedWorkerConfig 1 10 batchHandler
-        threadDelay 100_000
+        threadDelay beforeStartMicros
 
         withLinkedAsync (runM env $ runWorkerPool config {pollInterval = 0.1}) $ \_ -> do
           waitUntil 5_000 $ readIORef startedRef
@@ -1248,7 +1247,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         let handler :: JobRead payload -> m ()
             handler _job = do
               liftIO $ writeIORef startedRef True
-              liftIO $ threadDelay 30_000_000
+              liftIO $ threadDelay stuckHandlerMicros
               liftIO $ writeIORef completedRef True
 
         baseConfig :: WorkerConfig m payload <- transactionalWorkerConfig 1 (mkHandler (noResult handler))
@@ -1289,15 +1288,12 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
                   <> " SET claimed_by = '00000000-0000-0000-0000-000000000abc'::uuid"
                   <> ", not_visible_until = NOW() + interval '60 second', attempts = attempts + 1, claim_seq = claim_seq + 1 WHERE id = ?"
 
-        connB <- PG.connectPostgreSQL connStr
-        void $ PG.execute_ connB "BEGIN"
-        void $ PG.execute connB claimSql (Only jid)
-
-        cancelledCount <-
+        cancelledCount <- withConn connStr $ \connB -> do
+          void $ PG.execute_ connB "BEGIN"
+          void $ PG.execute connB claimSql (Only jid)
           withAsync (runM env $ Ops.forceCancelJob schema table jid) $ \cancelAsync -> do
-            threadDelay 300_000
+            threadDelay lockBlockMicros
             void $ PG.execute_ connB "COMMIT"
-            PG.close connB
             Async.wait cancelAsync
 
         cancelledCount `shouldBe` 1
@@ -1321,18 +1317,17 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
 
         updateJob connStr schema table "not_visible_until = NOW() - interval '1 second'" jid
 
-        lconn <- PG.connectPostgreSQL connStr
-        let chan = Schema.cancelNotifyChannel schema table
-        execute_ lconn ("LISTEN \"" <> chan <> "\"")
+        mNotif <- withConn connStr $ \lconn -> do
+          let chan = Schema.cancelNotifyChannel schema table
+          execute_ lconn ("LISTEN \"" <> chan <> "\"")
 
-        cancelled <- runM env $ Ops.forceCancelJob schema table jid
-        cancelled `shouldBe` 1
+          cancelled <- runM env $ Ops.forceCancelJob schema table jid
+          cancelled `shouldBe` 1
 
-        runM env (HL.getJobById @payload jid)
-          >>= (`shouldSatisfy` isNothing)
+          runM env (HL.getJobById @payload jid)
+            >>= (`shouldSatisfy` isNothing)
 
-        mNotif <- timeout 2_000_000 (getNotification lconn)
-        PG.close lconn
+          timeout notifyTimeoutMicros (getNotification lconn)
         case mNotif of
           Nothing -> expectationFailure "expected a cancel NOTIFY for the deleted lease-lapsed job"
           Just notif -> notificationData notif `shouldSatisfy` BSC.isInfixOf (BSC.pack (show jid))
@@ -1347,18 +1342,15 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         let pid = primaryKey parent
             cid = primaryKey child
 
-        connA <- PG.connectPostgreSQL connStr
-        void $ PG.execute_ connA "BEGIN"
-        void $ lockRow connA cid
-
-        (efc, epA) <-
+        (efc, epA) <- withConn connStr $ \connA -> do
+          void $ PG.execute_ connA "BEGIN"
+          void $ lockRow connA cid
           withAsync (try (runM env $ Ops.forceCancelJob schema table pid) :: IO (Either SomeException Int64)) $ \cancelAsync -> do
-            threadDelay 300_000
+            threadDelay lockBlockMicros
             epA <- lockRow connA pid
             void (try (PG.execute_ connA "COMMIT") :: IO (Either SomeException Int64))
             efc <- Async.wait cancelAsync
             pure (efc, epA)
-        PG.close connA
 
         efc `shouldSatisfy` isRight
         epA `shouldSatisfy` isRight
@@ -1383,16 +1375,16 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
           $ \_ -> do
             waitUntil 5_000 $ readIORef startedRef
 
-            connA <- PG.connectPostgreSQL connStr
-            void $ PG.execute_ connA "BEGIN"
-            -- Hold the batch's higher id, the row a force-cancel over the tree takes first.
-            void $ lockRow connA (maximum ids)
-            putMVar goVar ()
-            threadDelay 300_000
-            -- The failure transaction does not yet hold the lower id.
-            eLo <- lockRow connA (minimum ids)
-            void (try (PG.execute_ connA "COMMIT") :: IO (Either SomeException Int64))
-            PG.close connA
+            eLo <- withConn connStr $ \connA -> do
+              void $ PG.execute_ connA "BEGIN"
+              -- Hold the batch's higher id, the row a force-cancel over the tree takes first.
+              void $ lockRow connA (maximum ids)
+              putMVar goVar ()
+              threadDelay lockBlockMicros
+              -- The failure transaction does not yet hold the lower id.
+              eLo <- lockRow connA (minimum ids)
+              void (try (PG.execute_ connA "COMMIT") :: IO (Either SomeException Int64))
+              pure eLo
 
             eLo `shouldSatisfy` isRight
             waitUntil 10_000 $ do
@@ -1472,7 +1464,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
             batchHandler batch cbs = do
               traverse_ (\job -> when (primaryKey job == firstId) (nack cbs job)) batch
               liftIO $ writeIORef nackedRef True
-              liftIO $ threadDelay 30_000_000
+              liftIO $ threadDelay stuckHandlerMicros
 
         baseConfig :: WorkerConfig m payload <- batchedWorkerConfig 1 10 batchHandler
         let config = baseConfig {pollInterval = 0.1, jobHeartbeatInterval = 0.3, visibilityTimeout = 60}
@@ -1495,13 +1487,10 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         holdingWorker <- UUID.nextRandom
         Just job <- runM env $ HL.insertJob (defaultJob (mkSimple "aba"))
         let jid = primaryKey job
-            expire =
-              toQuery $
-                "UPDATE " <> Schema.jobQueueTable schema table <> " SET not_visible_until = NOW() - interval '1 second' WHERE id = ?"
 
         [stale] <- runM env (HL.claimNextVisibleJobsAs 1 60 staleWorker) :: IO [JobRead payload]
         primaryKey stale `shouldBe` jid
-        void $ withConn connStr $ \conn -> PG.execute conn expire (Only jid)
+        updateJob connStr schema table "not_visible_until = NOW() - interval '1 second'" jid
 
         [held] <- runM env (HL.claimNextVisibleJobsAs 1 60 holdingWorker) :: IO [JobRead payload]
         primaryKey held `shouldBe` jid
@@ -1532,19 +1521,16 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         let pid = primaryKey parent
             cid = primaryKey child
 
-        connA <- PG.connectPostgreSQL connStr
-        void $ PG.execute_ connA "BEGIN"
-        -- Hold the child, the row a tree cancel takes first.
-        void $ lockRow connA cid
-
-        (etc, epA) <-
+        (etc, epA) <- withConn connStr $ \connA -> do
+          void $ PG.execute_ connA "BEGIN"
+          -- Hold the child, the row a tree cancel takes first.
+          void $ lockRow connA cid
           withAsync (try (runM env $ Ops.cancelJobTree schema table cid) :: IO (Either SomeException [Int64])) $ \cancelAsync -> do
-            threadDelay 300_000
+            threadDelay lockBlockMicros
             epA <- lockRow connA pid
             void (try (PG.execute_ connA "COMMIT") :: IO (Either SomeException Int64))
             etc <- Async.wait cancelAsync
             pure (etc, epA)
-        PG.close connA
 
         etc `shouldSatisfy` isRight
         epA `shouldSatisfy` isRight
@@ -1555,7 +1541,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         void
           $ runM env
           $ Ops.registerWorker schema wid table Nothing (Just 1) 1 Nothing
-        threadDelay 1_500_000
+        threadDelay pastStaleMicros
         swept <- runM env $ Ops.sweepStaleWorkers schema
         swept `shouldSatisfy` (>= 1)
         rows <- runM env $ Ops.listWorkers schema (Just table) Nothing
@@ -1567,7 +1553,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
           $ runM env
           $ Ops.registerWorker schema wid table Nothing (Just 1) 1 Nothing
         void $ runM env $ Ops.setWorkerPaused schema wid True
-        threadDelay 1_500_000
+        threadDelay pastStaleMicros
         swept <- runM env $ Ops.sweepStaleWorkers schema
         swept `shouldSatisfy` (>= 1)
         rows <- runM env $ Ops.listWorkers schema (Just table) Nothing
@@ -1579,7 +1565,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
           $ runM env
           $ Ops.registerWorker schema wid table Nothing (Just 1) 1 Nothing
         void $ runM env $ Ops.markWorkerShuttingDown schema wid
-        threadDelay 1_500_000
+        threadDelay pastStaleMicros
         swept <- runM env $ Ops.sweepStaleWorkers schema
         swept `shouldSatisfy` (>= 1)
         rows <- runM env $ Ops.listWorkers schema (Just table) Nothing
@@ -1618,7 +1604,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         void
           $ runM env
           $ Ops.registerWorker schema wid table Nothing (Just 1) 1 Nothing
-        threadDelay 1_500_000
+        threadDelay pastStaleMicros
         rows <- runM env $ Ops.listWorkers schema (Just table) Nothing
         case filter ((== wid) . WR.workerId) rows of
           [row] -> WR.health row `shouldBe` WR.Stale
@@ -1728,13 +1714,9 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         void $ runM env $ HL.insertJob (defaultJob (mkSimple "sibling"))
         let dlqTbl = Schema.jobQueueDLQTable schema table
             poisonId = T.pack (show (primaryKey poison))
+        updateJob connStr schema table "payload = '{\"bogus\": 1}'" (primaryKey poison)
         claimed <-
           withConn connStr $ \conn -> do
-            void $
-              PG.execute
-                conn
-                (toQuery $ "UPDATE " <> Schema.jobQueueTable schema table <> " SET payload = '{\"bogus\": 1}' WHERE id = ?")
-                (Only (primaryKey poison))
             execute_ conn ("ALTER TABLE " <> dlqTbl <> " ADD CONSTRAINT reject_poison CHECK (job_id <> " <> poisonId <> ")")
             (runM env (HL.claimNextVisibleJobs 2 60) :: IO [JobRead payload])
               `finally` execute_ conn ("ALTER TABLE " <> dlqTbl <> " DROP CONSTRAINT reject_poison")
@@ -1764,6 +1746,90 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
     withOpsTable :: IO a -> IO a
     withOpsTable = withTestOpsTable connStr schema
     opsCount = queryOpsCount connStr schema
+
+-- | A handler run shorter than the graceful-shutdown timeout.
+inFlightJobMicros :: Int
+inFlightJobMicros = 2_000_000
+
+-- | A handler run longer than the graceful-shutdown timeout.
+overrunJobMicros :: Int
+overrunJobMicros = 10_000_000
+
+-- | A pause for the shutdown signal to reach the dispatcher.
+shutdownSignalMicros :: Int
+shutdownSignalMicros = 500_000
+
+-- | A short handler run.
+shortHandlerMicros :: Int
+shortHandlerMicros = 500_000
+
+-- | A handler run that covers the drain checks.
+drainingHandlerMicros :: Int
+drainingHandlerMicros = 2_500_000
+
+-- | Several heartbeat ticks during the drain.
+drainTicksMicros :: Int
+drainTicksMicros = 1_500_000
+
+-- | Longer than the stale threshold, spent paused.
+pastStaleWhilePausedMicros :: Int
+pastStaleWhilePausedMicros = 2_000_000
+
+-- | A pause for the tick that the startup claim signalled to pass.
+startupTickMicros :: Int
+startupTickMicros = 2_500_000
+
+-- | A pause for a pause signal to land.
+pauseLandMicros :: Int
+pauseLandMicros = 300_000
+
+-- | A pause for the failed registration attempt.
+registrationAttemptMicros :: Int
+registrationAttemptMicros = 500_000
+
+-- | Long enough for @NOW()@ to differ.
+clockAdvanceMicros :: Int
+clockAdvanceMicros = 1_100_000
+
+-- | Longer than the liveness threshold of the worker list query.
+pastListThresholdMicros :: Int
+pastListThresholdMicros = 1_200_000
+
+-- | Longer than one heartbeat interval, so the next heartbeat blocks.
+heartbeatBlockMicros :: Int
+heartbeatBlockMicros = 1_500_000
+
+-- | A pause for the blocked heartbeat to complete.
+heartbeatLandMicros :: Int
+heartbeatLandMicros = 500_000
+
+-- | A handler run longer than any test.
+stuckHandlerMicros :: Int
+stuckHandlerMicros = 30_000_000
+
+-- | A pause for a cancel to reach the handler.
+cancelPropagateMicros :: Int
+cancelPropagateMicros = 500_000
+
+-- | The window in which a live handler would bump the counter.
+counterWindowMicros :: Int
+counterWindowMicros = 500_000
+
+-- | A pause after the inserts, before the worker starts.
+beforeStartMicros :: Int
+beforeStartMicros = 100_000
+
+-- | A pause for the concurrent statement to block on the held lock.
+lockBlockMicros :: Int
+lockBlockMicros = 300_000
+
+-- | The most time to wait for a cancel notification.
+notifyTimeoutMicros :: Int
+notifyTimeoutMicros = 2_000_000
+
+-- | Longer than the stale threshold.
+pastStaleMicros :: Int
+pastStaleMicros = 1_500_000
 
 noResult :: (Functor n) => (j -> n ()) -> j -> n (Maybe [Text])
 noResult handler job = Nothing <$ handler job

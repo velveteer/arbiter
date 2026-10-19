@@ -3,8 +3,7 @@ module Arbiter.Hasql.Encode
   ( buildEncoder
   ) where
 
-import Arbiter.Core.Codec (Col (..), ParamType (..), Params, SomeParam (..))
-import Arbiter.Core.Job.Types (storedBytes)
+import Arbiter.Core.MonadArbiter (Col (..), ParamType (..), Params, SomeParam (..), storedBytes)
 import Data.Functor.Contravariant (contramap)
 import Hasql.Encoders qualified as E
 

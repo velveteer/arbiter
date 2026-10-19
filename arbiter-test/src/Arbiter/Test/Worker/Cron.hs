@@ -3,7 +3,7 @@
 {-# OPTIONS_GHC -Wno-incomplete-uni-patterns -Wno-x-partial #-}
 
 -- | Cron scheduler tests, instantiated for each backend.
-module Arbiter.Worker.TestKit.Cron (cronSpec) where
+module Arbiter.Test.Worker.Cron (cronSpec) where
 
 import Arbiter.Core.CronSchedule (CronScheduleUpdate (..))
 import Arbiter.Core.CronSchedule qualified as CS
@@ -39,7 +39,7 @@ import UnliftIO (newEmptyMVar, putMVar, takeMVar)
 import UnliftIO.Async (wait, withAsync)
 
 import Arbiter.Test.Setup (mkTime, toQuery, withConn)
-import Arbiter.Worker.TestKit.Backend (TestBackend (..))
+import Arbiter.Test.Worker.Backend (TestBackend (..))
 
 -- | 'processCronCatchUp' under a fresh gate store.
 catchUpAt

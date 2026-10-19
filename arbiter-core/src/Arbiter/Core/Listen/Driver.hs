@@ -20,6 +20,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import System.Posix.Types (Fd)
 
+import Arbiter.Core.Enum (showText)
 import Arbiter.Core.Exceptions (throwInternal)
 import Arbiter.Core.Listen (ListenConn (..))
 
@@ -63,7 +64,7 @@ execOutcome okStatus resultStatus = maybe (pure (Left "returned no result")) (fm
   where
     judge st
       | st == okStatus = Right ()
-      | otherwise = Left ("failed with " <> T.pack (show st))
+      | otherwise = Left ("failed with " <> showText st)
 
 -- | Run an action on a connection of its own, opened from a connection string.
 withDriverListenConn

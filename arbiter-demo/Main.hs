@@ -1,7 +1,6 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeFamilies #-}
 
 module Main (main) where
 
@@ -194,14 +193,12 @@ main = Otel.withTelemetryFromEnv runDemo
 -- | The demo proper.
 runDemo :: Otel.Telemetry -> IO ()
 runDemo tel = do
-  -- Get config from environment or use defaults
   connStr <-
     maybe "host=localhost port=5432 user=postgres password=master dbname=postgres" BS.pack
       <$> lookupEnv "DATABASE_URL"
   schemaStr <- fromMaybe "arbiter_demo" <$> lookupEnv "SCHEMA"
   port <- envOr "PORT" (8080 :: Int)
   let schema = T.pack schemaStr
-  -- Drop and recreate schema for a clean demo
   putStrLn "Resetting schema..."
   conn <- PG.connectPostgreSQL connStr
   void $ PG.execute_ conn $ "DROP SCHEMA IF EXISTS " <> fromString schemaStr <> " CASCADE"
@@ -222,17 +219,14 @@ runDemo tel = do
   -- pools get their own pool from the managed runner below.
   producerEnv <- createSimpleEnv (Proxy @DemoRegistry) connStr schema
 
-  -- Seed demo data
   putStrLn "Seeding demo data..."
   seedDemoData producerEnv schema
 
-  -- Create server config over the producer env
   putStrLn ""
   putStrLn "Setting up server..."
   serverConfig <- createArbiterServer (runSimpleDb producerEnv)
   putStrLn "Server ready"
 
-  -- Create worker configs with cron jobs
   putStrLn "Creating worker configs..."
   demoWorkerCfg <- simpleWorker 5 2 10 [demoTicker]
   emailWorkerCfg <- simpleWorker 3 2 10 [emailDigest]
@@ -244,7 +238,7 @@ runDemo tel = do
   let policy =
         simpleCorsResourcePolicy
           { corsRequestHeaders = ["Content-Type", "Accept"]
-          , corsMethods = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
+          , corsMethods = ["GET", "POST", "DELETE", "PATCH", "OPTIONS"]
           }
 
   -- Dev mode: serve static files from disk when ADMIN_DEV_DIR is set
@@ -252,7 +246,6 @@ runDemo tel = do
   traceHttp <- newOpenTelemetryWaiMiddleware
   let app = traceHttp $ cors (const $ Just policy) $ logStdout $ demoApp mDevDir serverConfig
 
-  -- Start server
   putStrLn ""
   putStrLn "=== Server Starting ==="
   putStrLn $ "API:     http://localhost:" <> show port <> "/api"
@@ -266,7 +259,6 @@ runDemo tel = do
   putStrLn "Press Ctrl+C to stop"
   putStrLn ""
 
-  -- Build worker pool list
   let workers =
         [ namedWorkerPool demoWorkerCfg
         , namedWorkerPool emailWorkerCfg
@@ -281,9 +273,9 @@ runDemo tel = do
   -- Self-restart watchdog. After RESET_INTERVAL_MINUTES, raise SIGTERM. The
   -- handler above exits the process and the container's restart policy reseeds
   -- a clean demo. A value of 0 disables it.
-  resetMin <- envOr "RESET_INTERVAL_MINUTES" 20
+  resetMin <- envOr "RESET_INTERVAL_MINUTES" (20 :: Int)
   when (resetMin > 0) $ void $ forkIO $ do
-    threadDelay (resetMin * 60 * 1_000_000)
+    threadDelay (secondsToMicros (fromIntegral (resetMin * secondsPerMinute)))
     putStrLn $ "[reset] " <> show resetMin <> "m elapsed, restarting for a clean demo"
     Signals.raiseSignal Signals.sigTERM
 
@@ -319,10 +311,22 @@ runDemo tel = do
 
 type DemoM = SimpleDb DemoRegistry IO
 
+-- | Microseconds in one second.
+microsPerSecond :: Double
+microsPerSecond = 1_000_000
+
+-- | Seconds in one minute.
+secondsPerMinute :: Int
+secondsPerMinute = 60
+
+-- | A delay in seconds as 'threadDelay' microseconds.
+secondsToMicros :: Double -> Int
+secondsToMicros seconds = round (seconds * microsPerSecond)
+
 simulateWork :: Double -> IO ()
 simulateWork mean = do
   uniform <- randomRIO (1.0e-6, 1.0)
-  threadDelay (round (mean * negate (log uniform) * 1e6))
+  threadDelay (secondsToMicros (mean * negate (log uniform)))
 
 -- | A transactional worker pool whose handler sleeps for @mean@ seconds on average.
 simpleWorker
@@ -337,7 +341,11 @@ simpleWorker
   -> IO (WorkerConfig DemoM payload)
 simpleWorker count mean poll crons = do
   cfg <- transactionalWorkerConfig count (\_conn _job -> liftIO $ simulateWork mean)
-  pure cfg {cronJobs = crons, pollInterval = poll, livenessFile = Nothing}
+  pure (polling poll cfg) {cronJobs = crons}
+
+-- | Poll at @interval@ seconds with no liveness file.
+polling :: NominalDiffTime -> WorkerConfig m payload -> WorkerConfig m payload
+polling interval cfg = cfg {pollInterval = interval, livenessFile = Nothing}
 
 -- | 'cronJob' for a literal expression. A bad expression is a crash.
 mustCron :: Text -> Text -> OverlapPolicy -> (TickKind -> UTCTime -> JobWrite payload) -> CronJob payload
@@ -374,7 +382,7 @@ mkBulkWorker = do
   count <- envOr "BURST_WORKERS" 6
   batch <- envOr "BURST_BATCH" 25
   cfg <- batchedWorkerConfig count batch handler
-  pure cfg {pollInterval = 1, livenessFile = Nothing}
+  pure (polling 1 cfg)
   where
     -- Roughly 300 jobs a second across the pool. A burst drains slowly enough
     -- to be sampled.
@@ -389,7 +397,7 @@ mkBulkWorker = do
 mkPipelineWorker :: IO (WorkerConfig DemoM PipelinePayload)
 mkPipelineWorker = do
   cfg <- transactionalWorkerConfig 3 handler
-  pure cfg {pollInterval = 2, livenessFile = Nothing}
+  pure (polling 2 cfg)
   where
     handler _conn job = case payload job of
       ProcessChunk chunkName -> do
@@ -422,6 +430,14 @@ seedDemoData env schemaName = runSimpleDb env $ do
   seedQueues
   liftIO $ putStrLn "  Seeded jobs across demo_queue, email_queue, notifications, and pipeline"
 
+-- | Rollup branches under the seeded pipeline's root.
+seedPipelineBranches :: Int
+seedPipelineBranches = 300
+
+-- | The first @n@ elements, at least one.
+takeNonEmpty :: Int -> NonEmpty a -> NonEmpty a
+takeNonEmpty n (x :| xs) = x :| take (n - 1) xs
+
 -- | A 3-level rollup pipeline. Results flow up from leaves through finalizers.
 -- Priority 10 keeps this long run behind the quick pipelines from 'pipelinePulse'.
 seedPipeline :: Text -> DemoM ()
@@ -435,9 +451,8 @@ seedPipeline schemaName = do
       JT.insertJobTree schemaName "pipeline" $
         agg
           "final-report"
-          ( NE.fromList
-              $ NE.take 300
-              $ NE.cycle
+          ( takeNonEmpty seedPipelineBranches $
+              NE.cycle
                 [ agg "financials" [chunk "revenue-data", chunk "expense-data", chunk "forecast-data"]
                 , agg "operations" [chunk "inventory-data", chunk "shipping-data", chunk "support-data"]
                 ]
@@ -535,7 +550,7 @@ loadPulse env sec = go 0
     keepEvery every tick = if tick `mod` every == 0 then Just 3600 else Nothing
     go :: Int -> IO ()
     go tick = do
-      threadDelay (sec * 1_000_000)
+      threadDelay (secondsToMicros (fromIntegral sec))
       runSimpleDb env $ do
         void $
           HL.insertJob
@@ -564,7 +579,7 @@ burstPulse env sec size groups = go 0
     go :: Int -> IO ()
     go tick = do
       gap <- randomRIO (0.5, 1.5 :: Double)
-      threadDelay (round (fromIntegral sec * gap * 1e6))
+      threadDelay (secondsToMicros (fromIntegral sec * gap))
       let total = if tick `mod` 5 == 4 then size * 4 else size
           jobs = [grouped index (defaultJob (BulkTask ("burst " <> tshow tick <> " #" <> tshow index))) | index <- [1 .. total]]
       runSimpleDb env $ traverse_ (void . HL.insertJobsBatch_) (chunksOf perStatement jobs)
@@ -589,7 +604,7 @@ pipelinePulse env schemaName sec = go 0
   where
     go :: Int -> IO ()
     go tick = do
-      threadDelay (sec * 1_000_000)
+      threadDelay (secondsToMicros (fromIntegral sec))
       pick <- randomRIO (0, length quickChunkSets - 1)
       let chosen = quickChunkSets !! pick
           root = setArchiveFor (Just 3600) $ defaultJob (AggregateResults ("quick-report-" <> tshow tick))

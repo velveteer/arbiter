@@ -5,7 +5,7 @@
 module Test.Arbiter.Orville.StateMachine (spec) where
 
 import Arbiter.Core.QueueRegistry (Queue)
-import Arbiter.Test.Setup (createSharedPool, setupOnce)
+import Arbiter.Test.Setup (createSharedPool, setupOnce, stateMachinePoolSize)
 import Arbiter.Test.StateMachine (SMPayload, stateMachineSpec)
 import Data.ByteString (ByteString)
 import Data.Pool (withResource)
@@ -30,7 +30,7 @@ type SMRegistry = '[Queue "arbiter_orville_sm_test" SMPayload]
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
-  env <- runIO (createOrvilleTestEnv connStr testSchema testTable 40)
+  env <- runIO (createOrvilleTestEnv connStr testSchema testTable stateMachinePoolSize)
   pgPool <- runIO (createSharedPool connStr)
   let run :: forall a. TestOrville SMRegistry a -> IO a
       run = runOrvilleTest env

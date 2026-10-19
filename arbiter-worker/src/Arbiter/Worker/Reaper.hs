@@ -20,7 +20,6 @@ import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (RegistryTables (..))
 import Arbiter.Core.RateLimit.Spec (registryRateLimitPolicies)
 import Control.Monad (forever, void, when)
-import Data.Aeson (FromJSON, ToJSON)
 import Data.Either (fromRight)
 import Data.Foldable (fold, traverse_)
 import Data.Int (Int64)
@@ -95,6 +94,8 @@ runMaintenancePass logCfg report pace stmtTimeout = do
   let gatedCount operation every work =
         tryReaperOp logCfg schema stmtTimeout (maintenanceOpName operation) every work
           >>= failedOp operation (traverse_ (reaped operation))
+      logSwept level verb noun count =
+        tryLog logCfg level $ "Reaper " <> verb <> " " <> T.pack (show count) <> " " <> noun
       reportFailed operation =
         traverse_ (\queue -> tryLog logCfg Warning $ maintenanceOpName operation <> " failed for queue: " <> queue)
       reportSwept operation done =
@@ -103,26 +104,24 @@ runMaintenancePass logCfg report pace stmtTimeout = do
         tryReaperOp logCfg schema stmtTimeout (maintenanceOpName operation) every work
           >>= failedOp operation (reportSwept operation done)
       refreshGroups =
-        tryReaperStateOp
-          logCfg
-          schema
-          stmtTimeout
-          (maintenanceOpName RefreshGroups)
-          window
-          (Ops.refreshAllGroups schema queues . fold)
-          >>= failedOp RefreshGroups (reportSwept RefreshGroups (const (pure ())))
+        let task = maintenanceOpName RefreshGroups
+         in reaperGate
+              logCfg
+              task
+              (Ops.runGatedStateBounded schema task window stmtTimeout (Ops.refreshAllGroups schema queues . fold))
+              >>= failedOp RefreshGroups (reportSwept RefreshGroups (const (pure ())))
   fmap catMaybes . sequence $
     [ refreshGroups
     , gatedCount SweepStaleWorkers window $ Ops.sweepStaleWorkers schema
     , sweep
         SweepExhaustedJobs
         window
-        (\count -> tryLog logCfg Warning $ "Reaper moved " <> T.pack (show count) <> " exhausted job(s) to the DLQ")
+        (logSwept Warning "moved" "exhausted job(s) to the DLQ")
         $ Ops.sweepExhaustedJobs schema queues
     , sweep
         SweepCancelledJobs
         window
-        (\count -> tryLog logCfg Info $ "Reaper deleted " <> T.pack (show count) <> " orphaned cancelled job(s)")
+        (logSwept Info "deleted" "orphaned cancelled job(s)")
         $ Ops.sweepCancelledJobs schema queues
     ]
       <> [gatedCount PruneRateLimitBuckets sparseWindow (Arb.pruneRateLimitBuckets @m (paceBucketIdle pace)) | hasRateLimit]
@@ -131,7 +130,7 @@ runMaintenancePass logCfg report pace stmtTimeout = do
       <> [ sweep
              PurgeArchives
              window
-             (\count -> tryLog logCfg Info $ "Reaper purged " <> T.pack (show count) <> " archived job(s)")
+             (logSwept Info "purged" "archived job(s)")
              $ Ops.purgeArchives schema queues
          ]
 
@@ -174,19 +173,6 @@ tryReaperOp
 tryReaperOp logCfg schema stmtTimeout task every work =
   reaperGate logCfg task $
     Ops.runGatedBounded schema task every stmtTimeout work
-
-tryReaperStateOp
-  :: (FromJSON s, MonadArbiter m, ToJSON s)
-  => LogConfig
-  -> SchemaName
-  -> NominalDiffTime
-  -> Text
-  -> NominalDiffTime
-  -> (Maybe s -> m (a, s))
-  -> m (Either SomeException (Maybe a))
-tryReaperStateOp logCfg schema stmtTimeout task every work =
-  reaperGate logCfg task $
-    Ops.runGatedStateBounded schema task every stmtTimeout work
 
 reaperGate :: (MonadUnliftIO m) => LogConfig -> Text -> m a -> m (Either SomeException a)
 reaperGate logCfg task action =

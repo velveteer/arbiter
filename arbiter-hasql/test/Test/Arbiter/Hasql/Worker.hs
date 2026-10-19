@@ -18,9 +18,9 @@ import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
 import Arbiter.Test.Fixtures (QueueAPayload (..), QueueBPayload (..), WorkerTestPayload (..))
 import Arbiter.Test.Poll (bumpRef, waitUntil)
 import Arbiter.Test.Setup (addQueueTable, cleanupOnce, execute_, quietHubLog, setupOnce, withConn)
+import Arbiter.Test.Worker qualified as TestKit
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.Config (transactionalWorkerConfig)
-import Arbiter.Worker.TestKit qualified as TestKit
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM (atomically)
 import Data.ByteString (ByteString)
@@ -51,6 +51,14 @@ import Test.Arbiter.Hasql.TestHelpers
   , runHasqlCommand
   , testConnect
   )
+
+-- | A pause for the worker to start.
+workerStartMicros :: Int
+workerStartMicros = 1_000_000
+
+-- | The most time a stop may take.
+stopTimeoutMicros :: Int
+stopTimeoutMicros = 5_000_000
 
 workerTestSchemaName :: Text
 workerTestSchemaName = "arbiter_hasql_worker_test"
@@ -89,8 +97,8 @@ dedicatedListenerSpec connStr =
           handler _conn _job = pure ()
       config <- transactionalWorkerConfig 1 handler
       worker <- async (runHasqlDb env (runWorkerPool config))
-      threadDelay 1_000_000
-      stopped <- timeout 5_000_000 (cancel worker)
+      threadDelay workerStartMicros
+      stopped <- timeout stopTimeoutMicros (cancel worker)
       stopped `shouldSatisfy` isJust
       destroyHasqlEnv env
 
@@ -114,7 +122,7 @@ transportListenerSpec connStr =
         env <- createHasqlEnvWithPool (Proxy @HasqlListenRegistry) pool listenSchema
         Just listener <- runHasqlDb env getListener
         stopped <-
-          timeout 5_000_000 $
+          timeout stopTimeoutMicros $
             withChannels listener quietHubLog [("arbiter_hasql_refused_cancel", \_ -> pure ())] $ \ready ->
               waitUntil 5_000 (atomically ready)
         stopped `shouldSatisfy` isJust

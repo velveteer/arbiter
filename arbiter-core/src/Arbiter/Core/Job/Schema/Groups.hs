@@ -42,7 +42,7 @@ import Arbiter.Core.Job.Schema
   , maintenanceFunctionNames
   , qualifiedTable
   )
-import Arbiter.Core.SqlLiterals (attemptsLeftSQL, lockGroupKeyOnConflictSQL, quoteIdentifier)
+import Arbiter.Core.SqlLiterals (attemptsLeftSQL, dollarQuote, lockGroupKeyOnConflictSQL, quoteIdentifier)
 
 -- | Partial index over @(group_key, priority, id)@, read by the claim's LATERAL
 -- subqueries and by the maintenance triggers recomputing a group's minima.
@@ -473,7 +473,3 @@ createGroupsTriggersSQL schemaName tableName =
 -- | Base name of a queue's groups trigger functions and triggers.
 groupsTriggerBase :: TableName -> Text
 groupsTriggerBase tableName = "maintain_" <> tableName <> "_groups"
-
--- | The plpgsql function-body delimiter.
-dollarQuote :: Text
-dollarQuote = "$$"

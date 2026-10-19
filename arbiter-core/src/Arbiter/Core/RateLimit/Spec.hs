@@ -1,5 +1,4 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_HADDOCK not-home #-}
 
 -- | Internal to the arbiter packages. Not covered by the PVP.
@@ -100,7 +99,17 @@ instance AdmissionPolicy RateLimitPolicy where
 -- tiny positive value. The prefix must not contain @:@, the key separator. The
 -- migration enforces this.
 tokenBucket :: Text -> Double -> NominalDiffTime -> RateLimitPolicy
-tokenBucket prefix count period = RateLimitPolicy prefix count count (max 1e-6 period)
+tokenBucket prefix count period =
+  RateLimitPolicy
+    { policyPrefix = prefix
+    , policyMax = count
+    , policyRefill = count
+    , policyInterval = max minRefillInterval period
+    }
+
+-- | The shortest refill interval a token bucket takes.
+minRefillInterval :: NominalDiffTime
+minRefillInterval = 1e-6
 
 -- | A selective description of the rate-limit key for a payload. Evaluation
 -- returns the job key. Static inspection returns the reachable policies.

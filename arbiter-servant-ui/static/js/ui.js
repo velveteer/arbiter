@@ -813,22 +813,16 @@ export const Qs = {
 
 export const Toasts = {
   setup() {
-    const bg = (type) =>
-      ({
-        success: 'bg-success-subtle text-success-emphasis',
-        warning: 'bg-warning-subtle text-warning-emphasis',
-        info: 'bg-info-subtle text-info-emphasis',
-      })[type] || 'bg-danger-subtle text-danger-emphasis';
-    return { app, bg, dismissToast, holdToast };
+    return { app, dismissToast, holdToast };
   },
   template: /* html */ `
     <div class="toast-container position-fixed bottom-0 end-0 p-3" aria-live="polite" aria-atomic="false">
-      <div v-for="t in app.toasts" :key="t.id" class="toast show" :class="bg(t.type)" :role="t.type === 'danger' ? 'alert' : 'status'"
+      <div v-for="t in app.toasts" :key="t.id" class="toast show" :class="tone(t.type)" :role="t.type === 'danger' ? 'alert' : 'status'"
         @mouseenter="holdToast(t, true)" @mouseleave="holdToast(t, false)"
         @focusin="holdToast(t, true)" @focusout="!$event.currentTarget.contains($event.relatedTarget) && holdToast(t, false)">
         <div class="d-flex">
           <div class="toast-body">{{ t.message }}</div>
-          <span v-if="t.count > 1" class="toast-count badge bg-secondary-subtle text-secondary-emphasis align-self-center me-2">×{{ t.count }}</span>
+          <span v-if="t.count > 1" :class="tone('secondary')" class="toast-count badge align-self-center me-2">×{{ t.count }}</span>
           <button type="button" class="btn-close me-2 m-auto" aria-label="Dismiss" @click="dismissToast(t)"></button>
         </div>
       </div>
