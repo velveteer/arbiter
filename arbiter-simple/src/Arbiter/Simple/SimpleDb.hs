@@ -76,7 +76,6 @@ simpleDriver = Driver {withListenConn = \conn action -> withConnection conn (act
 -- | The postgresql-simple database monad.
 newtype SimpleDb (registry :: JobPayloadRegistry) m a = SimpleDb
   { unSimpleDb :: Db Connection () registry m a
-  -- ^ The action in the shared pooled-backend monad.
   }
   deriving newtype
     ( Applicative
@@ -130,7 +129,6 @@ inTransaction
    . Connection
   -- ^ Connection with an open transaction
   -> SchemaName
-  -- ^ Schema name
   -> SimpleDb registry m a
   -> m a
 inTransaction conn schemaName = Backend.inTransaction simpleDriver conn schemaName . unSimpleDb
@@ -146,7 +144,6 @@ createSimpleEnv
   -> ByteString
   -- ^ PostgreSQL connection string
   -> SchemaName
-  -- ^ Schema name
   -> m (SimpleEnv registry)
 createSimpleEnv proxy connStr schemaName =
   createSimpleEnvWithConfig proxy connStr schemaName PC.defaultPoolConfig
@@ -170,7 +167,6 @@ createSimpleEnvWithConfig
   -> ByteString
   -- ^ PostgreSQL connection string
   -> SchemaName
-  -- ^ Schema name
   -> PoolConfig
   -- ^ Pool configuration
   -> m (SimpleEnv registry)
@@ -186,7 +182,6 @@ createSimpleEnvWithPool
   -> Pool Connection
   -- ^ Caller's connection pool
   -> SchemaName
-  -- ^ Schema name
   -> m (SimpleEnv registry)
 createSimpleEnvWithPool _proxy = createEnvWithPool simpleDriver
 

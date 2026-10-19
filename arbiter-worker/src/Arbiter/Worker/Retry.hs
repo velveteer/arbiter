@@ -6,10 +6,11 @@ module Arbiter.Worker.Retry
   ) where
 
 import Arbiter.Core.Exceptions (displayEx)
-import Arbiter.Core.Threads (labelArbiterThread)
+import Arbiter.Core.Threads (labelArbiterThread, micros)
 import Control.Monad (unless)
 import Control.Monad.Trans.Cont (ContT (..))
 import Data.Text (Text)
+import Data.Time (NominalDiffTime)
 import UnliftIO (MonadUnliftIO, liftIO, tryAny)
 import UnliftIO.Async (Async, race, withAsync)
 import UnliftIO.Concurrent (threadDelay)
@@ -19,8 +20,8 @@ import Arbiter.Worker.Logger (LogConfig, LogLevel (..), tryLog)
 import Arbiter.Worker.WorkerState (WorkerState, isShuttingDown)
 
 -- | Wait between attempts of a retried infrastructure thread.
-retryBackoffMicros :: Int
-retryBackoffMicros = 5_000_000
+retryBackoff :: NominalDiffTime
+retryBackoff = 5
 
 -- | Spawn a thread that logs and retries transient failures until the pool shuts down.
 spawnRetried
@@ -45,6 +46,6 @@ spawnRetried stateVar logCfg queue label action =
       unless stopping $ do
         tryLog logCfg Error $ label <> " error (retrying): " <> displayEx exception
         -- Shutdown wins the race.
-        race awaitShutdown (liftIO (threadDelay retryBackoffMicros))
+        race awaitShutdown (liftIO (threadDelay (micros retryBackoff)))
           >>= either pure (const loop)
     awaitShutdown = atomically (isShuttingDown stateVar >>= checkSTM)

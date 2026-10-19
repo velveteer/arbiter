@@ -10,6 +10,7 @@ module Arbiter.Core.RateLimit.Spec
   ( -- * Core types
     Durability (..)
   , RateLimitKey (..)
+  , toRateLimitKey
   , rateLimitKeyText
   , RateLimitPolicy (..)
   , tokenBucket
@@ -67,11 +68,15 @@ data RateLimitKey = RateLimitKey
   }
   deriving stock (Eq, Show)
 
+-- | A rate-limit key from its prefix and suffix.
+toRateLimitKey :: Text -> Text -> RateLimitKey
+toRateLimitKey prefix suffix = RateLimitKey {rlkPrefix = prefix, rlkSuffix = suffix}
+
 instance ToJSON RateLimitKey where
   toJSON (RateLimitKey prefix suffix) = prefixedKeyToJSON prefix suffix
 
 instance FromJSON RateLimitKey where
-  parseJSON = prefixedKeyParseJSON "RateLimitKey" RateLimitKey
+  parseJSON = prefixedKeyParseJSON "RateLimitKey" toRateLimitKey
 
 -- | The stored key text, @prefix:suffix@.
 rateLimitKeyText :: RateLimitKey -> Text
@@ -121,7 +126,7 @@ noLimit = selectNone
 
 -- | Limit by a fixed policy, keyed by a per-job suffix, such as a tenant id.
 limitBy :: RateLimitPolicy -> (payload -> Text) -> RateLimitFor payload
-limitBy = selectBy RateLimitKey
+limitBy = selectBy toRateLimitKey
 
 -- | Limit by a fixed policy under one shared key (a single global bucket).
 globalLimit :: RateLimitPolicy -> Text -> RateLimitFor payload

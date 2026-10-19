@@ -1,6 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# OPTIONS_GHC -Wno-x-partial #-}
 
 module Test.Arbiter.Simple.Operations (spec) where
 
@@ -46,101 +45,72 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
       it "commits job insertion within user transaction" $ \env -> do
         let job = setGroupKey (Just "g1") $ defaultJob (TestMessage "InTx")
 
-        -- Start a user transaction and insert a job with inTransaction
-        withResource sharedPool $ \conn -> do
+        withResource sharedPool $ \conn ->
           PG.withTransaction conn $ do
-            -- Insert job using inTransaction to share the transaction
             Just _inserted <- inTransaction @SimpleOpsTestRegistry conn testSchema $ HL.insertJob job
-            -- Transaction commits here
             pure ()
 
-        -- The committed transaction leaves the job in the queue.
         claimed <- runSimpleDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]
-        length claimed `shouldBe` 1
-        payload (head claimed) `shouldBe` TestMessage "InTx"
+        map payload claimed `shouldBe` [TestMessage "InTx"]
 
       it "rolls back job insertion when user transaction fails" $ \env -> do
         let job = setGroupKey (Just "g1") $ defaultJob (TestMessage "RollbackTest")
 
-        -- Start a user transaction and intentionally fail it
         result <-
-          ( withResource sharedPool $ \conn -> do
+          ( withResource sharedPool $ \conn ->
               PG.withTransaction conn $ do
-                -- Insert job using inTransaction to share the transaction
                 Just _inserted <- inTransaction @SimpleOpsTestRegistry conn testSchema $ HL.insertJob job
-                -- Force a rollback by throwing an error
                 throwIO (userError "Intentional rollback")
           )
             `catch` \(exception :: SomeException) -> pure (show exception)
 
         result `shouldContain` "Intentional rollback"
 
-        -- The rolled-back transaction leaves no job in the queue.
         claimed <- runSimpleDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]
-        length claimed `shouldBe` 0
+        claimed `shouldSatisfy` null
 
       it "shares transaction with user's database operations" $ \env -> do
         let job = setGroupKey (Just "g1") $ defaultJob (TestMessage "SharedTx")
 
-        -- Use the same connection for creating table, transaction, and verification
         withResource sharedPool $ \conn -> do
-          -- Create a test table
           execute_ conn "CREATE TEMP TABLE test_tx_table (value TEXT)"
 
-          -- Start transaction with both user operation and job insertion
           PG.withTransaction conn $ do
-            -- User's database operation
             execute_ conn "INSERT INTO test_tx_table VALUES ('test-value')"
-            -- Insert job in same transaction
             Just _inserted <- inTransaction @SimpleOpsTestRegistry conn testSchema $ HL.insertJob job
             pure ()
 
-          -- Verify the user's data was committed on the same connection
           result <- PG.query_ conn "SELECT value FROM test_tx_table" :: IO [[Text]]
-          length result `shouldBe` 1
-          head (head result) `shouldBe` "test-value"
+          result `shouldBe` [["test-value"]]
 
-        -- Job should be committed
         claimed <- runSimpleDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]
-        length claimed `shouldBe` 1
+        map payload claimed `shouldBe` [TestMessage "SharedTx"]
 
       it "rolls back both user operations and job when transaction fails" $ \env -> do
         let job = setGroupKey (Just "g1") $ defaultJob (TestMessage "BothRollback")
 
-        -- Use the same connection for creating table, transaction, and verification
         withResource sharedPool $ \conn -> do
-          -- Create a temp table
           execute_ conn "CREATE TEMP TABLE test_rollback_table (value TEXT)"
 
-          -- Start transaction and fail it
           result <-
             ( PG.withTransaction conn $ do
-                -- User's database operation
                 execute_ conn "INSERT INTO test_rollback_table VALUES ('should-rollback')"
-                -- Insert job in same transaction
                 Just _inserted <- inTransaction @SimpleOpsTestRegistry conn testSchema $ HL.insertJob job
-                -- Force rollback
                 throwIO (userError "Force rollback")
             )
               `catch` \(exception :: SomeException) -> pure (show exception)
 
           result `shouldContain` "Force rollback"
 
-          -- User's data should also be rolled back
           rows <- PG.query_ conn "SELECT value FROM test_rollback_table" :: IO [[Text]]
-          length rows `shouldBe` 0
+          rows `shouldBe` []
 
-        -- The queue has no job.
         claimed <- runSimpleDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]
-        length claimed `shouldBe` 0
+        claimed `shouldSatisfy` null
 
     describe "Insertion Ordering" $ do
       it "insertJob: grouped inserts serialize via groups table upsert" $ \env -> do
-        -- The groups table upsert (INSERT...ON CONFLICT) serializes concurrent
-        -- inserts within the same group. B blocks until A commits.
-
         withConn connStr $ \connA -> withConn connStr $ \connB -> do
-          -- A starts a transaction and inserts. A holds the lock on the groups table row.
           _ <- PG.execute_ connA "BEGIN"
           Just _ <-
             inTransaction @SimpleOpsTestRegistry connA testSchema
@@ -148,7 +118,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
               $ setGroupKey (Just "g1")
               $ defaultJob (TestMessage "JobA")
 
-          -- B inserts into the same group and blocks on the groups table upsert until A commits
+          -- B blocks on the same-group upsert until A commits.
           asyncB <- async $ do
             _ <- PG.execute_ connB "BEGIN"
             Just job <-
@@ -159,16 +129,10 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
             _ <- PG.execute_ connB "COMMIT"
             pure job
 
-          -- Give B time to start and block
           threadDelay blockMicros
-
-          -- A commits and releases the groups table lock. B unblocks.
           _ <- PG.execute_ connA "COMMIT"
-
-          -- B can now proceed
           void (wait asyncB)
 
-        -- Both jobs now visible. A has lower ID, claimed first.
         [first] <- runSimpleDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]
         payload first `shouldBe` TestMessage "JobA"
         _ <- runSimpleDb env (HL.ackJob first)

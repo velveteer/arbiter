@@ -284,7 +284,7 @@ data Run n ctx job kids stored = Run
 
 -- | The batch's run outside the handler.
 ambientRun :: Effects n ctx job kids stored -> Handoff n job -> Run n ctx job kids stored
-ambientRun effects = Run effects (effectAmbient effects)
+ambientRun effects handoff = Run {runEffects = effects, runContext = effectAmbient effects, runHandoff = handoff}
 
 -- | Run the batch on the calling thread: the claim hooks, the handler under the
 -- guard, the outcome report, and the force-cancel finalizer.
@@ -431,27 +431,9 @@ callbacks base jobs startTime =
     { callbackAck = \ctx job stored -> unlessHandled "ack" job $ within ctx $ \run ->
         settle run (finalized [job]) (effect effectAck run job stored) $ \at () ->
           reportSuccess at startTime job
-    , -- Only the commit knows which jobs it acked and which had moved.
-      callbackAckAll = \ctx pairs -> within ctx $ \run -> do
-        fresh <- dropHandled pairs
-        unless (null fresh) $
-          void $
-            settleWith run (\_ -> effect effectAckAll run fresh) (uncurry Settled) $
-              \at (done, reclaimed) -> do
-                traverse_ (reportSuccess at startTime) done
-                unless (null reclaimed) $ do
-                  logAt at Info reclaimed ("Jobs " <> unownedReason <> " during bulk completion, skipped")
-                  void (settleGoneJobs at unownedReason reclaimed)
-    , callbackFail = \ctx failure@(msg, _) job -> unlessHandled "failure" job $ within ctx $ \run -> do
-        endTime <- getCurrentTime
-        pending <- pendingJobs (runHandoff base) jobs
-        let siblings = cancelledSiblings pending job
-        void $
-          settleWith run (\_ -> effect effectFail run failure job) (finalized . (job :) . siblings) $
-            \at outcome -> do
-              reportFailed at msg startTime endTime job outcome
-              traverse_ (\sibling -> reportOnce at sibling (report at (Cancelled sibling msg))) (siblings outcome)
-              settleUnwritten at [(job, outcome)]
+    , callbackAckAll = \ctx pairs -> within ctx $ \run -> dropHandled pairs >>= ackJobs run startTime
+    , callbackFail = \ctx failure job -> unlessHandled "failure" job $ within ctx $ \run ->
+        failJob run jobs startTime failure job
     , callbackNack = \ctx job -> unlessHandled "nack" job $ within ctx $ \run -> releaseJobs run [job]
     , callbackSpawn = \ctx job kids -> unlessHandled "spawn" job $ within ctx $ \run ->
         settle run (finalized [job]) (effect effectSpawn run job kids) $ \at () ->
@@ -459,12 +441,6 @@ callbacks base jobs startTime =
     }
   where
     within ctx body = body base {runContext = ctx}
-    -- The pending jobs a tree cancel deleted, other than the one it failed.
-    cancelledSiblings pending job = \case
-      Right (TreeCancelled deleted) ->
-        filter (\sibling -> hasIdIn (runHandoff base) (Set.fromList deleted) sibling && key sibling /= key job) pending
-      _ -> []
-    key = handoffKey (runHandoff base)
     handledIds = progressHandled <$> readProgress (runHandoff base)
     unlessHandled label job act = do
       handled <- handledIds
@@ -477,6 +453,44 @@ callbacks base jobs startTime =
       unless (null ignored) $
         logAt base Warning (map fst ignored) "Ignoring bulk completion on jobs their handler already finalized"
       pure fresh
+
+-- | Ack a bulk completion's fresh jobs in one statement. Only the commit knows which
+-- jobs it acked and which had moved.
+ackJobs
+  :: (MonadMask n, MonadSTM n, MonadTime n) => Run n ctx job kids stored -> UTCTime -> [(job, Maybe stored)] -> n ()
+ackJobs _ _ [] = pure ()
+ackJobs run startTime fresh =
+  void $
+    settleWith run (\_ -> effect effectAckAll run fresh) (uncurry Settled) $
+      \at (done, reclaimed) -> do
+        traverse_ (reportSuccess at startTime) done
+        unless (null reclaimed) $ do
+          logAt at Info reclaimed ("Jobs " <> unownedReason <> " during bulk completion, skipped")
+          void (settleGoneJobs at unownedReason reclaimed)
+
+-- | Write one job's failure and report it with the batch siblings a tree cancel deleted.
+failJob
+  :: (MonadMask n, MonadSTM n, MonadTime n)
+  => Run n ctx job kids stored -> NonEmpty job -> UTCTime -> Failure -> job -> n ()
+failJob run jobs startTime failure@(msg, _) job = do
+  endTime <- getCurrentTime
+  pending <- pendingJobs (runHandoff run) jobs
+  let siblings = cancelledSiblings (runHandoff run) pending job
+  void $
+    settleWith run (\_ -> effect effectFail run failure job) (finalized . (job :) . siblings) $
+      \at outcome -> do
+        reportFailed at msg startTime endTime job outcome
+        traverse_ (\sibling -> reportOnce at sibling (report at (Cancelled sibling msg))) (siblings outcome)
+        settleUnwritten at [(job, outcome)]
+
+-- | The pending jobs a tree cancel deleted, other than the one it failed.
+cancelledSiblings :: Handoff n job -> [job] -> job -> Either Text Outcome -> [job]
+cancelledSiblings handoff pending job = \case
+  Right (TreeCancelled deleted) ->
+    filter (\sibling -> hasIdIn handoff (Set.fromList deleted) sibling && key sibling /= key job) pending
+  _ -> []
+  where
+    key = handoffKey handoff
 
 unownedReason :: Text
 unownedReason = "no longer claimed by this worker"
@@ -642,7 +656,6 @@ reportBatchOutcome run jobs startTime endTime outcome = do
       warnOn at [job] "Reporting a job's failure failed" () (reportFailed at reason startTime endTime job write)
 
 -- | Classify a handler exception into an error message and failure disposition.
--- 'reportBatchOutcome' intercepts 'JobGoneException' before this.
 classifyException :: SomeException -> Failure
 classifyException exception
   | Just (Retryable (JobRetryableException msg)) <- fromException exception = (msg, RetryFailure)

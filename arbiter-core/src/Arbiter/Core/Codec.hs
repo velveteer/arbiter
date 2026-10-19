@@ -74,7 +74,7 @@ import Data.Time (UTCTime)
 import Data.UUID.Types (UUID)
 
 import Arbiter.Core.Admission (splitPrefixedSuffix)
-import Arbiter.Core.Concurrency.Spec (ConcurrencyKey (..))
+import Arbiter.Core.Concurrency.Spec (toConcurrencyKey)
 import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView (..), ConcurrencyPolicyView (..))
 import Arbiter.Core.CronSchedule (CronScheduleRow (..))
 import Arbiter.Core.Job.Dedup (dedupFromParts)
@@ -95,7 +95,7 @@ import Arbiter.Core.Job.Types qualified as JT
 import Arbiter.Core.Job.Types.Internal (JobRecord (Job))
 import Arbiter.Core.Json (decodeOrEmpty)
 import Arbiter.Core.Queues (QueueRow (..))
-import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
+import Arbiter.Core.RateLimit.Spec (toRateLimitKey)
 import Arbiter.Core.RateLimit.Stats (RateLimitBucketView (..), RateLimitPolicyView (..))
 import Arbiter.Core.Worker (WorkerHealth (Live), WorkerRow (..))
 
@@ -216,30 +216,34 @@ cArray codec rows = map param (cWrite codec)
 
 -- | Retarget a codec's write source.
 lmap :: (t -> s) -> Codec s a -> Codec t a
-lmap project (Codec decode writes) = Codec decode (map retarget writes)
+lmap project codec = codec {cWrite = map retarget (cWrite codec)}
   where
     retarget (WCol name colType get) = WCol name colType (get . project)
     retarget (WNCol name colType get) = WNCol name colType (get . project)
 
 instance Applicative (Codec s) where
-  pure value = Codec (pure value) []
-  Codec decodeFn writesFn <*> Codec decodeArg writesArg = Codec (decodeFn <*> decodeArg) (writesFn <> writesArg)
+  pure value = Codec {cDecode = pure value, cWrite = []}
+  codecFn <*> codecArg =
+    Codec
+      { cDecode = cDecode codecFn <*> cDecode codecArg
+      , cWrite = cWrite codecFn <> cWrite codecArg
+      }
 
 -- | A read-write column bound to its own value.
 rw :: Text -> Col a -> Codec a a
-rw name colType = Codec (col name colType) [WCol name colType id]
+rw name colType = Codec {cDecode = col name colType, cWrite = [WCol name colType id]}
 
 -- | A nullable read-write column bound to its own value.
 rwN :: Text -> Col a -> Codec (Maybe a) (Maybe a)
-rwN name colType = Codec (ncol name colType) [WNCol name colType id]
+rwN name colType = Codec {cDecode = ncol name colType, cWrite = [WNCol name colType id]}
 
 -- | A column that is only decoded.
 ro :: RowCodec a -> Codec s a
-ro decode = Codec decode []
+ro decode = Codec {cDecode = decode, cWrite = []}
 
 -- | A column that is only written. Attach with '<*'.
 wo :: Text -> Col a -> (s -> a) -> Codec s ()
-wo name colType get = Codec (pure ()) [WCol name colType get]
+wo name colType get = Codec {cDecode = pure (), cWrite = [WCol name colType get]}
 
 -- | PostgreSQL type name for a scalar column, used for @unnest@ array casts.
 pgType :: Col a -> Text
@@ -332,8 +336,8 @@ payloadCodec :: Codec PayloadColumns PayloadKeys
 payloadCodec =
   PayloadKeys
     <$> lmap JT.pcKind (rwN "kind" CText)
-    <*> prefixedKeyCodec "rate_limit_key" "rate_limit_prefix" RateLimitKey JT.pcRateLimitKey JT.pcRateLimitPrefix
-    <*> prefixedKeyCodec "concurrency_key" "concurrency_prefix" ConcurrencyKey JT.pcConcurrencyKey JT.pcConcurrencyPrefix
+    <*> prefixedKeyCodec "rate_limit_key" "rate_limit_prefix" toRateLimitKey JT.pcRateLimitKey JT.pcRateLimitPrefix
+    <*> prefixedKeyCodec "concurrency_key" "concurrency_prefix" toConcurrencyKey JT.pcConcurrencyKey JT.pcConcurrencyPrefix
     <* wo "rate_limit_cost" CFloat8 JT.pcRateLimitCost
 
 -- | Reconstruct a structured @prefix:suffix@ key from its stored full-key and
@@ -348,13 +352,9 @@ prefixedKeyCodec keyCol prefixCol ctor keyOf prefixOf =
     toKey (Just key) (Just prefix) = Just (ctor prefix (splitPrefixedSuffix prefix key))
     toKey _ _ = Nothing
 
--- | Writable job columns with PostgreSQL types, in insert order.
-jobWriteColumns :: [(Text, Text)]
-jobWriteColumns = cColumns (jobCodec "" :: JobCodec (JobRead (Stored Value)))
-
 -- | Writable job column names, in insert order.
 writeColumnNames :: [Text]
-writeColumnNames = map fst jobWriteColumns
+writeColumnNames = map fst (cColumns (jobCodec "" :: JobCodec (JobRead (Stored Value))))
 
 -- | Envelope codec for the DLQ/archive tables: @id@, a timestamp column, and the job snapshot (@job_id@ for @id@).
 jobEnvelopeCodec :: forall payload. Text -> Text -> RowCodec (Int64, UTCTime, JobRead (Stored payload))
@@ -375,10 +375,6 @@ archiveRowCodec queueName =
     <$> jobEnvelopeCodec "completed_at" queueName
     <*> ncol "result" CJsonb
 
--- | A jsonb array of text. Any other shape reads as empty.
-jsonTexts :: Value -> [Text]
-jsonTexts = decodeOrEmpty
-
 -- | A policy row with bucket aggregates and live throttled count.
 rateLimitPolicyViewCodec :: RowCodec RateLimitPolicyView
 rateLimitPolicyViewCodec =
@@ -392,7 +388,7 @@ rateLimitPolicyViewCodec =
     <*> ncol "override_interval" CFloat8
     <*> col "bucket_count" CInt8
     <*> col "throttled_count" CInt8
-    <*> (jsonTexts <$> col "throttled_queues" CJsonb)
+    <*> (decodeOrEmpty <$> col "throttled_queues" CJsonb)
     <*> ncol "min_tokens" CFloat8
     <*> ncol "avg_tokens" CFloat8
 

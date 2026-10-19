@@ -168,33 +168,33 @@ data ArbiterServerConfig m (registry :: JobPayloadRegistry) = ArbiterServerConfi
 runDb :: (MonadIO n) => ArbiterServerConfig m registry -> m a -> n a
 runDb config = liftIO . serverRun config
 
--- | 404 body for a job id that matches no row.
-jobNotFound :: LBS.ByteString
-jobNotFound = "Job not found"
+-- | 404 for a job id that matches no row.
+jobNotFound :: ServerError
+jobNotFound = err404 {errBody = "Job not found"}
 
--- | 404 body for a DLQ id that matches no row.
-dlqJobNotFound :: LBS.ByteString
-dlqJobNotFound = "DLQ job not found"
+-- | 404 for a DLQ id that matches no row.
+dlqJobNotFound :: ServerError
+dlqJobNotFound = err404 {errBody = "DLQ job not found"}
 
--- | 404 body for an archive id that matches no row.
-archivedJobNotFound :: LBS.ByteString
-archivedJobNotFound = "Archived job not found"
+-- | 404 for an archive id that matches no row.
+archivedJobNotFound :: ServerError
+archivedJobNotFound = err404 {errBody = "Archived job not found"}
 
--- | 404 body for a rate-limit prefix that matches no policy.
-rateLimitPolicyNotFound :: LBS.ByteString
-rateLimitPolicyNotFound = "Rate-limit policy not found"
+-- | 404 for a rate-limit prefix that matches no policy.
+rateLimitPolicyNotFound :: ServerError
+rateLimitPolicyNotFound = err404 {errBody = "Rate-limit policy not found"}
 
--- | 404 body for a cron name that matches no schedule.
-cronScheduleNotFound :: LBS.ByteString
-cronScheduleNotFound = "Cron schedule not found"
+-- | 404 for a cron name that matches no schedule.
+cronScheduleNotFound :: ServerError
+cronScheduleNotFound = err404 {errBody = "Cron schedule not found"}
 
--- | 404 body for a worker id that matches no registry row.
-workerNotFound :: LBS.ByteString
-workerNotFound = "Worker not found"
+-- | 404 for a worker id that matches no registry row.
+workerNotFound :: ServerError
+workerNotFound = err404 {errBody = "Worker not found"}
 
--- | 404 body for a concurrency prefix that matches no policy.
-concurrencyPolicyNotFound :: LBS.ByteString
-concurrencyPolicyNotFound = "Concurrency policy not found"
+-- | 404 for a concurrency prefix that matches no policy.
+concurrencyPolicyNotFound :: ServerError
+concurrencyPolicyNotFound = err404 {errBody = "Concurrency policy not found"}
 
 -- | Answer a handler that decided its own error.
 noContentOr :: Either ServerError () -> Handler NoContent
@@ -215,15 +215,15 @@ mutateOr config mutate probe =
       | rowsAffected > 0 = pure (Right ())
       | otherwise = probe schemaName
 
--- | Run a mutation. When it touches no row, answer 404 with @missing@.
+-- | Run a mutation. When it touches no row, answer @missing@.
 mutateOr404
   :: (Monad m)
   => ArbiterServerConfig m registry
-  -> LBS.ByteString
+  -> ServerError
   -> (Text -> m Int64)
   -> Handler NoContent
 mutateOr404 config missing mutate =
-  mutateOr config mutate (const (pure (Left err404 {errBody = missing})))
+  mutateOr config mutate (const (pure (Left missing)))
 
 -- | Run a job mutation. When it touches no row, re-read the job and answer 404, or
 -- the 409 that @refuse@ derives from the job and its status.
@@ -238,7 +238,7 @@ mutateJob
   -> Handler NoContent
 mutateJob tableName config jobId mutate refuse =
   mutateOr config mutate $ \schemaName ->
-    maybe (Left err404 {errBody = jobNotFound}) (\(job, status) -> Left err409 {errBody = refuse job status})
+    maybe (Left jobNotFound) (\(job, status) -> Left err409 {errBody = refuse job status})
       <$> Ops.getJobByIdWithStatus @_ @payload schemaName tableName jobId
 
 -- | Run a mutation over a parent's subtree. When it changes no row, it succeeds, unless the parent is gone.
@@ -252,7 +252,7 @@ mutateChildren
   -> Handler NoContent
 mutateChildren tableName config jobId mutate =
   mutateOr config (\schemaName -> mutate schemaName tableName jobId) $ \schemaName ->
-    (\exists -> if exists then Right () else Left err404 {errBody = jobNotFound})
+    (\exists -> if exists then Right () else Left jobNotFound)
       <$> Ops.jobExists schemaName tableName jobId
 
 -- | Create an 'ArbiterServerConfig' over a backend runner. SSE needs the
@@ -502,7 +502,7 @@ moveToDLQHandler tableName config jobId =
   where
     schemaName = serverSchema config
     moved = Ops.getJobById schemaName tableName jobId >>= maybe (pure notFound) move
-    notFound = Left err404 {errBody = jobNotFound}
+    notFound = Left jobNotFound
     move job = decide <$> Ops.moveToDLQ Ops.TakeLocks schemaName tableName "Manually moved to DLQ via admin API" job
     decide rowsAffected
       | rowsAffected > 0 = Right ()
@@ -625,7 +625,7 @@ retryFromDLQHandler tableName config dlqId edit =
     missing = refuse <$> Ops.dlqJobExists schemaName tableName dlqId
     refuse exists
       | exists = Left err409 {errBody = "Cannot retry: parent job no longer exists (not in queue or DLQ)"}
-      | otherwise = Left err404 {errBody = dlqJobNotFound}
+      | otherwise = Left dlqJobNotFound
 
 -- | Delete a job from DLQ permanently.
 deleteDLQHandler
@@ -913,7 +913,7 @@ withHeldJob tableName config jobId lease finalize =
     =<< runDb config (Ops.getJobById @_ @payload schemaName tableName jobId >>= maybe (pure notFound) finalizeHeld)
   where
     schemaName = serverSchema config
-    notFound = Left err404 {errBody = jobNotFound}
+    notFound = Left jobNotFound
     refuse body = Left err409 {errBody = body}
     held job = Job.claimedBy job == Just (jlClaimedBy lease) && Job.claimSeq job == jlClaimSeq lease
     finalizeHeld job
@@ -1087,7 +1087,7 @@ updateCronScheduleHandler config name update = do
 
   case result of
     Left err -> throwError err400 {errBody = LBS.fromStrict (encodeUtf8 err)}
-    Right Nothing -> throwError err404 {errBody = cronScheduleNotFound}
+    Right Nothing -> throwError cronScheduleNotFound
     Right (Just row) -> flip cronScheduleView row <$> liftIO getCurrentTime
 
 -- | Request an out-of-band run of a cron schedule. A disabled schedule is
@@ -1102,7 +1102,7 @@ runCronScheduleHandler config name = do
   let schemaName = serverSchema config
   outcome <- runDb config $ Ops.requestCronRun schemaName name
   case outcome of
-    Ops.RunReqNotFound -> throwError err404 {errBody = cronScheduleNotFound}
+    Ops.RunReqNotFound -> throwError cronScheduleNotFound
     Ops.RunReqDisabled -> throwError err409 {errBody = "Cron schedule is disabled"}
     Ops.RunReqPending -> throwError err409 {errBody = "Cron schedule already has a run pending"}
     Ops.RunReqStamped -> pure NoContent
@@ -1324,14 +1324,14 @@ keyPage config page mLimit mOffset =
   let (limit, offset) = validatePagination mLimit mOffset
    in (\rows -> Items {items = rows}) <$> runDb config (page limit offset)
 
--- | Run an action. 'Nothing' is a 404 with the given body.
+-- | Run an action. 'Nothing' throws the given error.
 orNotFound
   :: ArbiterServerConfig m registry
   -> m (Maybe a)
-  -> LBS.ByteString
+  -> ServerError
   -> Handler a
 orNotFound config action notFound =
-  runDb config action >>= maybe (throwError err404 {errBody = notFound}) pure
+  runDb config action >>= maybe (throwError notFound) pure
 
 -- | Set or clear a policy's override params, then return the updated view.
 updateRateLimitPolicyHandler

@@ -8,10 +8,12 @@ module Arbiter.Worker.Processing
 
 import Arbiter.Core.Exceptions (JobForceCancelled (..), displayEx)
 import Arbiter.Core.Job.Types qualified as Job
+import Arbiter.Core.Threads (micros)
 import Control.Exception qualified as E
 import Control.Monad (forever)
 import Control.Monad.IO.Class (liftIO)
 import Data.List.NonEmpty (NonEmpty)
+import Data.Time (NominalDiffTime)
 import UnliftIO
   ( MonadUnliftIO
   , atomically
@@ -29,8 +31,8 @@ import Arbiter.Worker.Settlement (PoolEffects, PoolMode, batchLog)
 import Arbiter.Worker.WorkQueue (WorkQueue, finishWork, popWork)
 
 -- | The pause after a batch escapes with an unexpected exception.
-exceptionPauseMicros :: Int
-exceptionPauseMicros = 2_000_000
+exceptionPause :: NominalDiffTime
+exceptionPause = 2
 
 -- | Main loop for a single worker thread.
 workerLoop
@@ -58,5 +60,5 @@ workerLoop config guard mode effectsFor workQueue =
               | isAsyncException exception -> liftIO (E.throwIO exception)
               | otherwise -> do
                   tryLog (batchLog config jobBatch) Error $ "Worker exception: " <> displayEx exception
-                  threadDelay exceptionPauseMicros
+                  threadDelay (micros exceptionPause)
     process `finally` atomically (finishWork workQueue)

@@ -59,7 +59,10 @@ import Arbiter.Core.Gates (addGateMetadataColumnSQL, createGatesTableSQL)
 import Arbiter.Core.Job.Schema
   ( SchemaName
   , TableName
+  , addArchiveForColumnSQL
+  , addCancelRequestedAtColumnSQL
   , addClaimSeqColumnSQL
+  , addClaimedByColumnSQL
   , addKindColumnSQL
   , addTraceContextColumnSQL
   , cancelNotifyChannel
@@ -136,12 +139,7 @@ import Arbiter.Core.RateLimit.Spec
   )
 import Arbiter.Core.SchemaTables (sharedArbiterTables)
 import Arbiter.Core.SqlLiterals (maxIdentifierBytes)
-import Arbiter.Core.Worker
-  ( addArchiveForColumnSQL
-  , addCancelRequestedAtColumnSQL
-  , addClaimedByColumnSQL
-  , createWorkersTableSQL
-  )
+import Arbiter.Core.Worker (createWorkersTableSQL)
 import Control.Exception (bracket, catch, throwIO, try)
 import Control.Monad (unless, void, when)
 import Data.ByteString (ByteString)
@@ -409,21 +407,7 @@ migrateSchema
 migrateSchema conn schemaName tableAdmissions config seeds = do
   withConnection conn LibPQ.disableNoticeReporting
 
-  -- A failed CREATE is fine when the schema exists.
-  executeSQL conn (createSchemaSQL schemaName) `catch` \(createError :: PG.SqlError) -> do
-    present <- schemaExists conn schemaName
-    unless present $
-      ioError
-        ( userError $
-            "Failed to create schema "
-              <> T.unpack schemaName
-              <> " and it does not exist. Either grant CREATE privilege on the database"
-              <> " or create the schema manually: CREATE SCHEMA "
-              <> T.unpack schemaName
-              <> ";"
-              <> "\nOriginal error: "
-              <> show createError
-        )
+  ensureSchema conn schemaName
 
   withConnection conn LibPQ.enableNoticeReporting
 
@@ -450,6 +434,24 @@ migrateSchema conn schemaName tableAdmissions config seeds = do
       reconcileConcurrencyPolicies conn schemaName (seedConcurrencyPolicies seeds)
       reconcileRateLimitDurability conn schemaName (rateLimitDurability config)
       reconcileOptionalTriggers conn schemaName (map fst tableAdmissions) config
+
+-- | Create the schema. A failed CREATE is fine when the schema exists.
+ensureSchema :: PG.Connection -> SchemaName -> IO ()
+ensureSchema conn schemaName =
+  executeSQL conn (createSchemaSQL schemaName) `catch` \(createError :: PG.SqlError) -> do
+    present <- schemaExists conn schemaName
+    unless present $
+      ioError
+        ( userError $
+            "Failed to create schema "
+              <> T.unpack schemaName
+              <> " and it does not exist. Either grant CREATE privilege on the database"
+              <> " or create the schema manually: CREATE SCHEMA "
+              <> T.unpack schemaName
+              <> ";"
+              <> "\nOriginal error: "
+              <> show createError
+        )
 
 -- | Upsert each policy's @default_*@ params into the policies table. Operator
 -- @override_*@ values stay intact. Idempotent. Overrides and removed prefixes survive
@@ -539,47 +541,56 @@ reconcileRateLimitDurability conn schemaName durability = do
 reconcileOptionalTriggers :: PG.Connection -> SchemaName -> [TableName] -> MigrationConfig -> IO ()
 reconcileOptionalTriggers conn schemaName tables config =
   PG.withTransaction conn $ do
-    adoptUnmarkedObjects
-    if enableNotifications config
-      then do
-        dropNotifyObjectsExcept tables
-        traverse_ installNotify tables
-      else dropNotifyObjectsExcept []
-    if enableEventStreaming config
-      then do
-        executeSQL conn (createEventStreamingFunctionSQL schemaName)
-        dropEventTriggersExcept eventTables
-        traverse_ installEventStream tables
-      else do
-        dropEventTriggersExcept []
-        ours <- eventFunctionIsMarked
-        -- The function stays while foreign triggers depend on it.
-        depended <- eventFunctionHasTriggers
-        when (ours && not depended) $ executeSQL conn (dropEventStreamingFunctionSQL schemaName)
+    adoptUnmarkedObjects conn schemaName tables
+    reconcileNotify conn schemaName tables (enableNotifications config)
+    reconcileEventStreaming conn schemaName tables (enableEventStreaming config)
+
+-- | Install notify objects for each queue and drop the rest, or drop them all when disabled.
+reconcileNotify :: PG.Connection -> SchemaName -> [TableName] -> Bool -> IO ()
+reconcileNotify conn schemaName tables enabled
+  | enabled = do
+      dropNotifyObjectsExcept conn schemaName tables
+      traverse_ (installNotify conn schemaName) tables
+  | otherwise = dropNotifyObjectsExcept conn schemaName []
+
+-- | Install event-stream objects for each queue and drop the rest, or drop them all when disabled.
+reconcileEventStreaming :: PG.Connection -> SchemaName -> [TableName] -> Bool -> IO ()
+reconcileEventStreaming conn schemaName tables enabled
+  | enabled = do
+      executeSQL conn (createEventStreamingFunctionSQL schemaName)
+      dropEventTriggersExcept conn schemaName (eventTables tables)
+      traverse_ (installEventStream conn schemaName) tables
+  | otherwise = do
+      dropEventTriggersExcept conn schemaName []
+      dropEventFunctionIfUnused conn schemaName
+
+-- | Install one queue's notify function and trigger. Functions are replaced in place.
+-- That takes no lock on the queue table. Triggers are rebuilt when their marker is off
+-- the current version.
+installNotify :: PG.Connection -> SchemaName -> TableName -> IO ()
+installNotify conn schemaName table = do
+  executeSQL conn (createNotifyFunctionSQL schemaName table)
+  current <- triggerIsCurrent conn schemaName table (notifyTriggerName table) notifyObjectComment
+  unless current $ executeSQL conn (createNotifyTriggerSQL schemaName table)
+
+-- | Install one queue's event-stream triggers on its main and DLQ tables when either
+-- marker is off the current version.
+installEventStream :: PG.Connection -> SchemaName -> TableName -> IO ()
+installEventStream conn schemaName table = do
+  mainCurrent <- triggerIsCurrent conn schemaName table (eventStreamingTriggerName table) eventStreamingObjectComment
+  dlqCurrent <-
+    triggerIsCurrent conn schemaName (table <> dlqSuffix) (eventStreamingDLQTriggerName table) eventStreamingObjectComment
+  unless (mainCurrent && dlqCurrent) $
+    executeSQL conn (createEventStreamingTriggersSQL schemaName table)
+
+-- | Drop the shared event-stream function when arbiter marked it and no trigger uses it.
+dropEventFunctionIfUnused :: PG.Connection -> SchemaName -> IO ()
+dropEventFunctionIfUnused conn schemaName = do
+  ours <- eventFunctionIsMarked
+  -- The function stays while foreign triggers depend on it.
+  depended <- eventFunctionHasTriggers
+  when (ours && not depended) $ executeSQL conn (dropEventStreamingFunctionSQL schemaName)
   where
-    -- Functions are replaced in place. That takes no lock on the queue table. Triggers
-    -- are rebuilt when their marker is off the current version.
-    installNotify table = do
-      executeSQL conn (createNotifyFunctionSQL schemaName table)
-      current <- triggerIsCurrent table (notifyTriggerName table) notifyObjectComment
-      unless current $ executeSQL conn (createNotifyTriggerSQL schemaName table)
-
-    installEventStream table = do
-      mainCurrent <- triggerIsCurrent table (eventStreamingTriggerName table) eventStreamingObjectComment
-      dlqCurrent <- triggerIsCurrent (table <> dlqSuffix) (eventStreamingDLQTriggerName table) eventStreamingObjectComment
-      unless (mainCurrent && dlqCurrent) $
-        executeSQL conn (createEventStreamingTriggersSQL schemaName table)
-
-    triggerIsCurrent table trigger marker =
-      exists
-        conn
-        ( "SELECT EXISTS (SELECT 1 "
-            <> triggerJoins
-            <> "WHERE namespace.nspname = ? AND relation.relname = ? AND trigger.tgname = ? \
-               \AND obj_description(trigger.oid, 'pg_trigger') = ?)"
-        )
-        (schemaName, table, trigger, marker)
-
     eventFunctionIsMarked =
       exists
         conn
@@ -598,60 +609,60 @@ reconcileOptionalTriggers conn schemaName tables config =
         \WHERE namespace.nspname = ? AND function.proname = ? AND NOT trigger.tgisinternal)"
         (schemaName, eventStreamingFunctionName)
 
-    dropTriggersMarked marker keep =
-      executeRendered
-        ( dropTriggerSelect
-            <> triggerJoins
-            <> "WHERE namespace.nspname = ? AND obj_description(trigger.oid, 'pg_trigger') LIKE ? \
-               \AND NOT (relation.relname::text = ANY(?::text[]))"
-        )
-        (schemaName, marker <> "%", PGArray keep)
+-- | Drop event-stream triggers outside the @keep@ tables.
+dropEventTriggersExcept :: PG.Connection -> SchemaName -> [TableName] -> IO ()
+dropEventTriggersExcept conn schemaName = dropTriggersMarked conn schemaName eventStreamingObjectCommentPrefix
 
-    dropEventTriggersExcept = dropTriggersMarked eventStreamingObjectCommentPrefix
+-- | Drop notify triggers and functions for queues outside @keep@.
+dropNotifyObjectsExcept :: PG.Connection -> SchemaName -> [TableName] -> IO ()
+dropNotifyObjectsExcept conn schemaName keep = do
+  dropTriggersMarked conn schemaName notifyObjectCommentPrefix keep
+  -- A function that still carries a trigger stays.
+  executeRendered
+    conn
+    ( "SELECT format('DROP FUNCTION IF EXISTS %I.%I();', namespace.nspname, function.proname) "
+        <> functionJoins
+        <> "WHERE namespace.nspname = ? AND obj_description(function.oid, 'pg_proc') LIKE ? AND function.pronargs = 0 \
+           \AND NOT (function.proname::text = ANY(?::text[])) \
+           \AND NOT EXISTS (SELECT 1 FROM pg_trigger trigger WHERE trigger.tgfoid = function.oid AND NOT trigger.tgisinternal)"
+    )
+    (schemaName, notifyObjectCommentPrefix <> "%", PGArray (map notifyFunctionName keep))
 
-    dropNotifyObjectsExcept keep = do
-      dropTriggersMarked notifyObjectCommentPrefix keep
-      -- A function that still carries a trigger stays.
-      executeRendered
-        ( "SELECT format('DROP FUNCTION IF EXISTS %I.%I();', namespace.nspname, function.proname) "
-            <> functionJoins
-            <> "WHERE namespace.nspname = ? AND obj_description(function.oid, 'pg_proc') LIKE ? AND function.pronargs = 0 \
-               \AND NOT (function.proname::text = ANY(?::text[])) \
-               \AND NOT EXISTS (SELECT 1 FROM pg_trigger trigger WHERE trigger.tgfoid = function.oid AND NOT trigger.tgisinternal)"
-        )
-        (schemaName, notifyObjectCommentPrefix <> "%", PGArray (map notifyFunctionName keep))
-
-    -- Objects installed before arbiter stamped markers carry no comment. Adoption
-    -- stamps a marker that no install writes. The sweeps match it. The currency probe
-    -- rejects it. Adoption covers the names this registry generates. An unmarked
-    -- lookalike stays foreign.
-    adoptUnmarkedObjects = do
-      executeRendered
-        ( commentFunctionSelect
-            <> functionJoins
-            <> "WHERE namespace.nspname = ? AND function.proname = ANY(?::text[]) AND function.pronargs = 0 \
-               \AND obj_description(function.oid, 'pg_proc') IS NULL"
-        )
-        (notifyAdoptedObjectComment, schemaName, PGArray (map notifyFunctionName tables))
-      adoptTriggers notifyAdoptedObjectComment (map notifyTriggerName tables) tables
-      adoptTriggers eventStreamingAdoptedObjectComment eventTriggerNames eventTables
-      -- The shared function is adopted when one of its triggers is.
-      executeRendered
-        ( commentFunctionSelect
-            <> functionJoins
-            <> "WHERE namespace.nspname = ? AND function.proname = ? AND function.pronargs = 0 \
-               \AND obj_description(function.oid, 'pg_proc') IS NULL \
-               \AND EXISTS (SELECT 1 FROM pg_trigger trigger WHERE trigger.tgfoid = function.oid AND NOT trigger.tgisinternal \
-               \AND obj_description(trigger.oid, 'pg_trigger') LIKE ?)"
-        )
-        ( eventStreamingAdoptedObjectComment
-        , schemaName
-        , eventStreamingFunctionName
-        , eventStreamingObjectCommentPrefix <> "%"
-        )
-
+-- | Objects installed before arbiter stamped markers carry no comment. Adoption
+-- stamps a marker that no install writes. The sweeps match it. The currency probe
+-- rejects it. Adoption covers the names this registry generates. An unmarked
+-- lookalike stays foreign.
+adoptUnmarkedObjects :: PG.Connection -> SchemaName -> [TableName] -> IO ()
+adoptUnmarkedObjects conn schemaName tables = do
+  executeRendered
+    conn
+    ( commentFunctionSelect
+        <> functionJoins
+        <> "WHERE namespace.nspname = ? AND function.proname = ANY(?::text[]) AND function.pronargs = 0 \
+           \AND obj_description(function.oid, 'pg_proc') IS NULL"
+    )
+    (notifyAdoptedObjectComment, schemaName, PGArray (map notifyFunctionName tables))
+  adoptTriggers notifyAdoptedObjectComment (map notifyTriggerName tables) tables
+  adoptTriggers eventStreamingAdoptedObjectComment eventTriggerNames (eventTables tables)
+  -- The shared function is adopted when one of its triggers is.
+  executeRendered
+    conn
+    ( commentFunctionSelect
+        <> functionJoins
+        <> "WHERE namespace.nspname = ? AND function.proname = ? AND function.pronargs = 0 \
+           \AND obj_description(function.oid, 'pg_proc') IS NULL \
+           \AND EXISTS (SELECT 1 FROM pg_trigger trigger WHERE trigger.tgfoid = function.oid AND NOT trigger.tgisinternal \
+           \AND obj_description(trigger.oid, 'pg_trigger') LIKE ?)"
+    )
+    ( eventStreamingAdoptedObjectComment
+    , schemaName
+    , eventStreamingFunctionName
+    , eventStreamingObjectCommentPrefix <> "%"
+    )
+  where
     adoptTriggers marker triggerNames relNames =
       executeRendered
+        conn
         ( commentTriggerSelect
             <> triggerJoins
             <> "WHERE namespace.nspname = ? AND NOT trigger.tgisinternal AND trigger.tgname = ANY(?::text[]) \
@@ -659,16 +670,13 @@ reconcileOptionalTriggers conn schemaName tables config =
         )
         (marker, schemaName, PGArray triggerNames, PGArray relNames)
 
-    eventTables = concatMap (\table -> [table, table <> dlqSuffix]) tables
-
     eventTriggerNames =
       map fst legacyEventStreamingTriggers
         <> concatMap (\table -> [eventStreamingTriggerName table, eventStreamingDLQTriggerName table]) tables
 
-    executeRendered :: (PG.ToRow params) => Query -> params -> IO ()
-    executeRendered sql params = do
-      commands <- query conn sql params
-      traverse_ (\(Only command) -> executeSQL conn command) commands
+-- | Each queue's main and DLQ tables, which carry event-stream triggers.
+eventTables :: [TableName] -> [TableName]
+eventTables = concatMap (\table -> [table, table <> dlqSuffix])
 
 -- | Run one rendered DDL or DML statement.
 executeSQL :: PG.Connection -> Text -> IO ()
@@ -692,6 +700,36 @@ commentFunctionSelect = "SELECT format('COMMENT ON FUNCTION %I.%I() IS %L;', nam
 -- | Whether a single-row boolean probe returns true.
 exists :: (PG.ToRow params) => PG.Connection -> Query -> params -> IO Bool
 exists conn sql params = maybe False fromOnly . listToMaybe <$> query conn sql params
+
+-- | Whether a trigger exists on a table and carries the given marker.
+triggerIsCurrent :: PG.Connection -> SchemaName -> TableName -> Text -> Text -> IO Bool
+triggerIsCurrent conn schemaName table trigger marker =
+  exists
+    conn
+    ( "SELECT EXISTS (SELECT 1 "
+        <> triggerJoins
+        <> "WHERE namespace.nspname = ? AND relation.relname = ? AND trigger.tgname = ? \
+           \AND obj_description(trigger.oid, 'pg_trigger') = ?)"
+    )
+    (schemaName, table, trigger, marker)
+
+-- | Drop the triggers whose marker starts with @marker@, outside the @keep@ tables.
+dropTriggersMarked :: PG.Connection -> SchemaName -> Text -> [TableName] -> IO ()
+dropTriggersMarked conn schemaName marker keep =
+  executeRendered
+    conn
+    ( dropTriggerSelect
+        <> triggerJoins
+        <> "WHERE namespace.nspname = ? AND obj_description(trigger.oid, 'pg_trigger') LIKE ? \
+           \AND NOT (relation.relname::text = ANY(?::text[]))"
+    )
+    (schemaName, marker <> "%", PGArray keep)
+
+-- | Run each statement a rendering query returns.
+executeRendered :: (PG.ToRow params) => PG.Connection -> Query -> params -> IO ()
+executeRendered conn sql params = do
+  commands <- query conn sql params
+  traverse_ (\(Only command) -> executeSQL conn command) commands
 
 -- | A @DROP TRIGGER@ statement per matched row.
 dropTriggerSelect :: Query
@@ -734,63 +772,65 @@ jobQueueMigrationsForTable
   -- ^ Which admission trigger kinds to install
   -> [MigrationCommand]
 jobQueueMigrationsForTable schemaName tableName admission =
-  let prefix = T.unpack tableName <> "-"
-      script name sql = MigrationScript (prefix <> name) (encodeUtf8 sql)
+  coreMigrations <> concurrencyTriggers <> rateLimitTriggers
+  where
+    prefix = T.unpack tableName <> "-"
+    script name sql = MigrationScript (prefix <> name) (encodeUtf8 (sql schemaName tableName))
 
-      coreMigrations =
-        [ script "create-table" $ createJobQueueTableSQL schemaName tableName
-        , script "create-dlq-table" $ createJobQueueDLQTableSQL schemaName tableName
-        , script "create-dlq-group-key-index" $ createDLQGroupKeyIndexSQL schemaName tableName
-        , script "create-dlq-failed-at-index" $ createDLQFailedAtIndexSQL schemaName tableName
-        , script "create-dedup-key-index" $ createDedupKeyIndexSQL schemaName tableName
-        , script "create-group-key-index" $ createJobQueueGroupKeyIndexSQL schemaName tableName
-        , script "create-parent-id-index" $ createParentIdIndexSQL schemaName tableName
-        , script "create-dlq-parent-id-index" $ createDLQParentIdIndexSQL schemaName tableName
-        , script "create-results-table" $ createResultsTableSQL schemaName tableName
-        , script "create-groups-table" $ createGroupsTableSQL schemaName tableName
-        , script "add-claimed-by-column" $ addClaimedByColumnSQL schemaName tableName
-        , script "migrate-ungrouped-ready-split-indexes" $ migrateUngroupedReadySplitIndexesSQL schemaName tableName
-        , script "migrate-groups-ready-ranking" $ migrateGroupsReadyRankingSQL schemaName tableName
-        , script "add-rate-limit-columns" $ addRateLimitColumnsSQL schemaName tableName
-        , script "create-throttled-index" $ createThrottledIndexSQL schemaName tableName
-        , script "add-concurrency-columns" $ addConcurrencyColumnsSQL schemaName tableName
-        , script "create-concurrency-index" $ createConcurrencyIndexSQL schemaName tableName
-        , script "add-rate-limit-cost-column" $ addRateLimitCostColumnSQL schemaName tableName
-        , script "set-job-queue-fillfactor-100" $
-            "ALTER TABLE " <> jobQueueTable schemaName tableName <> " SET (fillfactor = 100);"
-        , script "set-max-attempts-default" $ setMaxAttemptsDefaultSQL schemaName tableName
-        , script "add-cancel-requested-at-column" $ addCancelRequestedAtColumnSQL schemaName tableName
-        , script "add-archive-for-column" $ addArchiveForColumnSQL schemaName tableName
-        , script "create-archive-table" $ createJobQueueArchiveTableSQL schemaName tableName
-        , script "create-archive-completed-at-index" $ createArchiveCompletedAtIndexSQL schemaName tableName
-        , script "create-archive-expires-at-index" $ createArchiveExpiresAtIndexSQL schemaName tableName
-        , script "create-archive-job-id-index" $ createArchiveJobIdIndexSQL schemaName tableName
-        , script "create-archive-parent-id-index" $ createArchiveParentIdIndexSQL schemaName tableName
-        , script "create-archive-group-key-index" $ createArchiveGroupKeyIndexSQL schemaName tableName
-        , -- Runs after the archive table exists. It alters that table too.
-          script "add-trace-context-column" $ addTraceContextColumnSQL schemaName tableName
-        , script "add-claim-seq-column" $ addClaimSeqColumnSQL schemaName tableName
-        , script "create-groups-emptied-index" $ createGroupsEmptiedIndexSQL schemaName tableName
-        , script "create-group-retried-index" $ createJobQueueGroupRetriedIndexSQL schemaName tableName
-        , script "create-grouped-due-index" $ createJobQueueGroupedDueIndexSQL schemaName tableName
-        , script "create-group-in-flight-index" $ createJobQueueGroupInFlightIndexSQL schemaName tableName
-        , script "create-groups-trigger-functions-v12" $ createGroupsTriggerFunctionsSQL schemaName tableName
-        , script "create-groups-triggers" $ createGroupsTriggersSQL schemaName tableName
-        , script "add-kind-column" $ addKindColumnSQL schemaName tableName
-        ]
-      concurrencyTriggers
-        | tableConcurrency admission =
-            [ script "create-concurrency-trigger-functions" $ createConcurrencyTriggerFunctionsSQL schemaName tableName
-            , script "create-concurrency-triggers" $ createConcurrencyTriggersSQL schemaName tableName
-            ]
-        | otherwise = []
-      rateLimitTriggers
-        | tableRateLimit admission =
-            [ script "create-rate-limit-bucket-trigger-functions" $ createRateLimitBucketTriggerFunctionsSQL schemaName tableName
-            , script "create-rate-limit-bucket-triggers" $ createRateLimitBucketTriggersSQL schemaName tableName
-            ]
-        | otherwise = []
-   in coreMigrations <> concurrencyTriggers <> rateLimitTriggers
+    coreMigrations =
+      [ script "create-table" createJobQueueTableSQL
+      , script "create-dlq-table" createJobQueueDLQTableSQL
+      , script "create-dlq-group-key-index" createDLQGroupKeyIndexSQL
+      , script "create-dlq-failed-at-index" createDLQFailedAtIndexSQL
+      , script "create-dedup-key-index" createDedupKeyIndexSQL
+      , script "create-group-key-index" createJobQueueGroupKeyIndexSQL
+      , script "create-parent-id-index" createParentIdIndexSQL
+      , script "create-dlq-parent-id-index" createDLQParentIdIndexSQL
+      , script "create-results-table" createResultsTableSQL
+      , script "create-groups-table" createGroupsTableSQL
+      , script "add-claimed-by-column" addClaimedByColumnSQL
+      , script "migrate-ungrouped-ready-split-indexes" migrateUngroupedReadySplitIndexesSQL
+      , script "migrate-groups-ready-ranking" migrateGroupsReadyRankingSQL
+      , script "add-rate-limit-columns" addRateLimitColumnsSQL
+      , script "create-throttled-index" createThrottledIndexSQL
+      , script "add-concurrency-columns" addConcurrencyColumnsSQL
+      , script "create-concurrency-index" createConcurrencyIndexSQL
+      , script "add-rate-limit-cost-column" addRateLimitCostColumnSQL
+      , script "set-job-queue-fillfactor-100" setJobQueueFillfactorSQL
+      , script "set-max-attempts-default" setMaxAttemptsDefaultSQL
+      , script "add-cancel-requested-at-column" addCancelRequestedAtColumnSQL
+      , script "add-archive-for-column" addArchiveForColumnSQL
+      , script "create-archive-table" createJobQueueArchiveTableSQL
+      , script "create-archive-completed-at-index" createArchiveCompletedAtIndexSQL
+      , script "create-archive-expires-at-index" createArchiveExpiresAtIndexSQL
+      , script "create-archive-job-id-index" createArchiveJobIdIndexSQL
+      , script "create-archive-parent-id-index" createArchiveParentIdIndexSQL
+      , script "create-archive-group-key-index" createArchiveGroupKeyIndexSQL
+      , -- Runs after the archive table exists. It alters that table too.
+        script "add-trace-context-column" addTraceContextColumnSQL
+      , script "add-claim-seq-column" addClaimSeqColumnSQL
+      , script "create-groups-emptied-index" createGroupsEmptiedIndexSQL
+      , script "create-group-retried-index" createJobQueueGroupRetriedIndexSQL
+      , script "create-grouped-due-index" createJobQueueGroupedDueIndexSQL
+      , script "create-group-in-flight-index" createJobQueueGroupInFlightIndexSQL
+      , script "create-groups-trigger-functions-v12" createGroupsTriggerFunctionsSQL
+      , script "create-groups-triggers" createGroupsTriggersSQL
+      , script "add-kind-column" addKindColumnSQL
+      ]
+    concurrencyTriggers
+      | tableConcurrency admission =
+          [ script "create-concurrency-trigger-functions" createConcurrencyTriggerFunctionsSQL
+          , script "create-concurrency-triggers" createConcurrencyTriggersSQL
+          ]
+      | otherwise = []
+    rateLimitTriggers
+      | tableRateLimit admission =
+          [ script "create-rate-limit-bucket-trigger-functions" createRateLimitBucketTriggerFunctionsSQL
+          , script "create-rate-limit-bucket-triggers" createRateLimitBucketTriggersSQL
+          ]
+      | otherwise = []
+
+    setJobQueueFillfactorSQL schema table = "ALTER TABLE " <> jobQueueTable schema table <> " SET (fillfactor = 100);"
 
 -- | Whether a schema exists.
 schemaExists :: PG.Connection -> SchemaName -> IO Bool

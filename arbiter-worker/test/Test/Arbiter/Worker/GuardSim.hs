@@ -66,6 +66,7 @@ import Test.Arbiter.Worker.Sim
   , explorePlans
   , exploreScenario
   , hangExtend
+  , indexed
   , neverReturns
   , newRecorder
   , refuseExtend
@@ -165,7 +166,7 @@ world setup = do
   attempts <- newTVarIO (0 :: Int)
   lags <- newTVarIO (settleLags setup)
   guard <- startGuard (guardConfig setup epoch recorder script attempts lags)
-  pure (World guard recorder, events)
+  pure (World {worldGuard = guard, record = recorder}, events)
 
 -- | Explore every schedule of a scenario and check its event log.
 simulate :: Setup -> (forall s. World s -> IOSim s ()) -> ([Event] -> Property) -> Property
@@ -351,7 +352,7 @@ genPlan = do
       <*> pure []
       <*> pure []
       <*> pure False
-  pure (Plan setup {rowLeases = [(planJob b, rowLeaseAt setup b) | b <- batches]} batches)
+  pure Plan {planSetup = setup {rowLeases = [(planJob b, rowLeaseAt setup b) | b <- batches]}, planBatches = batches}
 
 -- | The row's @not_visible_until@: the claim leased it before the batch started.
 rowLeaseAt :: Setup -> BatchPlan -> DiffTime
@@ -418,14 +419,15 @@ data Statement = Statement
 statements :: [Event] -> [Statement]
 statements events =
   [ Statement
-      at
-      jobs
-      (listToMaybe [(i, verdicts) | (i, Finished a verdicts _) <- indexed, a == attempt, i > index, i < nextIssue index])
-  | (index, Issued attempt jobs at) <- indexed
+      { issuedAt = at
+      , carried = jobs
+      , finished =
+          listToMaybe [(i, verdicts) | (i, Finished a verdicts _) <- indexed events, a == attempt, i > index, i < nextIssue index]
+      }
+  | (index, Issued attempt jobs at) <- indexed events
   ]
   where
-    indexed = zip [0 :: Int ..] events
-    nextIssue index = fromMaybe (length events) (listToMaybe [i | (i, Issued {}) <- indexed, i > index])
+    nextIssue index = fromMaybe (length events) (listToMaybe [i | (i, Issued {}) <- indexed events, i > index])
 
 -- | Invariants every plan must keep.
 judgePlan :: (Plan, [Event]) -> Property
@@ -445,11 +447,10 @@ judgePlan (plan, events) =
     uninterruptibleReply (HardDelay _ _) = True
     uninterruptibleReply _ = False
     timeoutFor = leaseTimeout setup
-    indexed = zip [0 :: Int ..] events
     issued = statements events
     replyOf attempt = listToMaybe (drop attempt (unfoldr (Just . scripted (Answer 0 [])) (replies setup)))
     registeredAt job = fromMaybe (Time 0) (listToMaybe [at | Registered j at <- events, j == job])
-    endedAt job = [(index, outcome, at) | (index, Ended j outcome at) <- indexed, j == job]
+    endedAt job = [(index, outcome, at) | (index, Ended j outcome at) <- indexed events, j == job]
 
     judgeBatch batch =
       conjoin
@@ -464,7 +465,7 @@ judgePlan (plan, events) =
         [ counterexample ("a statement carried job " <> show job <> " after its handler ended") $
             null
               [ ()
-              | (i, Issued _ jobs issuedAt') <- indexed
+              | (i, Issued _ jobs issuedAt') <- indexed events
               , i > index
               , job `elem` jobs
               , issuedAt' > at || outcome == Gone leaseExpiredReason

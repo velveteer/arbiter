@@ -183,16 +183,17 @@ allQueueStatsSQL codec schemaName queueKinds =
       workersTbl = arbiterWorkersTable schemaName
    in rawRows codec $ unionAllOverQueueTables schemaName (map fst queueKinds) $ \tableName _ ->
         let stats = queueStatsSelect DlqTotal schemaName tableName (fromMaybe [] (lookup tableName queueKinds))
+            queue = textLiteral tableName
          in [text|
-          SELECT '${tableName}' AS queue, stats.*,
-                 COALESCE((SELECT paused FROM ${queuesTbl} WHERE queue_name = '${tableName}'), FALSE) AS queue_paused,
+          SELECT ${queue} AS queue, stats.*,
+                 COALESCE((SELECT paused FROM ${queuesTbl} WHERE queue_name = ${queue}), FALSE) AS queue_paused,
                  worker_counts.workers_live, worker_counts.workers_paused
           FROM (${stats}) stats
           CROSS JOIN (
             -- Live matches the worker health CASE: a fresh heartbeat and not draining.
             SELECT COUNT(*)::int8 AS workers_live, COUNT(*) FILTER (WHERE paused)::int8 AS workers_paused
             FROM ${workersTbl}
-            WHERE queue_name = '${tableName}'
+            WHERE queue_name = ${queue}
               AND NOT (${workerStaleSQL})
               AND NOT shutting_down
           ) worker_counts

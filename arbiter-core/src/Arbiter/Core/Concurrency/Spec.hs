@@ -9,6 +9,7 @@
 module Arbiter.Core.Concurrency.Spec
   ( -- * Core types
     ConcurrencyKey (..)
+  , toConcurrencyKey
   , concurrencyKeyText
   , ConcurrencyPolicy (..)
   , concurrencyPolicy
@@ -58,11 +59,15 @@ data ConcurrencyKey = ConcurrencyKey
   }
   deriving stock (Eq, Show)
 
+-- | A concurrency key from its prefix and suffix.
+toConcurrencyKey :: Text -> Text -> ConcurrencyKey
+toConcurrencyKey prefix suffix = ConcurrencyKey {ckPrefix = prefix, ckSuffix = suffix}
+
 instance ToJSON ConcurrencyKey where
   toJSON (ConcurrencyKey prefix suffix) = prefixedKeyToJSON prefix suffix
 
 instance FromJSON ConcurrencyKey where
-  parseJSON = prefixedKeyParseJSON "ConcurrencyKey" ConcurrencyKey
+  parseJSON = prefixedKeyParseJSON "ConcurrencyKey" toConcurrencyKey
 
 -- | The stored key text, @prefix:suffix@.
 concurrencyKeyText :: ConcurrencyKey -> Text
@@ -102,7 +107,7 @@ noConcurrency = selectNone
 
 -- | Cap by a fixed policy, keyed by a per-job suffix, such as a tenant id.
 concurrencyBy :: ConcurrencyPolicy -> (payload -> Text) -> ConcurrencyFor payload
-concurrencyBy = selectBy ConcurrencyKey
+concurrencyBy = selectBy toConcurrencyKey
 
 -- | Cap by a fixed policy under one shared key.
 globalConcurrency :: ConcurrencyPolicy -> Text -> ConcurrencyFor payload

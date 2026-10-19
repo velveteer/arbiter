@@ -119,8 +119,11 @@ decodeClaim response = case decode (simpleBody response) of
   Nothing -> error "claim response did not decode"
 
 -- | The lease a finalize has to present for this job.
+jobLease :: JobRead ServantTestPayload -> JobLease
+jobLease job = JobLease {jlClaimSeq = claimSeq job, jlClaimedBy = fromMaybe UUID.nil (claimedBy job)}
+
 leaseBody :: JobRead ServantTestPayload -> LB.ByteString
-leaseBody job = encode (JobLease (claimSeq job) (fromMaybe UUID.nil (claimedBy job)))
+leaseBody = encode . jobLease
 
 -- | A worker-pool identity. The finalize routes refuse to act for it.
 poolWorkerId :: UUID.UUID
@@ -135,15 +138,19 @@ nackPath = jobVerbPath "nack"
 jobVerbPath :: Text -> JobRead ServantTestPayload -> ByteString
 jobVerbPath verb job =
   TE.encodeUtf8 $
-    "/api/queues/arbiter_servant_test/jobs/" <> T.pack (show (primaryKey job)) <> "/" <> verb
+    "/api/queues/" <> testTable <> "/jobs/" <> T.pack (show (primaryKey job)) <> "/" <> verb
 
 -- | A path under the test queue.
 queuePath :: Text -> ByteString
-queuePath rest = TE.encodeUtf8 ("/api/queues/arbiter_servant_test/" <> rest)
+queuePath rest = TE.encodeUtf8 ("/api/queues/" <> testTable <> "/" <> rest)
 
 -- | A route on one row, e.g. @rowPath "dlq" 4 "retry"@.
 rowPath :: Text -> Int64 -> Text -> ByteString
 rowPath collection rowId verb = queuePath (collection <> "/" <> T.pack (show rowId) <> "/" <> verb)
+
+-- | How long the event-stream test waits for each chunk.
+streamChunkTimeoutMicros :: Int
+streamChunkTimeoutMicros = 5_000_000
 
 -- | A row ID that no test inserts.
 absentJobId :: Int64
@@ -165,7 +172,6 @@ jsonMatch expected = ResponseMatcher 200 [] (MatchBody matcher)
       Just actual -> Just $ "JSON mismatch:\n  expected: " <> show expected <> "\n  actual: " <> show actual
       Nothing -> Just "Response body is not valid JSON"
 
--- Test schema
 testSchema :: Text
 testSchema = "arbiter_servant_test"
 
@@ -177,7 +183,6 @@ pacedSchema = "arbiter_servant_paced_test"
 missingSchema :: Text
 missingSchema = "arbiter_servant_missing"
 
--- | Test payload type
 data ServantTestPayload
   = TestMessage Text
   | TestCalculation Int Int
@@ -186,10 +191,8 @@ data ServantTestPayload
 
 instance HasKind ServantTestPayload
 
--- | Test registry
 type ServantTestRegistry = '[QueueWithResult "arbiter_servant_test" ServantTestPayload [Text]]
 
--- Table name for tests
 testTable :: Text
 testTable = "arbiter_servant_test"
 
@@ -1503,7 +1506,7 @@ spec connStr = do
       liftIO $ void $ runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "not yours"))
       claimed <- decodeClaim <$> postJson "/api/queues/arbiter_servant_test/claim" "{\"maxJobs\":1}"
       let job = head claimed
-          forged = encode (JobLease (claimSeq job) UUID.nil)
+          forged = encode JobLease {jlClaimSeq = claimSeq job, jlClaimedBy = UUID.nil}
 
       postJson (ackPath job) forged `shouldRespondWith` 409
 
@@ -1519,7 +1522,7 @@ spec connStr = do
 
       claimed <- decodeClaim <$> postJson "/api/queues/arbiter_servant_test/claim" "{\"maxJobs\":1}"
       let child = head claimed
-          body = encode (AckRequest (JobLease (claimSeq child) (fromMaybe UUID.nil (claimedBy child))) (Just ["done" :: Text]))
+          body = encode AckRequest {arLease = jobLease child, arResult = Just ["done" :: Text]}
 
       postJson (ackPath child) body `shouldRespondWith` 204
 
@@ -1904,7 +1907,7 @@ spec connStr = do
             atomicModifyIORef' chunks (\acc -> (LB.toStrict (Builder.toLazyByteString builder) : acc, ()))
             void (tryPutMVar arrived ())
           awaitChunk needle = do
-            got <- timeout 5_000_000 (takeMVar arrived)
+            got <- timeout streamChunkTimeoutMicros (takeMVar arrived)
             received <- readIORef chunks
             if any (BS.isInfixOf needle) received
               then pure True

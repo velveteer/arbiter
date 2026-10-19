@@ -19,21 +19,28 @@ module Arbiter.Core.Sql.DLQ
   , dlqParentIdsSQL
   , cascadeChildrenToDLQSQL
   , countDLQChildrenBatchSQL
+  , listDLQFilteredSQL
+  , countDLQFilteredSQL
   ) where
 
 import Data.Int (Int64)
 import Data.Text (Text)
+import Data.Time (UTCTime)
 import NeatInterpolation (text)
 
-import Arbiter.Core.Codec (jobRowCodec)
+import Arbiter.Core.Codec (codecColumns, dlqRowCodec, jobRowCodec, joinColumns)
 import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueDLQTable, jobQueueGroupsTable, jobQueueTable)
 import Arbiter.Core.Job.Types (JobRead, Stored)
 import Arbiter.Core.Sql.Insert (RowEdit (..), editJoin)
-import Arbiter.Core.Sql.Jobs (dlqCarriedCols, jobReadColumns, requeuedCols, requeuedValsEditing)
+import Arbiter.Core.Sql.Jobs (countWhereSQL, dlqCarriedCols, jobReadColumns, requeuedCols, requeuedValsEditing)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen, rows)
 import Arbiter.Core.Sql.Tree (childDescendantsCte, lockedByIdsCte)
 import Arbiter.Core.SqlLiterals (attemptsSpentSQL, intLiteral, lockGroupKeyOnConflictSQL)
+
+-- | The DLQ read columns, in codec order. The DLQ uses @job_id@ for the main-table @id@.
+allDLQColumns :: Text
+allDLQColumns = joinColumns (codecColumns (dlqRowCodec ""))
 
 -- | Whether a DLQ move re-checks the attempt budget it was selected on.
 data DLQMove
@@ -324,3 +331,24 @@ countDLQChildrenBatchSQL schemaName tableName jobIds =
         WHERE parent_id = ANY(#{jobIds :: [CInt8]})
         GROUP BY parent_id
       |]
+
+-- | List DLQ jobs under a dynamic WHERE and an @orderBy@ from 'Arbiter.Core.Sql.Jobs.buildDLQOrderBy'.
+listDLQFilteredSQL
+  :: SchemaName -> TableName -> Query () -> Text -> Int64 -> Int64 -> Query (Int64, UTCTime, JobRead (Stored payload))
+listDLQFilteredSQL schemaName tableName whereFrag orderBy limit offset =
+  let dlqTbl = jobQueueDLQTable schemaName tableName
+   in rows
+        (dlqRowCodec tableName)
+        [sql|
+          SELECT ${allDLQColumns}
+          FROM ${dlqTbl}
+          ${whereFrag}
+          ORDER BY ${orderBy}
+          LIMIT #{limit :: CInt8} OFFSET #{offset :: CInt8}
+        |]
+
+-- | Count DLQ jobs under a dynamic WHERE.
+countDLQFilteredSQL :: SchemaName -> TableName -> Query () -> Query Int64
+countDLQFilteredSQL schemaName tableName whereFrag =
+  let dlqTbl = jobQueueDLQTable schemaName tableName
+   in countWhereSQL dlqTbl whereFrag

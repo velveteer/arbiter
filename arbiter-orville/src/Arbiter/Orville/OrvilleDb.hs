@@ -47,7 +47,6 @@ import Arbiter.Orville.MonadArbiter
 -- | The schema of the arbiter tables and an optional LISTEN\/NOTIFY listener.
 data OrvilleEnv (registry :: JobPayloadRegistry) = OrvilleEnv
   { schema :: SchemaName
-  -- ^ The schema the arbiter tables live in.
   , listener :: Maybe Listener
   -- ^ A listener such as @Arbiter.LibPQ.newLibPQListener@ from arbiter-libpq. 'Nothing' for poll-only.
   }
@@ -55,7 +54,6 @@ data OrvilleEnv (registry :: JobPayloadRegistry) = OrvilleEnv
 -- | The Orville database monad. Handlers run in the base monad.
 newtype OrvilleDb (registry :: JobPayloadRegistry) m a = OrvilleDb
   { unOrvilleDb :: ReaderT (OrvilleEnv registry) m a
-  -- ^ The action as a reader over its env.
   }
   deriving newtype
     ( Applicative

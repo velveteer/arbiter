@@ -240,7 +240,7 @@ sharedPoolIdleSeconds = 60
 -- | Seed a concurrency policy's default limit and clear any override, as SQL statements.
 seedConcurrencyPolicySQL :: Text -> Text -> Int32 -> [Text]
 seedConcurrencyPolicySQL schema prefix lim =
-  [ CC.upsertConcurrencyPolicyRowSQL schema (ConcurrencyPolicy prefix lim)
+  [ CC.upsertConcurrencyPolicyRowSQL schema ConcurrencyPolicy {cpPrefix = prefix, cpLimit = lim}
   , "UPDATE "
       <> CC.arbiterConcurrencyPoliciesTable schema
       <> " SET override_limit = NULL WHERE prefix_id = "

@@ -238,27 +238,13 @@ scheduledPredicate = summaryPredicate "IS NOT NULL"
 -- | A live, unsuspended job with attempts left whose @not_visible_until@ passes @visibility@.
 summaryPredicate :: Text -> Text -> Text
 summaryPredicate visibility col =
-  col
-    <> "not_visible_until "
-    <> visibility
-    <> " AND NOT "
-    <> col
-    <> "suspended AND "
-    <> col
-    <> "cancel_requested_at IS NULL AND "
-    <> attemptsLeftSQL col
+  let attemptsLeft = attemptsLeftSQL col
+   in [text|${col}not_visible_until ${visibility} AND NOT ${col}suspended AND ${col}cancel_requested_at IS NULL AND ${attemptsLeft}|]
 
 -- | Whether a job still holds its group's in-flight slot. @col@ prefixes each column.
 inFlightPredicate :: Text -> Text
 inFlightPredicate col =
-  col
-    <> "not_visible_until > NOW() AND NOT "
-    <> col
-    <> "suspended AND ("
-    <> col
-    <> "attempts > 0 OR "
-    <> col
-    <> "throttled_until > NOW())"
+  [text|${col}not_visible_until > NOW() AND NOT ${col}suspended AND (${col}attempts > 0 OR ${col}throttled_until > NOW())|]
 
 -- | Whether an updated row changes a value some group summary reads, its
 -- @group_key@ aside.

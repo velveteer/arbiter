@@ -14,7 +14,7 @@ module Main (main) where
 import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Core.RateLimit.Schema (arbiterRateLimitsTableName)
 import Arbiter.Core.RateLimit.Spec (Durability (Durable), RateLimitPolicy (..))
-import Control.Concurrent.Async (mapConcurrently)
+import Control.Concurrent.Async (replicateConcurrently)
 import Control.Exception (bracket, bracket_)
 import Control.Monad (void)
 import Data.Aeson (FromJSON, ToJSON)
@@ -359,13 +359,17 @@ migrationReconciliationTests connStr =
 lockSchema :: Text
 lockSchema = "arbiter_migration_lock_test"
 
+-- | Replicas that race to migrate the same schema.
+migratingReplicas :: Int
+migratingReplicas = 4
+
 migrationLockTests :: ByteString -> TestTree
 migrationLockTests connStr =
   testGroup
     "migration lock"
     [ testCase "applies each migration once when replicas migrate at the same time" $
         withFreshSchema connStr lockSchema $ \conn -> do
-          results <- mapConcurrently (\_ -> migrate defaultMigrationConfig) [1 .. 4 :: Int]
+          results <- replicateConcurrently migratingReplicas (migrate defaultMigrationConfig)
           traverse_ shouldMigrate results
           appliedTwice conn >>= (@?= Just 0)
     , testCase "gives up on a lock still held at the timeout, and migrates once it is free" $
@@ -604,7 +608,8 @@ bucketPersistence conn =
 getTestConnectionString :: IO ByteString
 getTestConnectionString = do
   configured <- lookupEnv "ARBITER_TEST_CONN_STRING"
-  pure $ maybe "host=localhost port=5432 user=postgres password=master dbname=postgres" BS8.pack configured
+  pure $
+    maybe "host=localhost port=5432 user=postgres password=master dbname=postgres connect_timeout=10" BS8.pack configured
 
 -- | Every shipped migration as @(name, SQL body)@, covering both the schema-level
 -- migrations and the per-table migrations.

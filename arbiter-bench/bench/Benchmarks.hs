@@ -46,7 +46,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BS8
 import Data.Foldable (toList, traverse_)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
-import Data.Int (Int64)
+import Data.Int (Int32, Int64)
 import Data.List (find, partition)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
@@ -151,17 +151,28 @@ gateKey index = T.pack (show (index `mod` gateKeyCount))
 gateKey2 :: Int -> Text
 gateKey2 index = T.pack (show (index `mod` max 1 (gateKeyCount - 1)))
 
+-- | A bucket size the bench never drains, so the gate is measured and never blocks.
+openGateTokens :: Double
+openGateTokens = 1.0e9
+
+openGateRefillPeriod :: NominalDiffTime
+openGateRefillPeriod = 1
+
+-- | An in-flight limit the bench never reaches.
+openGateLimit :: Int32
+openGateLimit = 1000000
+
 instance HasRateLimit BenchRl where
-  rateLimitFor = limitBy (tokenBucket "blr" 1.0e9 1) (\(BenchRl index) -> gateKey index)
+  rateLimitFor = limitBy (tokenBucket "blr" openGateTokens openGateRefillPeriod) (\(BenchRl index) -> gateKey index)
 
 instance HasConcurrency BenchCc where
-  concurrencyFor = concurrencyBy (concurrencyPolicy "blc" 1000000) (\(BenchCc index) -> gateKey index)
+  concurrencyFor = concurrencyBy (concurrencyPolicy "blc" openGateLimit) (\(BenchCc index) -> gateKey index)
 
 instance HasRateLimit BenchBoth where
-  rateLimitFor = limitBy (tokenBucket "bbr" 1.0e9 1) (\(BenchBoth index) -> gateKey index)
+  rateLimitFor = limitBy (tokenBucket "bbr" openGateTokens openGateRefillPeriod) (\(BenchBoth index) -> gateKey index)
 
 instance HasConcurrency BenchBoth where
-  concurrencyFor = concurrencyBy (concurrencyPolicy "bbc" 1000000) (\(BenchBoth index) -> gateKey2 index)
+  concurrencyFor = concurrencyBy (concurrencyPolicy "bbc" openGateLimit) (\(BenchBoth index) -> gateKey2 index)
 
 type BenchRegistry =
   '[ Queue "bench_queue" BenchPayload

@@ -91,6 +91,9 @@ type RLReg = '[Queue "arbiter_ratelimit_test" RLPayload]
 rlPolicy :: RateLimitPolicy
 rlPolicy = tokenBucket "rl" 3 2
 
+rlKey :: Text -> RateLimitKey
+rlKey suffix = RateLimitKey {rlkPrefix = "rl", rlkSuffix = suffix}
+
 instance HasRateLimit RLPayload where
   rateLimitFor = limitBy rlPolicy rlTenant
   rateLimitCost = rlCost
@@ -162,10 +165,24 @@ rateLimitSpec runM = do
             env
             ( HL.updateRateLimitPolicyOverrides
                 "rl"
-                (RateLimitPolicyUpdate (Just (Just maxTokens)) (Just (Just refillAmount)) Nothing)
+                RateLimitPolicyUpdate
+                  { overrideMaxTokens = Just (Just maxTokens)
+                  , overrideRefillAmount = Just (Just refillAmount)
+                  , overrideInterval = Nothing
+                  }
             )
       clearOverride env =
-        void $ runM env (HL.updateRateLimitPolicyOverrides "rl" (RateLimitPolicyUpdate (Just Nothing) (Just Nothing) Nothing))
+        void $
+          runM
+            env
+            ( HL.updateRateLimitPolicyOverrides
+                "rl"
+                RateLimitPolicyUpdate
+                  { overrideMaxTokens = Just Nothing
+                  , overrideRefillAmount = Just Nothing
+                  , overrideInterval = Nothing
+                  }
+            )
 
   it "admits up to the bucket size and defers the rest" $ \env -> do
     enqueue env (replicate 10 (job "burst"))
@@ -378,7 +395,7 @@ rateLimitSpec runM = do
       remaining `shouldBe` Just 0
       -- The top-up refills the frozen bucket and wakes the two parked jobs. They
       -- run on their first attempt.
-      void $ runM env (HL.addRateLimitTokens (RateLimitKey "rl" "debit") 3)
+      void $ runM env (HL.addRateLimitTokens (rlKey "debit") 3)
       woken <- claim env
       map attempts woken `shouldBe` [1, 1]
 
@@ -386,7 +403,7 @@ rateLimitSpec runM = do
     enqueue env (replicate 3 (job "topup"))
     drained <- claim env
     length drained `shouldBe` 3
-    void $ runM env (HL.addRateLimitTokens (RateLimitKey "rl" "topup") 3)
+    void $ runM env (HL.addRateLimitTokens (rlKey "topup") 3)
     enqueue env (replicate 3 (job "topup"))
     toppedUp <- claim env
     length toppedUp `shouldBe` 3
@@ -396,13 +413,13 @@ rateLimitSpec runM = do
     admitted <- claim env
     length admitted `shouldBe` 3
     -- The top-up refills the bucket and wakes the parked jobs.
-    void $ runM env (HL.addRateLimitTokens (RateLimitKey "rl" "topupwake") 3)
+    void $ runM env (HL.addRateLimitTokens (rlKey "topupwake") 3)
     woken <- claim env
     length woken `shouldBe` 3
 
   it "seeds an absent bucket at full on a top-up" $ \env -> do
     -- An absent bucket is full. A top-up of 1 leaves it full.
-    void $ runM env (HL.addRateLimitTokens (RateLimitKey "rl" "seedfull") 1)
+    void $ runM env (HL.addRateLimitTokens (rlKey "seedfull") 1)
     enqueue env (replicate 5 (job "seedfull"))
     kept <- claim env
     length kept `shouldBe` 3
@@ -420,7 +437,7 @@ rateLimitSpec runM = do
     enqueue env (replicate 5 (job "wake-a") <> replicate 5 (job "wake-b"))
     admitted <- claim env
     length admitted `shouldBe` 6
-    void $ runM env (HL.addRateLimitTokens (RateLimitKey "rl" "wake-a") 3)
+    void $ runM env (HL.addRateLimitTokens (rlKey "wake-a") 3)
     runM env (HL.countJobsFiltered @RLPayload [HL.FilterStatus Throttled]) `shouldReturn` 2
 
   it "a reset refills only its own policy's buckets" $ \env -> do
@@ -456,7 +473,7 @@ rateLimitSpec runM = do
     -- Cost 5 exceeds the bucket max 3. The spend clamps to the max. The first job
     -- drains a full bucket and runs. The second is deferred. The pre-fund seeds
     -- the bucket through the top-up path.
-    void $ runM env (HL.addRateLimitTokens (RateLimitKey "rl" "cmax") 3)
+    void $ runM env (HL.addRateLimitTokens (rlKey "cmax") 3)
     enqueue env [costJob "cmax" 5, costJob "cmax" 5]
     kept <- claim env
     length kept `shouldBe` 1
@@ -471,7 +488,7 @@ rateLimitSpec runM = do
         case find ((== "dlqkey") . rlTenant . payload . DLQ.jobSnapshot) dlqs of
           Just dlqJob -> do
             retried <- runM env (HL.retryFromDLQ (DLQ.dlqPrimaryKey dlqJob)) :: IO (Maybe (JobRead RLPayload))
-            (jobRateLimitKey . payloadKeys <$> retried) `shouldBe` Just (Just (RateLimitKey "rl" "dlqkey"))
+            (jobRateLimitKey . payloadKeys <$> retried) `shouldBe` Just (Just (rlKey "dlqkey"))
           Nothing -> expectationFailure "job did not reach the DLQ"
       _ -> expectationFailure ("expected exactly one claimed job, got " <> show (length claimed))
 
@@ -530,7 +547,13 @@ rateLimitSpec runM = do
   it "applies and clears a policy override through the management plane" $ \env -> do
     -- Override max to 0 pauses the prefix. Clearing it restores the default.
     flip finally (clearOverride env) $ do
-      updated <- runM env (HL.updateRateLimitPolicyOverrides "rl" (RateLimitPolicyUpdate (Just (Just 0)) Nothing Nothing))
+      updated <-
+        runM
+          env
+          ( HL.updateRateLimitPolicyOverrides
+              "rl"
+              RateLimitPolicyUpdate {overrideMaxTokens = Just (Just 0), overrideRefillAmount = Nothing, overrideInterval = Nothing}
+          )
       updated `shouldBe` 1
       enqueue env [job "paused"]
       blocked <- claim env
@@ -557,7 +580,7 @@ rateLimitSpec runM = do
     -- A zero refill override makes token math integral. Each consume enqueues and
     -- claims one cost-job, checked against the pure model.
     let modelTenant = "model"
-        modelKey = RateLimitKey "rl" modelTenant
+        modelKey = rlKey modelTenant
         consume cost = do
           enqueue env [costJob modelTenant (fromIntegral cost)]
           claimed <- claim env

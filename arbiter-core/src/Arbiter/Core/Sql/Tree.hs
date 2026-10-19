@@ -28,6 +28,7 @@ module Arbiter.Core.Sql.Tree
   , spawnedAlreadySQL
   , rollupIdsSQL
   , getParentIdsSQL
+  , advisoryXactLockManySQL
   , jobExistsSQL
   , insertResultSQL
   , insertResultsBatchSQL
@@ -54,7 +55,7 @@ import Arbiter.Core.Job.Schema
   , jobQueueResultsTable
   , jobQueueTable
   )
-import Arbiter.Core.Sql.QQ (sql)
+import Arbiter.Core.Sql.QQ (sql, stmt)
 import Arbiter.Core.Sql.Query (Query)
 import Arbiter.Core.SqlLiterals (intLiteral, textLiteral)
 
@@ -484,6 +485,12 @@ getParentIdsSQL :: SchemaName -> TableName -> [Int64] -> Query (Maybe Int64)
 getParentIdsSQL schemaName tableName jobIds =
   let tbl = jobQueueTable schemaName tableName
    in [sql|SELECT @{parent_id :: Maybe CInt8} FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]})|]
+
+-- | Take the transaction-scoped advisory locks keyed by a @schema.table@ string and
+-- the ids named, ascending, in one round trip.
+advisoryXactLockManySQL :: Text -> [Int64] -> Query (Maybe Text)
+advisoryXactLockManySQL =
+  [stmt|SELECT pg_advisory_xact_lock(hashtextextended(#{key :: CText}, id))::text AS @{result :: Maybe CText} FROM unnest(#{pids :: [CInt8]}::bigint[]) AS job_ids(id) ORDER BY id|]
 
 -- ---------------------------------------------------------------------------
 -- Results Table Operations

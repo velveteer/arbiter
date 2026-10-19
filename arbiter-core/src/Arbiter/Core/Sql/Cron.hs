@@ -85,17 +85,33 @@ getCronScheduleByNameSQL schemaName name =
 -- | Patch a cron schedule's overrides and enabled flag. 'Nothing' when the patch sets
 -- no column. @Just Nothing@ clears an override. Disabling also drops a pending run request.
 updateCronScheduleSQL :: SchemaName -> Text -> CronScheduleUpdate -> Maybe (Query ())
-updateCronScheduleSQL _ _ (CronScheduleUpdate Nothing Nothing Nothing Nothing) = Nothing
-updateCronScheduleSQL schemaName name (CronScheduleUpdate mExpression mOverlap mTimezone mEnabled) =
-  let tbl = cronSchedulesTable schemaName
-      setExpression = isJust mExpression
-      expression = join mExpression
-      setOverlap = isJust mOverlap
-      overlap = join mOverlap
-      setTimezone = isJust mTimezone
-      timezone = join mTimezone
-   in Just
-        [sql|
+updateCronScheduleSQL
+  _
+  _
+  CronScheduleUpdate
+    { overrideExpression = Nothing
+    , overrideOverlap = Nothing
+    , overrideTimezone = Nothing
+    , enabled = Nothing
+    } = Nothing
+updateCronScheduleSQL
+  schemaName
+  name
+  CronScheduleUpdate
+    { overrideExpression = mExpression
+    , overrideOverlap = mOverlap
+    , overrideTimezone = mTimezone
+    , enabled = mEnabled
+    } =
+    let tbl = cronSchedulesTable schemaName
+        setExpression = isJust mExpression
+        expression = join mExpression
+        setOverlap = isJust mOverlap
+        overlap = join mOverlap
+        setTimezone = isJust mTimezone
+        timezone = join mTimezone
+     in Just
+          [sql|
           UPDATE ${tbl}
           SET override_expression = CASE WHEN #{setExpression :: CBool}::boolean
                                          THEN #{expression :: Maybe CText}::text

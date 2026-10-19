@@ -2563,9 +2563,7 @@ stateMachineSpec
   => (forall a. sm a -> IO a)
   -- ^ Runner
   -> Text
-  -- ^ Schema name
   -> Text
-  -- ^ Table name
   -> (forall a. (PG.Connection -> IO a) -> IO a)
   -- ^ Raw-connection accessor
   -> IO ()

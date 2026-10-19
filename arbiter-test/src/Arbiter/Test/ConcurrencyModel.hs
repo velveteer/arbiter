@@ -71,7 +71,6 @@ concurrencyModelSpec
   => (forall a. sm a -> IO a)
   -- ^ Runner
   -> Text
-  -- ^ Schema name
   -> (forall a. (PG.Connection -> IO a) -> IO a)
   -- ^ Raw-connection accessor
   -> Spec
@@ -217,8 +216,8 @@ step run withConn schema (model, overrides, held) operation = do
       evalIO (run (traverse_ (HL.updateJobForRetry 0 "model retry") toRetry))
       done (Map.insert prefix rest held)
     OOverride prefix newLimit -> do
-      evalIO
-        (void (run (HL.updateConcurrencyPolicyOverrides prefix (ConcurrencyPolicyUpdate (Just (fromIntegral <$> newLimit))))))
+      let update = ConcurrencyPolicyUpdate {overrideLimit = Just (fromIntegral <$> newLimit)}
+      evalIO (void (run (HL.updateConcurrencyPolicyOverrides prefix update)))
       done held
     OPrune -> do
       evalIO (void (run HL.pruneConcurrencyKeys))

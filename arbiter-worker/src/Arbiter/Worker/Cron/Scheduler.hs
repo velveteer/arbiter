@@ -30,7 +30,7 @@ import Data.Maybe (fromMaybe, isNothing)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
+import Data.Time (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import System.Cron (CronSchedule, parseCronSchedule)
 import UnliftIO
   ( MonadUnliftIO
@@ -145,40 +145,57 @@ processCronCatchUp cronLog schemaName queueName jobs now = traverse_ processOneC
       InvalidTimezone tzName ->
         True <$ logCron cronLog Error (cronLabel cron <> " has unknown timezone '" <> tzName <> "'")
       Effective effectiveOv sched effectiveTz -> do
-        let ticksInWindow = enumerateCatchUpTicks (backfill cron) (mRow >>= CS.lastCheckedAt) currentTick
-            ticksToFire = filter (matchesInTimezone effectiveTz sched) ticksInWindow
-            fireTick tick = do
-              result <- tryCron cronLog (cronLabel cron <> " insert") . withDbTransaction $ do
-                haveLeader <- case backfill cron of
-                  NoBackfill -> pure True
-                  Backfill _ -> Ops.tryAcquireCronLeader schemaName queueName (name cron)
-                if haveLeader
-                  then TickHandled <$> insertCronJob schemaName cron effectiveOv (tickKindFor currentTick tick) tick
-                  else pure TickNoLeader
-              let outcome = fromRight TickFailed result
-              case outcome of
-                TickHandled _ -> logCron cronLog Debug $ cronLabel cron <> " processed at " <> formatMinute tick
-                TickNoLeader -> logCron cronLog Debug $ cronLabel cron <> " skipped, another pool holds the lock"
-                TickFailed -> pure ()
-              pure outcome
-            replayedBy tick outcome = if tick /= currentTick && outcome == TickHandled True then 1 else 0
-            runTicks stopAt = go ticksToFire (0 :: Int, TickHandled False)
-              where
-                go [] acc = pure acc
-                go (tick : ticks) (replayed, _) = do
-                  outcome <- fireTick tick
-                  let next = (replayed + replayedBy tick outcome, outcome)
-                  if stopAt outcome then pure next else go ticks next
-        (replayed, lastOutcome) <- case effectiveOv of
-          AllowOverlap -> runTicks (== TickNoLeader)
-          SkipOverlap -> runTicks (/= TickFailed)
+        let ticksToFire =
+              filter (matchesInTimezone effectiveTz sched) $
+                enumerateCatchUpTicks (backfill cron) (mRow >>= CS.lastCheckedAt) currentTick
+            fire = fireCronTick cronLog schemaName queueName cron effectiveOv currentTick
+        (replayed, lastOutcome) <- fireTicks (stopsAt effectiveOv) fire currentTick ticksToFire
         when (replayed > 0)
           $ logCron cronLog Info
           $ cronLabel cron <> " replayed " <> showText replayed <> " missed tick(s)"
-        pure $ case (lastOutcome, backfill cron) of
-          (TickHandled _, _) -> True
-          (TickFailed, NoBackfill) -> True
-          _ -> False
+        pure (advancesWatermark (backfill cron) lastOutcome)
+
+-- | Fire one catch-up tick in its own transaction and log how it ended.
+fireCronTick
+  :: (QueueOperation m payload)
+  => CronLog -> SchemaName -> Text -> CronJob payload -> OverlapPolicy -> UTCTime -> UTCTime -> m TickOutcome
+fireCronTick cronLog schemaName queueName cron effectiveOv currentTick tick = do
+  result <- tryCron cronLog (cronLabel cron <> " insert") . withDbTransaction $ do
+    haveLeader <- case backfill cron of
+      NoBackfill -> pure True
+      Backfill _ -> Ops.tryAcquireCronLeader schemaName queueName (name cron)
+    if haveLeader
+      then TickHandled <$> insertCronJob schemaName cron effectiveOv (tickKindFor currentTick tick) tick
+      else pure TickNoLeader
+  let outcome = fromRight TickFailed result
+  case outcome of
+    TickHandled _ -> logCron cronLog Debug $ cronLabel cron <> " processed at " <> formatMinute tick
+    TickNoLeader -> logCron cronLog Debug $ cronLabel cron <> " skipped, another pool holds the lock"
+    TickFailed -> pure ()
+  pure outcome
+
+-- | Fire @ticks@ in order until @stop@ holds. Returns the replayed count and the last outcome.
+fireTicks
+  :: (Monad m) => (TickOutcome -> Bool) -> (UTCTime -> m TickOutcome) -> UTCTime -> [UTCTime] -> m (Int, TickOutcome)
+fireTicks stop fire currentTick = go (0, TickHandled False)
+  where
+    go acc [] = pure acc
+    go (replayed, _) (tick : ticks) = do
+      outcome <- fire tick
+      let next = (replayed + replayedBy tick outcome, outcome)
+      if stop outcome then pure next else go next ticks
+    replayedBy tick outcome = if tick /= currentTick && outcome == TickHandled True then 1 else 0
+
+-- | Whether a tick outcome ends the catch-up pass under an overlap policy.
+stopsAt :: OverlapPolicy -> TickOutcome -> Bool
+stopsAt AllowOverlap = (== TickNoLeader)
+stopsAt SkipOverlap = (/= TickFailed)
+
+-- | Whether the last tick outcome lets the pass advance the watermark to the current tick.
+advancesWatermark :: BackfillPolicy -> TickOutcome -> Bool
+advancesWatermark _ (TickHandled _) = True
+advancesWatermark NoBackfill TickFailed = True
+advancesWatermark _ _ = False
 
 -- | How one tick's transaction ended. 'TickHandled' carries whether this pool
 -- fired the gate.
@@ -216,22 +233,21 @@ effectiveOverlapFor :: CronJob payload -> CS.CronScheduleRow -> OverlapPolicy
 effectiveOverlapFor cron row = fromMaybe (overlap cron) (overlapPolicyFromText (CS.effectiveOverlap row))
 
 resolveAndParse :: CronJob payload -> Maybe CS.CronScheduleRow -> Resolved
-resolveAndParse cron mRow =
-  let (expr, overlapPolicy, zone, isEnabled) = case mRow of
-        Nothing -> (cronExpression cron, overlap cron, timezone cron, initiallyEnabled cron)
-        Just row@CS.CronScheduleRow {CS.enabled = rowEnabled} ->
-          ( CS.effectiveExpression row
-          , effectiveOverlapFor cron row
-          , CS.effectiveTimezone row
-          , rowEnabled
-          )
-   in if isEnabled
-        then case parseCronSchedule expr of
-          Left err -> ParseError expr err
-          Right sched -> case zone of
-            Just tzName | isNothing (resolveTZ tzName) -> InvalidTimezone tzName
-            _ -> Effective overlapPolicy sched zone
-        else Disabled
+resolveAndParse cron mRow
+  | not isEnabled = Disabled
+  | otherwise = either (ParseError expr) withSchedule (parseCronSchedule expr)
+  where
+    (expr, overlapPolicy, zone, isEnabled) = case mRow of
+      Nothing -> (cronExpression cron, overlap cron, timezone cron, initiallyEnabled cron)
+      Just row@CS.CronScheduleRow {CS.enabled = rowEnabled} ->
+        ( CS.effectiveExpression row
+        , effectiveOverlapFor cron row
+        , CS.effectiveTimezone row
+        , rowEnabled
+        )
+    withSchedule sched
+      | Just tzName <- zone, isNothing (resolveTZ tzName) = InvalidTimezone tzName
+      | otherwise = Effective overlapPolicy sched zone
 
 -- | Fire the gate for @tick@, insert its job if the gate opened, and advance
 -- the watermark to @tick@. Returns whether this call fired the gate.
@@ -326,15 +342,15 @@ skipOverlapKey :: Text -> Text
 skipOverlapKey jobName = "arbiter_cron:" <> jobName
 
 -- | The longest a scheduler tick waits for the next minute boundary.
-maxTickDelayMicros :: Int
-maxTickDelayMicros = 120_000_000
+maxTickDelay :: NominalDiffTime
+maxTickDelay = 120
 
 -- | Delay in microseconds until the next minute boundary, clamped to
--- zero through 'maxTickDelayMicros'.
+-- zero through 'maxTickDelay'.
 computeDelayMicros :: UTCTime -> Int
 computeDelayMicros now =
   let nextMinute = truncateToMinute (addUTCTime oneMinute now)
-   in max 0 (min maxTickDelayMicros (Ops.micros (diffUTCTime nextMinute now)))
+   in max 0 (min (Ops.micros maxTickDelay) (Ops.micros (diffUTCTime nextMinute now)))
 
 -- | Why the scheduler woke.
 data WakeReason = WakeShutdown | WakeMinute | WakeRunNow

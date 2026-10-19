@@ -13,6 +13,7 @@ module Arbiter.Worker.Settlement
 import Arbiter.Core.Exceptions (throwJobGoneIds)
 import Arbiter.Core.HighLevel (JobOperation)
 import Arbiter.Core.HighLevel qualified as Arb
+import Arbiter.Core.Job.Schema (SchemaName, TableName)
 import Arbiter.Core.Job.Types qualified as Job
 import Arbiter.Core.JobResult
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
@@ -91,25 +92,8 @@ poolEffects config statements consumeSpan = do
                 pure (partition ackedJob jobsToAck)
           , effectFail = \(UnliftIO runIn) failure job ->
               runIn $ withDbTransaction $ handleJobFailure config Ops.TakeLocks failure job
-          , effectFailAll = \(UnliftIO runIn) failure@(_, kind) unhandled unowned ->
-              runIn $ withDbTransaction $ do
-                -- Lock every row the failures below touch, in one pass. A cancel's
-                -- pass covers the whole tree.
-                let lockTrees
-                      | cancelsTree kind = Ops.lockJobTreesFromRoot
-                      | otherwise = Ops.lockJobTrees
-                if kind == BranchCancelFailure
-                  then
-                    Ops.lockJobRootsAndParents
-                      schemaName
-                      queue
-                      (map branchRoot (unhandled <> unowned))
-                  else Ops.lockJobParents schemaName queue (map Job.parentId unhandled)
-                held <- lockTrees schemaName queue (map Job.primaryKey (unhandled <> unowned))
-                outcomes <-
-                  traverse (\job -> (job,) <$> handleJobFailure config (Ops.LocksHeld held) failure job) unhandled
-                traverse_ (void . cancelJobFor kind) unowned
-                pure outcomes
+          , effectFailAll = \(UnliftIO runIn) failure unhandled unowned ->
+              runIn $ withDbTransaction $ failAllLocked config schemaName queue failure unhandled unowned
           , effectDeleteCancelled = \(UnliftIO runIn) gone ->
               runIn . fmap Set.fromList
                 $ Ops.deleteCancelledJobs schemaName queue
@@ -229,6 +213,32 @@ fireCancelled config job errorMsg = do
   recordJobCancelled job errorMsg
   jobHook (logConfig config) job "onJobCancelled" $
     Job.onJobCancelled (observabilityHooks config) job errorMsg
+
+-- | Fail @unhandled@ and cancel @unowned@ after one pass locks every row they touch.
+-- A cancel's pass covers the whole tree.
+failAllLocked
+  :: (MonadArbiter m)
+  => WorkerConfig m payload
+  -> SchemaName
+  -> TableName
+  -> Failure
+  -> [Job.JobRead payload]
+  -> [Job.JobRead payload]
+  -> m [(Job.JobRead payload, Either Text Outcome)]
+failAllLocked config schemaName queue failure@(_, kind) unhandled unowned = do
+  lockParents
+  held <- lockTrees schemaName queue (map Job.primaryKey (unhandled <> unowned))
+  outcomes <- traverse (\job -> (job,) <$> handleJobFailure config (Ops.LocksHeld held) failure job) unhandled
+  traverse_ (void . cancelJobFor kind) unowned
+  pure outcomes
+  where
+    lockParents
+      | kind == BranchCancelFailure =
+          Ops.lockJobRootsAndParents schemaName queue (map branchRoot (unhandled <> unowned))
+      | otherwise = Ops.lockJobParents schemaName queue (map Job.parentId unhandled)
+    lockTrees
+      | cancelsTree kind = Ops.lockJobTreesFromRoot
+      | otherwise = Ops.lockJobTrees
 
 -- | The job's parent, or the job when it has none.
 branchRoot :: Job.JobRead payload -> Job.JobId

@@ -109,7 +109,6 @@ hasqlDriver = Driver {withListenConn = withHasqlListenConn, initialConfig = Hasq
 -- | The hasql database monad.
 newtype HasqlDb (registry :: JobPayloadRegistry) m a = HasqlDb
   { unHasqlDb :: Db Hasql.Connection HasqlConfig registry m a
-  -- ^ The action in the shared pooled-backend monad.
   }
   deriving newtype
     ( Applicative
@@ -164,7 +163,6 @@ inTransaction
    . Hasql.Connection
   -- ^ Connection with an open transaction
   -> SchemaName
-  -- ^ Schema name
   -> HasqlDb registry m a
   -> m a
 inTransaction = inTransactionWith (initialConfig hasqlDriver)
@@ -177,7 +175,6 @@ inTransactionWith
   -> Hasql.Connection
   -- ^ Connection with an open transaction
   -> SchemaName
-  -- ^ Schema name
   -> HasqlDb registry m a
   -> m a
 inTransactionWith config conn schemaName =
@@ -194,7 +191,6 @@ createHasqlEnv
   -> HasqlConnect
   -- ^ Connection settings
   -> SchemaName
-  -- ^ Schema name
   -> m (HasqlEnv registry)
 createHasqlEnv proxy connect schemaName = createHasqlEnvWithConfig proxy connect schemaName PC.defaultPoolConfig
 
@@ -217,7 +213,6 @@ createHasqlEnvWithConfig
   -> HasqlConnect
   -- ^ Connection settings
   -> SchemaName
-  -- ^ Schema name
   -> PoolConfig
   -- ^ Pool configuration
   -> m (HasqlEnv registry)
@@ -240,7 +235,6 @@ createHasqlEnvWithPool
   -> Pool Hasql.Connection
   -- ^ Caller's connection pool
   -> SchemaName
-  -- ^ Schema name
   -> m (HasqlEnv registry)
 createHasqlEnvWithPool _proxy = createEnvWithPool hasqlDriver
 

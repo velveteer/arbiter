@@ -22,10 +22,11 @@ import Data.Text (Text)
 import Data.Time (UTCTime)
 
 import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueGroupsTable, jobQueueTable)
+import Arbiter.Core.Job.Types (JobRead, claimSeq, claimedBy, primaryKey)
 import Arbiter.Core.Sql.Archive (archiveAckCte)
 import Arbiter.Core.Sql.Groups (settleGroupLocksCte)
 import Arbiter.Core.Sql.QQ (sql, stmt)
-import Arbiter.Core.Sql.Query (Query, mwhen)
+import Arbiter.Core.Sql.Query (Query, mwhen, sepBy)
 import Arbiter.Core.Sql.Tree (lockedByIdsCte, wakeParentCte)
 import Arbiter.Core.SqlLiterals (attemptsLeftSQL)
 
@@ -136,16 +137,22 @@ setVisibilityTimeoutSQL schemaName tableName secs jobId cseq =
 
 -- | 'setVisibilityTimeoutSQL' over a batch, for the heartbeat. Extends every job still
 -- under this claim, held by the same worker and unsuspended, and reports per row whether
--- the update landed alongside its claim token, holder, cancel flag and suspension. @valuesFrag@
--- carries the input @(id, claim_seq, claimed_by)@ rows. @secs@ at or below 0 clears the
--- lease. The statement never waits on a lock. It takes the group summaries first, then
--- the rows, both with SKIP LOCKED, and a row whose summary or row is busy reads back
--- unchanged. The caller attaches the row decoder.
-setVisibilityTimeoutBatchSQL :: SchemaName -> TableName -> Query () -> [Int64] -> Double -> Query ()
-setVisibilityTimeoutBatchSQL schemaName tableName valuesFrag ids secs =
+-- the update landed alongside its claim token, holder, cancel flag and suspension.
+-- @secs@ at or below 0 clears the lease. The statement never waits on a lock. It takes
+-- the group summaries first, then the rows, both with SKIP LOCKED, and a row whose
+-- summary or row is busy reads back unchanged. The caller attaches the row decoder.
+setVisibilityTimeoutBatchSQL :: SchemaName -> TableName -> [JobRead payload] -> Double -> Query ()
+setVisibilityTimeoutBatchSQL schemaName tableName jobs secs =
   let tbl = jobQueueTable schemaName tableName
       groupsTbl = jobQueueGroupsTable schemaName tableName
       leaseUntil = leaseDeadline secs
+      ids = map primaryKey jobs
+      valuesFrag = sepBy "," (map inputRow jobs)
+      inputRow job =
+        let jid = primaryKey job
+            cseq = claimSeq job
+            holder = claimedBy job
+         in [sql|(#{jid :: CInt8}, #{cseq :: CInt8}, #{holder :: Maybe CUuid})|]
    in [sql|
         WITH input_jobs AS (
           SELECT input_values.id::bigint AS id,

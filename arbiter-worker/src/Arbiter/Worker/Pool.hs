@@ -24,6 +24,7 @@ import Control.Monad (forever, replicateM, unless, void)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
+import Data.ByteString (ByteString)
 import Data.Foldable (traverse_)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -33,6 +34,7 @@ import System.Directory (removeFile)
 import UnliftIO
   ( MonadUnliftIO
   , STM
+  , TVar
   , atomically
   , checkSTM
   , finally
@@ -57,7 +59,7 @@ import Arbiter.Worker.Config
 import Arbiter.Worker.Cron.Scheduler (runCronScheduler)
 import Arbiter.Worker.Cron.Types (CronJob (..))
 import Arbiter.Worker.Dispatcher
-import Arbiter.Worker.Heartbeat (newHeartbeatGuard, runHeartbeatGuard)
+import Arbiter.Worker.Heartbeat (PoolGuard, newHeartbeatGuard, runHeartbeatGuard)
 import Arbiter.Worker.Logger
 import Arbiter.Worker.Logger.Internal (tryWarn, tryWarnWith)
 import Arbiter.Worker.Processing (workerLoop)
@@ -126,17 +128,7 @@ runWorkerPool config = do
 
   dispatcherNotifVar <- newTVarIO Nothing
   cronRunVar <- newTVarIO False
-  let createChannel = TE.encodeUtf8 (Schema.notificationChannelForTable queueName)
-      pauseChannel = TE.encodeUtf8 (Schema.pauseNotifyChannel schemaName queueName)
-      cancelChannel = TE.encodeUtf8 (Schema.cancelNotifyChannel schemaName queueName)
-      cronRunChannel = TE.encodeUtf8 (Schema.cronRunNotifyChannel schemaName)
-      cronNames = Set.fromList (map name (cronJobs config))
-      handlers =
-        [ (createChannel, atomically . writeTVar dispatcherNotifVar . Just)
-        , (pauseChannel, handlePauseNotif config)
-        , (cancelChannel, handleCancelNotif config guard)
-        ]
-          <> [(cronRunChannel, handleCronRunNotif cronNames cronRunVar) | not (null (cronJobs config))]
+  let handlers = poolChannels config guard schemaName queueName dispatcherNotifVar cronRunVar
 
   evalContT $ do
     withLivenessFile config
@@ -180,6 +172,30 @@ runWorkerPool config = do
       Right _ -> pure ()
 
     lift $ shutdownPool config schemaName workQueue (void (Async.waitCatchSTM dispatcher))
+
+-- | The pool's NOTIFY channel names and their handlers. The cron run channel is
+-- subscribed only when the pool has cron jobs.
+poolChannels
+  :: (MonadIO m)
+  => WorkerConfig n payload
+  -> PoolGuard payload
+  -> SchemaName
+  -> Text
+  -> TVar (Maybe Listen.Notification)
+  -> TVar Bool
+  -> [(ByteString, Listen.Notification -> m ())]
+poolChannels config guard schemaName queueName dispatcherNotifVar cronRunVar =
+  [ (createChannel, atomically . writeTVar dispatcherNotifVar . Just)
+  , (pauseChannel, handlePauseNotif config)
+  , (cancelChannel, handleCancelNotif config guard)
+  ]
+    <> [(cronRunChannel, handleCronRunNotif cronNames cronRunVar) | not (null (cronJobs config))]
+  where
+    createChannel = TE.encodeUtf8 (Schema.notificationChannelForTable queueName)
+    pauseChannel = TE.encodeUtf8 (Schema.pauseNotifyChannel schemaName queueName)
+    cancelChannel = TE.encodeUtf8 (Schema.cancelNotifyChannel schemaName queueName)
+    cronRunChannel = TE.encodeUtf8 (Schema.cronRunNotifyChannel schemaName)
+    cronNames = Set.fromList (map name (cronJobs config))
 
 -- | Flip 'listenerReadyVar' once the pool's channels are subscribed. Runs
 -- alongside the pool. Startup does not wait on it.

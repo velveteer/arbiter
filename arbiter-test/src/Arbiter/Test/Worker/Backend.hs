@@ -9,7 +9,6 @@ import Data.Text (Text)
 -- | A backend's payloads, envs, and runner for the generic worker suites.
 data TestBackend payload m env = TestBackend
   { schema :: Text
-  -- ^ Schema name.
   , table :: Text
   -- ^ The queue table under test.
   , connStr :: ByteString

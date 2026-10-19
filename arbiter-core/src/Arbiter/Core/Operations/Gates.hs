@@ -108,9 +108,9 @@ runGatedInner
 runGatedInner schemaName task interval work = do
   void $ MA.executeStatement (Sql.ensureGateRowSQL schemaName task)
   gateOpen <- checkGateOuter
-  if not gateOpen
-    then pure Nothing
-    else withDbTransaction $ tryClaimGate >>= traverse ran
+  if gateOpen
+    then withDbTransaction $ tryClaimGate >>= traverse ran
+    else pure Nothing
   where
     intervalSecs = realToFrac interval :: Double
 

@@ -61,6 +61,7 @@ import Test.Arbiter.Worker.Sim
   , explorePlans
   , exploreScenario
   , hangExtend
+  , indexed
   , newRecorder
   , refuseExtend
   , scripted
@@ -472,6 +473,10 @@ data Plan = Plan
   }
   deriving stock (Show)
 
+-- | The most actor moves in one plan.
+maxPlanMoves :: Int
+maxPlanMoves = 3
+
 genPlan :: Gen Plan
 genPlan = do
   single <- frequency [(1, Just <$> genSingle), (3, pure Nothing)]
@@ -482,7 +487,15 @@ genPlan = do
   moves <- listOf (genMove count)
   replies <- choose (1, 3) >>= (`vectorOf` genReply)
   deadline <- frequency [(4, pure Nothing), (1, Just <$> elements [0.4, 1.5, 3])]
-  pure (Plan count single (settleOnce (steps <> ending)) (take 3 moves) replies deadline)
+  pure
+    Plan
+      { planJobs = count
+      , planSingle = single
+      , planSteps = settleOnce (steps <> ending)
+      , planMoves = take maxPlanMoves moves
+      , planReplies = replies
+      , planDeadline = deadline
+      }
   where
     -- A handler settles each job at most once. Later steps naming a settled job are dropped.
     settleOnce = catMaybes . snd . mapAccumL keep Set.empty
@@ -543,7 +556,8 @@ runPlan plan = do
   exploreRaces
   (recorder, readEvents) <- newRecorder
   now <- getMonotonicTime
-  let batch = Job 1 1 1 :| [Job (fromIntegral index) 1 1 | index <- [2 .. planJobs plan]]
+  let batch = claimedJob 1 :| [claimedJob (fromIntegral index) | index <- [2 .. planJobs plan]]
+      claimedJob job = Job {jobId = job, jobSeq = 1, jobAttempt = 1}
       claimed =
         Map.fromList
           [ ( jobId job
@@ -674,7 +688,6 @@ judgePlan (plan, events, table) =
       [] -> "unfinalized, row kept"
 
     jobs = jobsOf plan
-    indexed = zip [0 :: Int ..] events
     endedAt = fromMaybe (Time 0) (listToMaybe [at | Ended _ at <- events])
     threw = batchThrew events
     reportsOf = reportedKinds events
@@ -732,7 +745,7 @@ judgePlan (plan, events, table) =
         , counterexample ("a statement carried job " <> show job <> " after its outcome was reported") $
             null
               [ ()
-              | (i, Issued carried at) <- indexed
+              | (i, Issued carried at) <- indexed events
               , job `elem` carried
               , (reportIndex, reportAt) <- reportedAt
               , i > reportIndex
@@ -745,8 +758,8 @@ judgePlan (plan, events, table) =
         -- A cancel flags the row it holds. The reaper reclaims it after the lease.
         cancelledAndFlagged = CancelledK `elem` kinds && maybe False rowFlagged (row job)
         heldExplained = UnavailableK handlerGone `elem` kinds || not (stranded job) || cancelledAndFlagged
-        reportedAt = [(index, at) | (index, Reported j _ at) <- indexed, j == job]
-        claims = [index | (index, ClaimReported j _) <- indexed, j == job]
+        reportedAt = [(index, at) | (index, Reported j _ at) <- indexed events, j == job]
+        claims = [index | (index, ClaimReported j _) <- indexed events, j == job]
 
 -- | A force-cancel of one sibling lands after another sibling's ack commits.
 ackThenSiblingCancel :: Plan

@@ -80,11 +80,11 @@ applyJitter jitter delay = case jitter of
 
 -- | @exponentialBackoff 2 300@ doubles each attempt, capped at 5 minutes.
 exponentialBackoff :: Double -> NominalDiffTime -> BackoffStrategy
-exponentialBackoff base cap = Exponential (ExponentialConfig base cap)
+exponentialBackoff base cap = Exponential ExponentialConfig {exponentialBase = base, exponentialCap = cap}
 
 -- | @linearBackoff 30 300@ adds 30s per attempt, capped at 5 minutes.
 linearBackoff :: NominalDiffTime -> NominalDiffTime -> BackoffStrategy
-linearBackoff increment cap = Linear (LinearConfig increment cap)
+linearBackoff increment cap = Linear LinearConfig {linearIncrement = increment, linearCap = cap}
 
 -- | Same delay for every retry.
 constantBackoff :: NominalDiffTime -> BackoffStrategy

@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 -- | Arbiter's logs as OTel log records.
 module Arbiter.Otel.Logs
   ( loggerDestination

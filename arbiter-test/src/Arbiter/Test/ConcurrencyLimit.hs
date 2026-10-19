@@ -139,7 +139,11 @@ concurrencyLimitSpec runM = do
       ackAll env jobs = runM env (traverse_ HL.ackJob jobs)
       retryAll env jobs = runM env (traverse_ (HL.updateJobForRetry 60 "boom") jobs)
       nackAll env jobs = runM env (traverse_ HL.nackJob jobs)
-      overridePolicy env lim = void (runM env (HL.updateConcurrencyPolicyOverrides "declpolicy" (ConcurrencyPolicyUpdate (Just lim))) :: IO Int64)
+      overridePolicy env lim =
+        void
+          ( runM env (HL.updateConcurrencyPolicyOverrides "declpolicy" ConcurrencyPolicyUpdate {overrideLimit = Just lim})
+              :: IO Int64
+          )
       prune env = runM env HL.pruneConcurrencyKeys :: IO Int64
       reconcile env = void (runM env HL.reconcileConcurrencyCounts :: IO Int64)
       reconcileIfStale env = void (runM env HL.reconcileConcurrencyCountsIfStale) :: IO ()
@@ -348,7 +352,10 @@ concurrencyLimitSpec runM = do
     seed env 3
     enqueue env (replicate 6 (job "patch" "a"))
     overridePolicy env (Just 1)
-    void (runM env (HL.updateConcurrencyPolicyOverrides "declpolicy" (ConcurrencyPolicyUpdate Nothing)) :: IO Int64)
+    void
+      ( runM env (HL.updateConcurrencyPolicyOverrides "declpolicy" ConcurrencyPolicyUpdate {overrideLimit = Nothing})
+          :: IO Int64
+      )
     claimed <- claimAs env
     length claimed `shouldBe` 1
     overridePolicy env Nothing

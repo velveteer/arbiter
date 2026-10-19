@@ -254,6 +254,11 @@ onRegistry operation = getSchema >>= \schemaName -> operation schemaName (regist
 onJob :: (MonadArbiter m) => JobRead payload -> (SchemaName -> TableName -> m a) -> m a
 onJob job operation = getSchema >>= \schemaName -> operation schemaName (Job.queueName job)
 
+-- | 'onJob' keyed by a batch's first job, or @none@ for an empty batch.
+onJobs :: (MonadArbiter m) => (item -> JobRead payload) -> a -> [item] -> (SchemaName -> TableName -> m a) -> m a
+onJobs _ none [] _ = pure none
+onJobs jobOf _ (item : _) operation = onJob (jobOf item) operation
+
 publishSpan
   :: forall payload m a
    . (HasKind payload, KnownSymbol (TableForPayload payload (RegistryOf m)), MonadUnliftIO m)
@@ -272,7 +277,9 @@ insertJob
    . (QueueOperation m payload)
   => JobWrite payload
   -> m (Maybe (JobRead payload))
-insertJob job = publishSpan @payload [job] $ onQueue @payload $ \schemaName tableName -> Ops.insertJob schemaName tableName job
+insertJob job =
+  publishSpan @payload [job] $ onQueue @payload $ \schemaName tableName ->
+    Ops.insertJob schemaName tableName job
 
 -- | Insert multiple jobs in one round-trip. Returns the jobs inserted or replaced. An
 -- ignored duplicate is left out. Use 'insertJobTree' for parent-child relationships.
@@ -282,7 +289,9 @@ insertJobsBatch
   => [JobWrite payload]
   -> m [JobRead payload]
 insertJobsBatch [] = pure []
-insertJobsBatch jobs = publishSpan @payload jobs $ onQueue @payload $ \schemaName tableName -> Ops.insertJobsBatch schemaName tableName jobs
+insertJobsBatch jobs =
+  publishSpan @payload jobs $ onQueue @payload $ \schemaName tableName ->
+    Ops.insertJobsBatch schemaName tableName jobs
 
 -- | 'insertJobsBatch' returning the rows affected, dedup replacements included.
 insertJobsBatch_
@@ -291,7 +300,9 @@ insertJobsBatch_
   => [JobWrite payload]
   -> m Int64
 insertJobsBatch_ [] = pure 0
-insertJobsBatch_ jobs = publishSpan @payload jobs $ onQueue @payload $ \schemaName tableName -> Ops.insertJobsBatch_ schemaName tableName jobs
+insertJobsBatch_ jobs =
+  publishSpan @payload jobs $ onQueue @payload $ \schemaName tableName ->
+    Ops.insertJobsBatch_ schemaName tableName jobs
 
 -- | Claim visible jobs, at most one per group, and fewer than the limit once the groups
 -- run out. Stamps the anonymous claimant. A concurrency policy caps this path as it
@@ -304,7 +315,163 @@ claimNextVisibleJobs
   -> NominalDiffTime
   -- ^ How long the claimed jobs should remain invisible (in seconds).
   -> m [JobRead payload]
-claimNextVisibleJobs limit timeout = onQueue @payload $ \schemaName tableName -> Ops.claimNextVisibleJobs schemaName tableName limit timeout
+claimNextVisibleJobs limit timeout =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.claimNextVisibleJobs schemaName tableName limit timeout
+
+-- | 'claimNextVisibleJobs' under a given worker id. A row whose payload fails to decode
+-- moves to the DLQ.
+claimNextVisibleJobsAs
+  :: forall payload m
+   . (QueueOperation m payload)
+  => Int
+  -- ^ Maximum number of jobs to claim.
+  -> NominalDiffTime
+  -- ^ How long the claimed jobs should remain invisible (in seconds).
+  -> UUID
+  -- ^ Worker UUID stamped on each claimed row.
+  -> m [JobRead payload]
+claimNextVisibleJobsAs limit timeout workerId =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.claimNextVisibleJobsAs schemaName tableName limit timeout workerId
+
+-- | 'claimNextVisibleJobs' claiming up to @batchSize@ jobs from each group, still in
+-- per-group order. Stamps the anonymous claimant. A row whose payload fails to decode
+-- moves to the DLQ.
+claimNextVisibleJobsBatched
+  :: forall payload m
+   . (QueueOperation m payload)
+  => Int
+  -- ^ Batch size: maximum number of jobs to claim per group.
+  -> Int
+  -- ^ Maximum number of batches to claim. Each batch is one group, or ungrouped jobs
+  -- batched together.
+  -> NominalDiffTime
+  -- ^ How long the claimed jobs should remain invisible (in seconds).
+  -> m [NonEmpty (JobRead payload)]
+claimNextVisibleJobsBatched batchSize maxBatches timeout =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.claimNextVisibleJobsBatched schemaName tableName batchSize maxBatches timeout
+
+-- | Ack a completed job, deleting it or suspending it when its children are still
+-- running. Returns 1, or 0 for a job that is gone or reclaimed.
+ackJob
+  :: forall payload m
+   . (MonadArbiter m)
+  => JobRead payload
+  -> m Int64
+ackJob job = onJob job $ \schemaName tableName -> Ops.ackJob schemaName tableName job
+
+-- | 'ackJob' over a batch from one queue in one statement, returning the ids acked.
+-- Gone or reclaimed jobs are absent.
+ackJobsBatch
+  :: forall payload m
+   . (MonadArbiter m)
+  => [JobRead payload]
+  -> m [Int64]
+ackJobsBatch jobs = onJobs id [] jobs $ \schemaName tableName -> Ops.ackJobsBatch schemaName tableName jobs
+
+-- | Park a failed job for its retry backoff. Returns 0 for a job another worker holds or
+-- a suspended job.
+updateJobForRetry
+  :: forall payload m
+   . (MonadArbiter m)
+  => NominalDiffTime
+  -- ^ The delay before the retry, rounded up to whole seconds.
+  -> Text
+  -- ^ An error message to store with the job.
+  -> JobRead payload
+  -> m Int64
+updateJobForRetry delay errorMsg job =
+  onJob job $ \schemaName tableName -> Ops.updateJobForRetry schemaName tableName delay errorMsg job
+
+-- | Soft-nack a job. It is reprocessed once its visibility timeout lapses. No failure
+-- is recorded and no attempt is consumed. Returns 0 for a job another worker holds, a
+-- suspended job, or a released claim.
+nackJob
+  :: forall payload m
+   . (MonadArbiter m)
+  => JobRead payload
+  -> m Int64
+nackJob job = onJob job $ \schemaName tableName -> Ops.nackJob schemaName tableName job
+
+-- | 'nackJob' over a batch from one queue in one statement, returning the ids nacked.
+-- Jobs another worker holds, suspended jobs and released claims are absent.
+nackJobsBatch
+  :: forall payload m
+   . (MonadArbiter m)
+  => [JobRead payload]
+  -> m [Int64]
+nackJobsBatch jobs = onJobs id [] jobs $ \schemaName tableName -> Ops.nackJobsBatch schemaName tableName jobs
+
+-- | Extend a job's visibility timeout by hand, for a long-running job. Matches the claim
+-- token only. It also extends a job the caller released (nack, retry). Returns 0 for a
+-- job that is gone, reclaimed or suspended.
+setVisibilityTimeout
+  :: forall payload m
+   . (MonadArbiter m)
+  => NominalDiffTime
+  -- ^ The new visibility timeout (in seconds) from the current time.
+  -> JobRead payload
+  -> m Int64
+setVisibilityTimeout timeout job =
+  onJob job $ \schemaName tableName ->
+    Ops.setVisibilityTimeout schemaName tableName timeout job
+
+-- | Extend the visibility timeout of a batch from one queue. Each row must still match
+-- its holder. A row whose row lock or group lock is busy is skipped.
+setVisibilityTimeoutBatch
+  :: forall payload m
+   . (MonadArbiter m)
+  => NominalDiffTime
+  -- ^ The new visibility timeout (in seconds) from the current time.
+  -> [JobRead payload]
+  -- ^ Jobs to heartbeat (all must be from the same queue)
+  -> m [SetVisibilityResult]
+setVisibilityTimeoutBatch timeout jobs =
+  onJobs id [] jobs $ \schemaName tableName ->
+    map toResult <$> Ops.setVisibilityTimeoutBatch schemaName tableName timeout jobs
+  where
+    jobMap = Map.fromList [(primaryKey job, job) | job <- jobs]
+    toResult
+      Ops.VisibilityUpdateInfo
+        { Ops.vuiJobId = jobId
+        , Ops.vuiWasHeartbeated = heartbeated
+        , Ops.vuiCurrentDbClaimSeq = mActual
+        , Ops.vuiCancelRequested = cancelled
+        , Ops.vuiSuspended = suspended
+        , Ops.vuiClaimedBy = holder
+        } =
+        let mJob = Map.lookup jobId jobMap
+            expected = maybe 0 claimSeq mJob
+            heldHere = any ((== holder) . claimedBy) mJob
+         in case mActual of
+              Nothing -> JobGone jobId
+              Just actual
+                | cancelled, heldHere, actual == expected + Ops.cancelTokenBump -> JobCancelled jobId
+                | actual /= expected -> JobReclaimed jobId expected actual
+                | suspended -> JobSuspended jobId
+                | heartbeated -> VisibilityExtended jobId
+                | otherwise -> VisibilityUnchanged jobId
+
+-- | Result of setting visibility timeout for a single job in a batch.
+data SetVisibilityResult
+  = -- | Visibility timeout was successfully extended.
+    VisibilityExtended JobId
+  | -- | Job no longer exists (was deleted/acked).
+    JobGone JobId
+  | -- | Job was reclaimed by another worker. Carries this claim's token, then the
+    -- row's current token.
+    JobReclaimed JobId ClaimSeq ClaimSeq
+  | -- | Job was force-cancel-flagged.
+    JobCancelled JobId
+  | -- | Job is suspended. It holds no lease.
+    JobSuspended JobId
+  | -- | Nothing was extended. The claim was released, the row or its group summary was
+    -- locked, the row changed mid-statement, or another claimant holds it at the same
+    -- claim token.
+    VisibilityUnchanged JobId
+  deriving stock (Eq, Show)
 
 -- | Add tokens to a key's bucket, clamped to @[0, max]@, and wake any of its throttled
 -- jobs. A key without a bucket gets a full bucket and the amount has no effect. Without a
@@ -319,26 +486,6 @@ addRateLimitTokens
 addRateLimitTokens key amount =
   withDbTransaction $ onRegistry $ \schemaName queues ->
     Ops.addRateLimitTokens schemaName key amount >> Ops.wakeThrottledJobsForKey schemaName queues key
-
--- | Override a policy with this shape, until it is cleared. Returns rows affected.
-setRateLimit :: (MonadArbiter m, RegistryTables (RegistryOf m)) => RateLimitPolicy -> m Int64
-setRateLimit policy =
-  updateRateLimitPolicyOverrides (policyPrefixOf policy) $
-    RateLimitPolicyUpdate
-      { overrideMaxTokens = Just (Just (policyMax policy))
-      , overrideRefillAmount = Just (Just (policyRefill policy))
-      , overrideInterval = Just (Just (realToFrac (policyInterval policy)))
-      }
-
--- | Drop a policy's overrides. Its declared params apply again. Returns rows affected.
-clearRateLimit :: (MonadArbiter m, RegistryTables (RegistryOf m)) => RateLimitPolicy -> m Int64
-clearRateLimit policy =
-  updateRateLimitPolicyOverrides (policyPrefixOf policy) $
-    RateLimitPolicyUpdate
-      { overrideMaxTokens = Just Nothing
-      , overrideRefillAmount = Just Nothing
-      , overrideInterval = Just Nothing
-      }
 
 -- | Delete reclaimable idle (full) buckets. Returns the number pruned. The worker
 -- pool reaper runs this. A full bucket re-seeds at full on next use.
@@ -397,7 +544,9 @@ listRateLimitBuckets
   -> Int
   -- ^ Offset
   -> m [RateLimitBucketView]
-listRateLimitBuckets prefix limit offset = onSchema $ \schemaName -> Ops.listRateLimitBuckets schemaName prefix limit offset
+listRateLimitBuckets prefix limit offset =
+  onSchema $ \schemaName ->
+    Ops.listRateLimitBuckets schemaName prefix limit offset
 
 -- | Set or clear a policy's override params and wake the prefix's throttled jobs. Returns
 -- rows affected (0 if absent).
@@ -412,6 +561,26 @@ updateRateLimitPolicyOverrides prefix upd = onRegistry $ \schemaName queues -> d
   -- Wake after the override commits.
   when (affected > 0) $ void $ Ops.wakeThrottledJobs schemaName queues prefix
   pure affected
+
+-- | Override a policy with this shape, until it is cleared. Returns rows affected.
+setRateLimit :: (MonadArbiter m, RegistryTables (RegistryOf m)) => RateLimitPolicy -> m Int64
+setRateLimit policy =
+  updateRateLimitPolicyOverrides (policyPrefixOf policy) $
+    RateLimitPolicyUpdate
+      { overrideMaxTokens = Just (Just (policyMax policy))
+      , overrideRefillAmount = Just (Just (policyRefill policy))
+      , overrideInterval = Just (Just (realToFrac (policyInterval policy)))
+      }
+
+-- | Drop a policy's overrides. Its declared params apply again. Returns rows affected.
+clearRateLimit :: (MonadArbiter m, RegistryTables (RegistryOf m)) => RateLimitPolicy -> m Int64
+clearRateLimit policy =
+  updateRateLimitPolicyOverrides (policyPrefixOf policy) $
+    RateLimitPolicyUpdate
+      { overrideMaxTokens = Just Nothing
+      , overrideRefillAmount = Just Nothing
+      , overrideInterval = Just Nothing
+      }
 
 -- | List every concurrency policy with its default\/override limit and live key and
 -- in-flight aggregates.
@@ -449,7 +618,9 @@ listConcurrencyKeys
   -> Int
   -- ^ Offset
   -> m [ConcurrencyKeyView]
-listConcurrencyKeys prefix limit offset = onSchema $ \schemaName -> Ops.listConcurrencyKeys schemaName prefix limit offset
+listConcurrencyKeys prefix limit offset =
+  onSchema $ \schemaName ->
+    Ops.listConcurrencyKeys schemaName prefix limit offset
 
 -- | Apply a concurrency policy's override-limit patch on its policy row, retuning every key under
 -- the prefix live. Lowering it never preempts in-flight jobs.
@@ -460,7 +631,9 @@ updateConcurrencyPolicyOverrides
   => Text
   -> ConcurrencyPolicyUpdate
   -> m Int64
-updateConcurrencyPolicyOverrides prefix upd = onSchema $ \schemaName -> Ops.updateConcurrencyPolicyOverrides schemaName prefix upd
+updateConcurrencyPolicyOverrides prefix upd =
+  onSchema $ \schemaName ->
+    Ops.updateConcurrencyPolicyOverrides schemaName prefix upd
 
 -- | Override the policy's limit with its 'cpLimit', until it is cleared. Returns rows affected.
 setConcurrencyLimit :: (MonadArbiter m) => ConcurrencyPolicy -> m Int64
@@ -505,318 +678,6 @@ reconcileAndPruneConcurrency
   => m Int64
 reconcileAndPruneConcurrency = onRegistry Ops.reconcileAndPruneConcurrency
 
--- | 'claimNextVisibleJobs' under a given worker id. A row whose payload fails to decode
--- moves to the DLQ.
-claimNextVisibleJobsAs
-  :: forall payload m
-   . (QueueOperation m payload)
-  => Int
-  -- ^ Maximum number of jobs to claim.
-  -> NominalDiffTime
-  -- ^ How long the claimed jobs should remain invisible (in seconds).
-  -> UUID
-  -- ^ Worker UUID stamped on each claimed row.
-  -> m [JobRead payload]
-claimNextVisibleJobsAs limit timeout workerId =
-  onQueue @payload $ \schemaName tableName ->
-    Ops.claimNextVisibleJobsAs schemaName tableName limit timeout workerId
-
--- | 'claimNextVisibleJobs' claiming up to @batchSize@ jobs from each group, still in
--- per-group order. Stamps the anonymous claimant. A row whose payload fails to decode
--- moves to the DLQ.
-claimNextVisibleJobsBatched
-  :: forall payload m
-   . (QueueOperation m payload)
-  => Int
-  -- ^ Batch size: maximum number of jobs to claim per group.
-  -> Int
-  -- ^ Maximum number of batches to claim. Each batch is one group, or ungrouped jobs
-  -- batched together.
-  -> NominalDiffTime
-  -- ^ How long the claimed jobs should remain invisible (in seconds).
-  -> m [NonEmpty (JobRead payload)]
-claimNextVisibleJobsBatched batchSize maxBatches timeout =
-  onQueue @payload $ \schemaName tableName ->
-    Ops.claimNextVisibleJobsBatched schemaName tableName batchSize maxBatches timeout
-
--- | Ack a completed job, deleting it or suspending it when its children are still
--- running. Returns 1, or 0 for a job that is gone or reclaimed.
-ackJob
-  :: forall payload m
-   . (MonadArbiter m)
-  => JobRead payload
-  -> m Int64
-ackJob job = onJob job $ \schemaName tableName -> Ops.ackJob schemaName tableName job
-
--- | 'ackJob' over a batch from one queue in one statement, returning the ids acked.
--- Gone or reclaimed jobs are absent.
-ackJobsBatch
-  :: forall payload m
-   . (MonadArbiter m)
-  => [JobRead payload]
-  -> m [Int64]
-ackJobsBatch [] = pure []
-ackJobsBatch jobs@(firstJob : _) = onJob firstJob $ \schemaName tableName -> Ops.ackJobsBatch schemaName tableName jobs
-
--- | Park a failed job for its retry backoff. Returns 0 for a job another worker holds or
--- a suspended job.
-updateJobForRetry
-  :: forall payload m
-   . (MonadArbiter m)
-  => NominalDiffTime
-  -- ^ The delay before the retry, rounded up to whole seconds.
-  -> Text
-  -- ^ An error message to store with the job.
-  -> JobRead payload
-  -> m Int64
-updateJobForRetry delay errorMsg job =
-  onJob job $ \schemaName tableName -> Ops.updateJobForRetry schemaName tableName delay errorMsg job
-
--- | Soft-nack a job. It is reprocessed once its visibility timeout lapses. No failure
--- is recorded and no attempt is consumed. Returns 0 for a job another worker holds, a
--- suspended job, or a released claim.
-nackJob
-  :: forall payload m
-   . (MonadArbiter m)
-  => JobRead payload
-  -> m Int64
-nackJob job = onJob job $ \schemaName tableName -> Ops.nackJob schemaName tableName job
-
--- | 'nackJob' over a batch from one queue in one statement, returning the ids nacked.
--- Jobs another worker holds, suspended jobs and released claims are absent.
-nackJobsBatch
-  :: forall payload m
-   . (MonadArbiter m)
-  => [JobRead payload]
-  -> m [Int64]
-nackJobsBatch [] = pure []
-nackJobsBatch jobs@(firstJob : _) = onJob firstJob $ \schemaName tableName -> Ops.nackJobsBatch schemaName tableName jobs
-
--- | Extend a job's visibility timeout by hand, for a long-running job. Matches the claim
--- token only. It also extends a job the caller released (nack, retry). Returns 0 for a
--- job that is gone, reclaimed or suspended.
-setVisibilityTimeout
-  :: forall payload m
-   . (MonadArbiter m)
-  => NominalDiffTime
-  -- ^ The new visibility timeout (in seconds) from the current time.
-  -> JobRead payload
-  -> m Int64
-setVisibilityTimeout timeout job = onJob job $ \schemaName tableName -> Ops.setVisibilityTimeout schemaName tableName timeout job
-
--- | Result of setting visibility timeout for a single job in a batch.
-data SetVisibilityResult
-  = -- | Visibility timeout was successfully extended.
-    VisibilityExtended JobId
-  | -- | Job no longer exists (was deleted/acked).
-    JobGone JobId
-  | -- | Job was reclaimed by another worker. Carries this claim's token, then the
-    -- row's current token.
-    JobReclaimed JobId ClaimSeq ClaimSeq
-  | -- | Job was force-cancel-flagged.
-    JobCancelled JobId
-  | -- | Job is suspended. It holds no lease.
-    JobSuspended JobId
-  | -- | Nothing was extended. The claim was released, the row or its group summary was
-    -- locked, the row changed mid-statement, or another claimant holds it at the same
-    -- claim token.
-    VisibilityUnchanged JobId
-  deriving stock (Eq, Show)
-
--- | Extend the visibility timeout of a batch from one queue. Each row must still match
--- its holder. A row whose row lock or group lock is busy is skipped.
-setVisibilityTimeoutBatch
-  :: forall payload m
-   . (MonadArbiter m)
-  => NominalDiffTime
-  -- ^ The new visibility timeout (in seconds) from the current time.
-  -> [JobRead payload]
-  -- ^ Jobs to heartbeat (all must be from the same queue)
-  -> m [SetVisibilityResult]
-setVisibilityTimeoutBatch _ [] = pure []
-setVisibilityTimeoutBatch timeout jobs@(firstJob : _) =
-  onJob firstJob $ \schemaName tableName ->
-    map toResult <$> Ops.setVisibilityTimeoutBatch schemaName tableName timeout jobs
-  where
-    jobMap = Map.fromList [(primaryKey job, job) | job <- jobs]
-    toResult (Ops.VisibilityUpdateInfo jobId heartbeated mActual cancelled suspended holder) =
-      let mJob = Map.lookup jobId jobMap
-          expected = maybe 0 claimSeq mJob
-          heldHere = any ((== holder) . claimedBy) mJob
-       in case mActual of
-            Nothing -> JobGone jobId
-            Just actual
-              | cancelled, heldHere, actual == expected + Ops.cancelTokenBump -> JobCancelled jobId
-              | actual /= expected -> JobReclaimed jobId expected actual
-              | suspended -> JobSuspended jobId
-              | heartbeated -> VisibilityExtended jobId
-              | otherwise -> VisibilityUnchanged jobId
-
--- | Move a job to the DLQ. Returns 0 for a job another worker holds.
-moveToDLQ
-  :: forall payload m
-   . (MonadArbiter m)
-  => Text
-  -- ^ Error message (the final error that caused the DLQ move)
-  -> JobRead payload
-  -> m Int64
-moveToDLQ errorMsg job = onJob job $ \schemaName tableName -> Ops.moveToDLQ Ops.TakeLocks schemaName tableName errorMsg job
-
--- | List DLQ jobs, most recently failed first.
-listDLQJobs
-  :: forall payload m
-   . (QueueOperation m payload)
-  => Int
-  -- ^ Limit
-  -> Int
-  -- ^ Offset
-  -> m [DLQ.DLQJob payload]
-listDLQJobs limit offset = onQueue @payload $ \schemaName tableName -> Ops.listDLQJobs schemaName tableName limit offset >>= traverse Ops.typedDLQRow
-
--- | List archived jobs, most recently completed first.
-listArchiveJobs
-  :: forall payload m
-   . (QueueOperation m payload)
-  => Int
-  -- ^ Limit
-  -> Int
-  -- ^ Offset
-  -> m [Archive.ArchiveJob payload]
-listArchiveJobs limit offset = onQueue @payload $ \schemaName tableName -> Ops.listArchiveJobs schemaName tableName limit offset >>= traverse Ops.typedArchiveRow
-
--- | Fetch a single archived job by its original job id.
-getArchiveJobById
-  :: forall payload m
-   . (QueueOperation m payload)
-  => Int64
-  -- ^ Original job id
-  -> m (Maybe (Archive.ArchiveJob payload))
-getArchiveJobById jobId = onQueue @payload $ \schemaName tableName -> Ops.getArchiveJobById schemaName tableName jobId >>= traverse Ops.typedArchiveRow
-
--- | List archived jobs in a group, most recently completed first, with pagination.
-listArchiveJobsByGroup
-  :: forall payload m
-   . (QueueOperation m payload)
-  => Text
-  -- ^ Group key
-  -> Int
-  -- ^ Limit
-  -> Int
-  -- ^ Offset
-  -> m [Archive.ArchiveJob payload]
-listArchiveJobsByGroup groupKey limit offset =
-  onQueue @payload $ \schemaName tableName ->
-    Ops.listArchiveJobsByGroup schemaName tableName groupKey limit offset >>= traverse Ops.typedArchiveRow
-
--- | Delete one archived job by its archive primary key. Returns rows deleted.
-deleteArchiveJob
-  :: forall payload m
-   . (QueueOperation m payload)
-  => Int64
-  -- ^ Archive primary key
-  -> m Int64
-deleteArchiveJob archiveId = onQueue @payload $ \schemaName tableName -> Ops.deleteArchiveJob schemaName tableName archiveId
-
--- | Delete archived jobs by archive primary key. Returns rows deleted.
-deleteArchiveJobsBatch
-  :: forall payload m
-   . (QueueOperation m payload)
-  => [Int64]
-  -- ^ Archive primary keys
-  -> m Int64
-deleteArchiveJobsBatch archiveIds = onQueue @payload $ \schemaName tableName -> Ops.deleteArchiveJobsBatch schemaName tableName archiveIds
-
--- | Re-enqueue an archived job as a fresh standalone job, keeping the archive
--- row. Returns the new job, or @Nothing@ if the archive row no longer exists.
-reEnqueueFromArchive
-  :: forall payload m
-   . (QueueOperation m payload)
-  => Int64
-  -- ^ Archive primary key
-  -> m (Maybe (JobRead payload))
-reEnqueueFromArchive archiveId = onQueue @payload $ \schemaName tableName ->
-  withDbTransaction (Ops.reEnqueueFromArchive schemaName tableName archiveId >>= traverse Ops.typedRow)
-
--- | 'reEnqueueFromArchive' with a replacement payload. The columns the payload
--- derives are derived again from it.
-reEnqueueFromArchiveWithPayload
-  :: forall payload m
-   . (QueueOperation m payload)
-  => Int64
-  -- ^ Archive primary key
-  -> payload
-  -> m (Maybe (JobRead payload))
-reEnqueueFromArchiveWithPayload archiveId replacement = onQueue @payload $ \schemaName tableName ->
-  withDbTransaction
-    (Ops.reEnqueueFromArchiveWithPayload schemaName tableName archiveId (Just replacement) >>= traverse Ops.typedRow)
-
--- | Retry the whole DLQ tree that holds a DLQ row, with a fresh attempt count. The dedup
--- key is left behind. Returns the restored job for that row. 'Nothing' when the row is
--- gone or the root's parent no longer exists.
-retryFromDLQ
-  :: forall payload m
-   . (QueueOperation m payload)
-  => Int64
-  -- ^ DLQ primary key ('Arbiter.Core.Job.DLQ.dlqPrimaryKey')
-  -> m (Maybe (JobRead payload))
-retryFromDLQ dlqId = onQueue @payload $ \schemaName tableName ->
-  withDbTransaction (Ops.retryFromDLQ schemaName tableName dlqId >>= traverse Ops.typedRow)
-
--- | 'retryFromDLQ' with a replacement payload. The columns the payload derives are
--- derived again from it.
-retryFromDLQWithPayload
-  :: forall payload m
-   . (QueueOperation m payload)
-  => Int64
-  -- ^ DLQ primary key ('Arbiter.Core.Job.DLQ.dlqPrimaryKey')
-  -> payload
-  -> m (Maybe (JobRead payload))
-retryFromDLQWithPayload dlqId replacement = onQueue @payload $ \schemaName tableName ->
-  withDbTransaction (Ops.retryFromDLQWithPayload schemaName tableName dlqId (Just replacement) >>= traverse Ops.typedRow)
-
--- | Whether a DLQ row with the given DLQ primary key exists.
-dlqJobExists
-  :: forall payload m
-   . (QueueOperation m payload)
-  => Int64
-  -- ^ DLQ primary key ('Arbiter.Core.Job.DLQ.dlqPrimaryKey')
-  -> m Bool
-dlqJobExists dlqId = onQueue @payload $ \schemaName tableName -> Ops.dlqJobExists schemaName tableName dlqId
-
--- | Delete a DLQ job. Returns 0 when the row is already gone.
-deleteDLQJob
-  :: forall payload m
-   . (QueueOperation m payload)
-  => Int64
-  -- ^ DLQ primary key ('Arbiter.Core.Job.DLQ.dlqPrimaryKey')
-  -> m Int64
-deleteDLQJob dlqId = onQueue @payload $ \schemaName tableName -> Ops.deleteDLQJob schemaName tableName dlqId
-
--- | Move a batch of jobs to the DLQ, skipping any another worker holds. Returns the
--- number moved.
-moveToDLQBatch
-  :: forall payload m
-   . (MonadArbiter m)
-  => [(JobRead payload, Text)]
-  -- ^ List of (job, error message) pairs. All jobs must be from the same queue.
-  -> m Int64
-moveToDLQBatch [] = pure 0
-moveToDLQBatch jobsWithErrors@((firstJob, _) : _) =
-  onJob firstJob $ \schemaName tableName -> Ops.moveToDLQBatch schemaName tableName jobsWithErrors
-
--- | Delete DLQ jobs by DLQ primary key. Returns the number deleted.
-deleteDLQJobsBatch
-  :: forall payload m
-   . (QueueOperation m payload)
-  => [Int64]
-  -- ^ DLQ primary keys ('Arbiter.Core.Job.DLQ.dlqPrimaryKey')
-  -> m Int64
-deleteDLQJobsBatch dlqIds = onQueue @payload $ \schemaName tableName -> Ops.deleteDLQJobsBatch schemaName tableName dlqIds
-
--- ---------------------------------------------------------------------------
--- Filtered Query Operations
--- ---------------------------------------------------------------------------
-
 -- | List filtered jobs, newest first.
 listJobsFiltered
   :: forall payload m
@@ -828,7 +689,9 @@ listJobsFiltered
   -> Int
   -- ^ Offset
   -> m [JobRead payload]
-listJobsFiltered filters limit offset = onQueue @payload $ \schemaName tableName -> Ops.listJobsFiltered schemaName tableName filters limit offset >>= traverse Ops.typedRow
+listJobsFiltered filters limit offset =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.listJobsFiltered schemaName tableName filters limit offset >>= traverse Ops.typedRow
 
 -- | Count filtered jobs.
 countJobsFiltered
@@ -837,7 +700,9 @@ countJobsFiltered
   => [Ops.JobFilter]
   -- ^ Composable filters
   -> m Int64
-countJobsFiltered filters = onQueue @payload $ \schemaName tableName -> Ops.countJobsFiltered schemaName tableName filters
+countJobsFiltered filters =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.countJobsFiltered schemaName tableName filters
 
 -- | List filtered DLQ jobs, most recently failed first.
 listDLQFiltered
@@ -850,7 +715,9 @@ listDLQFiltered
   -> Int
   -- ^ Offset
   -> m [DLQ.DLQJob payload]
-listDLQFiltered filters limit offset = onQueue @payload $ \schemaName tableName -> Ops.listDLQFiltered schemaName tableName filters limit offset >>= traverse Ops.typedDLQRow
+listDLQFiltered filters limit offset =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.listDLQFiltered schemaName tableName filters limit offset >>= traverse Ops.typedDLQRow
 
 -- | Count filtered DLQ jobs.
 countDLQFiltered
@@ -882,11 +749,184 @@ countArchiveFiltered
   => [Ops.JobFilter]
   -- ^ Composable filters
   -> m Int64
-countArchiveFiltered filters = onQueue @payload $ \schemaName tableName -> Ops.countArchiveFiltered schemaName tableName filters
+countArchiveFiltered filters =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.countArchiveFiltered schemaName tableName filters
 
--- ---------------------------------------------------------------------------
--- Admin Operations
--- ---------------------------------------------------------------------------
+-- | Move a job to the DLQ. Returns 0 for a job another worker holds.
+moveToDLQ
+  :: forall payload m
+   . (MonadArbiter m)
+  => Text
+  -- ^ Error message (the final error that caused the DLQ move)
+  -> JobRead payload
+  -> m Int64
+moveToDLQ errorMsg job =
+  onJob job $ \schemaName tableName ->
+    Ops.moveToDLQ Ops.TakeLocks schemaName tableName errorMsg job
+
+-- | Move a batch of jobs to the DLQ, skipping any another worker holds. Returns the
+-- number moved.
+moveToDLQBatch
+  :: forall payload m
+   . (MonadArbiter m)
+  => [(JobRead payload, Text)]
+  -- ^ List of (job, error message) pairs. All jobs must be from the same queue.
+  -> m Int64
+moveToDLQBatch jobsWithErrors =
+  onJobs fst 0 jobsWithErrors $ \schemaName tableName -> Ops.moveToDLQBatch schemaName tableName jobsWithErrors
+
+-- | List DLQ jobs, most recently failed first.
+listDLQJobs
+  :: forall payload m
+   . (QueueOperation m payload)
+  => Int
+  -- ^ Limit
+  -> Int
+  -- ^ Offset
+  -> m [DLQ.DLQJob payload]
+listDLQJobs limit offset =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.listDLQJobs schemaName tableName limit offset >>= traverse Ops.typedDLQRow
+
+-- | Retry the whole DLQ tree that holds a DLQ row, with a fresh attempt count. The dedup
+-- key is left behind. Returns the restored job for that row. 'Nothing' when the row is
+-- gone or the root's parent no longer exists.
+retryFromDLQ
+  :: forall payload m
+   . (QueueOperation m payload)
+  => Int64
+  -- ^ DLQ primary key ('Arbiter.Core.Job.DLQ.dlqPrimaryKey')
+  -> m (Maybe (JobRead payload))
+retryFromDLQ dlqId = onQueue @payload $ \schemaName tableName ->
+  withDbTransaction (Ops.retryFromDLQ schemaName tableName dlqId >>= traverse Ops.typedRow)
+
+-- | 'retryFromDLQ' with a replacement payload. The columns the payload derives are
+-- derived again from it.
+retryFromDLQWithPayload
+  :: forall payload m
+   . (QueueOperation m payload)
+  => Int64
+  -- ^ DLQ primary key ('Arbiter.Core.Job.DLQ.dlqPrimaryKey')
+  -> payload
+  -> m (Maybe (JobRead payload))
+retryFromDLQWithPayload dlqId replacement = onQueue @payload $ \schemaName tableName ->
+  withDbTransaction
+    (Ops.retryFromDLQWithPayload schemaName tableName dlqId (Just replacement) >>= traverse Ops.typedRow)
+
+-- | Whether a DLQ row with the given DLQ primary key exists.
+dlqJobExists
+  :: forall payload m
+   . (QueueOperation m payload)
+  => Int64
+  -- ^ DLQ primary key ('Arbiter.Core.Job.DLQ.dlqPrimaryKey')
+  -> m Bool
+dlqJobExists dlqId = onQueue @payload $ \schemaName tableName -> Ops.dlqJobExists schemaName tableName dlqId
+
+-- | Delete a DLQ job. Returns 0 when the row is already gone.
+deleteDLQJob
+  :: forall payload m
+   . (QueueOperation m payload)
+  => Int64
+  -- ^ DLQ primary key ('Arbiter.Core.Job.DLQ.dlqPrimaryKey')
+  -> m Int64
+deleteDLQJob dlqId = onQueue @payload $ \schemaName tableName -> Ops.deleteDLQJob schemaName tableName dlqId
+
+-- | Delete DLQ jobs by DLQ primary key. Returns the number deleted.
+deleteDLQJobsBatch
+  :: forall payload m
+   . (QueueOperation m payload)
+  => [Int64]
+  -- ^ DLQ primary keys ('Arbiter.Core.Job.DLQ.dlqPrimaryKey')
+  -> m Int64
+deleteDLQJobsBatch dlqIds =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.deleteDLQJobsBatch schemaName tableName dlqIds
+
+-- | List archived jobs, most recently completed first.
+listArchiveJobs
+  :: forall payload m
+   . (QueueOperation m payload)
+  => Int
+  -- ^ Limit
+  -> Int
+  -- ^ Offset
+  -> m [Archive.ArchiveJob payload]
+listArchiveJobs limit offset =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.listArchiveJobs schemaName tableName limit offset >>= traverse Ops.typedArchiveRow
+
+-- | Fetch a single archived job by its original job id.
+getArchiveJobById
+  :: forall payload m
+   . (QueueOperation m payload)
+  => Int64
+  -- ^ Original job id
+  -> m (Maybe (Archive.ArchiveJob payload))
+getArchiveJobById jobId =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.getArchiveJobById schemaName tableName jobId >>= traverse Ops.typedArchiveRow
+
+-- | List archived jobs in a group, most recently completed first, with pagination.
+listArchiveJobsByGroup
+  :: forall payload m
+   . (QueueOperation m payload)
+  => Text
+  -- ^ Group key
+  -> Int
+  -- ^ Limit
+  -> Int
+  -- ^ Offset
+  -> m [Archive.ArchiveJob payload]
+listArchiveJobsByGroup groupKey limit offset =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.listArchiveJobsByGroup schemaName tableName groupKey limit offset >>= traverse Ops.typedArchiveRow
+
+-- | Delete one archived job by its archive primary key. Returns rows deleted.
+deleteArchiveJob
+  :: forall payload m
+   . (QueueOperation m payload)
+  => Int64
+  -- ^ Archive primary key
+  -> m Int64
+deleteArchiveJob archiveId =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.deleteArchiveJob schemaName tableName archiveId
+
+-- | Delete archived jobs by archive primary key. Returns rows deleted.
+deleteArchiveJobsBatch
+  :: forall payload m
+   . (QueueOperation m payload)
+  => [Int64]
+  -- ^ Archive primary keys
+  -> m Int64
+deleteArchiveJobsBatch archiveIds =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.deleteArchiveJobsBatch schemaName tableName archiveIds
+
+-- | Re-enqueue an archived job as a fresh standalone job, keeping the archive
+-- row. Returns the new job, or @Nothing@ if the archive row no longer exists.
+reEnqueueFromArchive
+  :: forall payload m
+   . (QueueOperation m payload)
+  => Int64
+  -- ^ Archive primary key
+  -> m (Maybe (JobRead payload))
+reEnqueueFromArchive archiveId = onQueue @payload $ \schemaName tableName ->
+  withDbTransaction (Ops.reEnqueueFromArchive schemaName tableName archiveId >>= traverse Ops.typedRow)
+
+-- | 'reEnqueueFromArchive' with a replacement payload. The columns the payload
+-- derives are derived again from it.
+reEnqueueFromArchiveWithPayload
+  :: forall payload m
+   . (QueueOperation m payload)
+  => Int64
+  -- ^ Archive primary key
+  -> payload
+  -> m (Maybe (JobRead payload))
+reEnqueueFromArchiveWithPayload archiveId replacement = onQueue @payload $ \schemaName tableName ->
+  withDbTransaction
+    (Ops.reEnqueueFromArchiveWithPayload schemaName tableName archiveId (Just replacement) >>= traverse Ops.typedRow)
 
 -- | List jobs, newest first.
 listJobs
@@ -897,7 +937,9 @@ listJobs
   -> Int
   -- ^ Offset
   -> m [JobRead payload]
-listJobs limit offset = onQueue @payload $ \schemaName tableName -> Ops.listJobs schemaName tableName limit offset >>= traverse Ops.typedRow
+listJobs limit offset =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.listJobs schemaName tableName limit offset >>= traverse Ops.typedRow
 
 -- | Fetch a job by id.
 getJobById
@@ -906,7 +948,9 @@ getJobById
   => Int64
   -- ^ Job id
   -> m (Maybe (JobRead payload))
-getJobById jobId = onQueue @payload $ \schemaName tableName -> Ops.getJobById schemaName tableName jobId >>= traverse Ops.typedRow
+getJobById jobId =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.getJobById schemaName tableName jobId >>= traverse Ops.typedRow
 
 -- | Whether a job with the given id exists in this payload's queue table.
 jobExists
@@ -928,7 +972,9 @@ listJobsByGroup
   -> Int
   -- ^ Offset
   -> m [JobRead payload]
-listJobsByGroup groupKey limit offset = onQueue @payload $ \schemaName tableName -> Ops.listJobsByGroup schemaName tableName groupKey limit offset >>= traverse Ops.typedRow
+listJobsByGroup groupKey limit offset =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.listJobsByGroup schemaName tableName groupKey limit offset >>= traverse Ops.typedRow
 
 -- | List a parent's children, newest first.
 listJobsByParent
@@ -941,7 +987,9 @@ listJobsByParent
   -> Int
   -- ^ Offset
   -> m [JobRead payload]
-listJobsByParent pid limit offset = onQueue @payload $ \schemaName tableName -> Ops.listJobsByParent schemaName tableName pid limit offset >>= traverse Ops.typedRow
+listJobsByParent pid limit offset =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.listJobsByParent schemaName tableName pid limit offset >>= traverse Ops.typedRow
 
 -- | Delete a job by id. Returns 0 for a job with children. 'cancelJobCascade' deletes
 -- those.
@@ -953,6 +1001,15 @@ cancelJob
   -> m Int64
 cancelJob jobId = onQueue @payload $ \schemaName tableName -> Ops.cancelJob schemaName tableName jobId
 
+-- | Delete jobs by id. A job with children is skipped. Returns the number deleted.
+cancelJobsBatch
+  :: forall payload m
+   . (QueueOperation m payload)
+  => [Int64]
+  -- ^ Job ids
+  -> m Int64
+cancelJobsBatch jobIds = onQueue @payload $ \schemaName tableName -> Ops.cancelJobsBatch schemaName tableName jobIds
+
 -- | Cascade-cancel a job subtree. Flags still-live claimed jobs, deletes the rest,
 -- and NOTIFYs the queue's cancel channel for every claimed job affected. Returns the
 -- number flagged or deleted.
@@ -963,15 +1020,6 @@ forceCancelJob
   -- ^ Root job id
   -> m Int64
 forceCancelJob jobId = onQueue @payload $ \schemaName tableName -> Ops.forceCancelJob schemaName tableName jobId
-
--- | Delete jobs by id. A job with children is skipped. Returns the number deleted.
-cancelJobsBatch
-  :: forall payload m
-   . (QueueOperation m payload)
-  => [Int64]
-  -- ^ Job ids
-  -> m Int64
-cancelJobsBatch jobIds = onQueue @payload $ \schemaName tableName -> Ops.cancelJobsBatch schemaName tableName jobIds
 
 -- | Make a delayed or retrying job immediately visible. Refuses an in-flight or suspended job.
 promoteJob
@@ -992,7 +1040,9 @@ rescheduleJob
   -> UTCTime
   -- ^ When the job becomes visible
   -> m Int64
-rescheduleJob jobId runAt = onQueue @payload $ \schemaName tableName -> Ops.rescheduleJob schemaName tableName jobId runAt
+rescheduleJob jobId runAt =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.rescheduleJob schemaName tableName jobId runAt
 
 -- | A queue's per-status counts and backlog ages.
 getQueueStats
@@ -1000,10 +1050,6 @@ getQueueStats
    . (QueueOperation m payload)
   => m Ops.QueueStats
 getQueueStats = onQueue @payload $ \schemaName tableName -> Ops.getQueueStats schemaName tableName (kindsFor @payload)
-
--- ---------------------------------------------------------------------------
--- Count Operations
--- ---------------------------------------------------------------------------
 
 -- | Count every job in the queue.
 countJobs
@@ -1019,7 +1065,9 @@ countJobsByGroup
   => Text
   -- ^ Group key
   -> m Int64
-countJobsByGroup groupKey = onQueue @payload $ \schemaName tableName -> Ops.countJobsByGroup schemaName tableName groupKey
+countJobsByGroup groupKey =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.countJobsByGroup schemaName tableName groupKey
 
 -- | Count a parent's children.
 countJobsByParent
@@ -1064,11 +1112,9 @@ countDLQChildrenBatch
   => [Int64]
   -- ^ Parent job ids
   -> m (Map Int64 Int64)
-countDLQChildrenBatch ids = onQueue @payload $ \schemaName tableName -> Ops.countDLQChildrenBatch schemaName tableName ids
-
--- ---------------------------------------------------------------------------
--- Job Dependency Operations
--- ---------------------------------------------------------------------------
+countDLQChildrenBatch ids =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.countDLQChildrenBatch schemaName tableName ids
 
 -- | Suspend every unsuspended visible job in a parent's subtree, lapsed leases included.
 -- Jobs with a future visibility (delayed, backoff, throttled, leased) are skipped.
@@ -1079,7 +1125,9 @@ pauseChildren
   => Int64
   -- ^ Parent job id
   -> m Int64
-pauseChildren parentJobId = onQueue @payload $ \schemaName tableName -> Ops.pauseChildren schemaName tableName parentJobId
+pauseChildren parentJobId =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.pauseChildren schemaName tableName parentJobId
 
 -- | Resume the suspended jobs in a parent's subtree. A finalizer with children still in
 -- the queue stays suspended. Returns the number resumed.
@@ -1089,7 +1137,9 @@ resumeChildren
   => Int64
   -- ^ Parent job id
   -> m Int64
-resumeChildren parentJobId = onQueue @payload $ \schemaName tableName -> Ops.resumeChildren schemaName tableName parentJobId
+resumeChildren parentJobId =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.resumeChildren schemaName tableName parentJobId
 
 -- | Delete a job and every descendant under it. Returns the number deleted.
 cancelJobCascade
@@ -1098,11 +1148,9 @@ cancelJobCascade
   => Int64
   -- ^ Root job id
   -> m Int64
-cancelJobCascade jobId = onQueue @payload $ \schemaName tableName -> genericLength <$> Ops.cancelJobCascade schemaName tableName jobId
-
--- ---------------------------------------------------------------------------
--- Suspend/Resume Operations
--- ---------------------------------------------------------------------------
+cancelJobCascade jobId =
+  onQueue @payload $ \schemaName tableName ->
+    genericLength <$> Ops.cancelJobCascade schemaName tableName jobId
 
 -- | Suspend a job, making it unclaimable. Refuses an in-flight job.
 suspendJob
@@ -1121,10 +1169,6 @@ resumeJob
   -- ^ Job id
   -> m Int64
 resumeJob jobId = onQueue @payload $ \schemaName tableName -> Ops.resumeJob schemaName tableName jobId
-
--- ---------------------------------------------------------------------------
--- Results Table Operations
--- ---------------------------------------------------------------------------
 
 -- | Upsert a child's result, encoded as the queue's declared result type and keyed by
 -- @(parent_id, child_id)@. A second write replaces the first. Its foreign key cascades.
@@ -1167,7 +1211,9 @@ getResultsByParent
   => Int64
   -- ^ Parent job id
   -> m (Map Int64 Value)
-getResultsByParent parentJobId = onQueue @payload $ \schemaName tableName -> Ops.getResultsByParent schemaName tableName parentJobId
+getResultsByParent parentJobId =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.getResultsByParent schemaName tableName parentJobId
 
 -- | The last errors of a parent's children in the DLQ, keyed by child id. Children with
 -- no recorded error are left out.
@@ -1177,7 +1223,9 @@ getDLQChildErrorsByParent
   => Int64
   -- ^ Parent job id
   -> m (Map Int64 Text)
-getDLQChildErrorsByParent parentJobId = onQueue @payload $ \schemaName tableName -> Ops.getDLQChildErrorsByParent schemaName tableName parentJobId
+getDLQChildErrorsByParent parentJobId =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.getDLQChildErrorsByParent schemaName tableName parentJobId
 
 -- | Read all child data for a rollup finalizer. Returns
 -- @(childId->result, childId->error, parentStateSnapshot, dlqRowId->error)@.
@@ -1187,7 +1235,9 @@ readChildResultsRaw
   => Int64
   -- ^ Parent job id
   -> m (Map Int64 Value, Map Int64 Text, Maybe Value, Map Int64 Text)
-readChildResultsRaw parentJobId = onQueue @payload $ \schemaName tableName -> Ops.readChildResultsRaw schemaName tableName parentJobId
+readChildResultsRaw parentJobId =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.readChildResultsRaw schemaName tableName parentJobId
 
 -- | Snapshot results into @parent_state@ before DLQ move.
 persistParentState
@@ -1198,7 +1248,9 @@ persistParentState
   -> Value
   -- ^ Snapshot to store
   -> m Int64
-persistParentState jobId state = onQueue @payload $ \schemaName tableName -> Ops.persistParentState schemaName tableName jobId state
+persistParentState jobId state =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.persistParentState schemaName tableName jobId state
 
 -- | Read raw @parent_state@ snapshot from the DB.
 getParentStateSnapshot
@@ -1207,11 +1259,9 @@ getParentStateSnapshot
   => Int64
   -- ^ Job id
   -> m (Maybe Value)
-getParentStateSnapshot jobId = onQueue @payload $ \schemaName tableName -> Ops.getParentStateSnapshot schemaName tableName jobId
-
--- ---------------------------------------------------------------------------
--- Groups Table Operations
--- ---------------------------------------------------------------------------
+getParentStateSnapshot jobId =
+  onQueue @payload $ \schemaName tableName ->
+    Ops.getParentStateSnapshot schemaName tableName jobId
 
 -- | Refresh every registered queue's groups table to the end. Returns the rows rewritten
 -- and the queue names that failed.
@@ -1220,10 +1270,6 @@ refreshAllGroupsFully
    . (MonadArbiter m, RegistryTables (RegistryOf m))
   => m (Int64, [Text])
 refreshAllGroupsFully = onRegistry Ops.refreshAllGroupsFully
-
--- ---------------------------------------------------------------------------
--- Worker Registry
--- ---------------------------------------------------------------------------
 
 -- | Register or refresh a worker and return its effective pause state (worker or
 -- queue). 'Nothing' when the upsert returns no row.
@@ -1270,10 +1316,6 @@ listWorkers queue liveSecs = onSchema $ \schemaName -> Ops.listWorkers schemaNam
 sweepStaleWorkers :: (MonadArbiter m) => m Int64
 sweepStaleWorkers = onSchema Ops.sweepStaleWorkers
 
--- ---------------------------------------------------------------------------
--- Queues
--- ---------------------------------------------------------------------------
-
 -- | Ensure a queue's pause-state row exists.
 ensureQueue :: (MonadArbiter m) => Text -> m Int64
 ensureQueue queue = onSchema $ \schemaName -> Ops.ensureQueue schemaName queue
@@ -1289,10 +1331,6 @@ getQueue queue = onSchema $ \schemaName -> Ops.getQueue schemaName queue
 -- | List the queue pause-state rows, ordered by queue name.
 listQueues :: (MonadArbiter m) => m [QueueRow]
 listQueues = onSchema Ops.listQueues
-
--- ---------------------------------------------------------------------------
--- Cron Schedules
--- ---------------------------------------------------------------------------
 
 -- | List cron schedules ordered by name, optionally filtered by queue.
 listCronSchedules
@@ -1322,11 +1360,9 @@ updateCronScheduleUnchecked
   -- ^ Schedule name
   -> CronScheduleUpdate
   -> m Int64
-updateCronScheduleUnchecked scheduleName upd = onSchema $ \schemaName -> Ops.updateCronSchedule schemaName scheduleName upd
-
--- ---------------------------------------------------------------------------
--- Global Gate
--- ---------------------------------------------------------------------------
+updateCronScheduleUnchecked scheduleName upd =
+  onSchema $ \schemaName ->
+    Ops.updateCronSchedule schemaName scheduleName upd
 
 -- | Run @work@ at most once per @interval@ across every worker pool sharing
 -- the same schema. 'Nothing' when the gate ran too recently or another pool holds the task.
@@ -1340,10 +1376,6 @@ runGated
   -> m a
   -> m (Maybe a)
 runGated task interval work = onSchema $ \schemaName -> Ops.runGated schemaName task interval work
-
--- ---------------------------------------------------------------------------
--- Job Tree DSL
--- ---------------------------------------------------------------------------
 
 -- | Insert a t'Arbiter.Core.JobTree.JobTree' atomically. Returns all inserted jobs in pre-order.
 -- @Left@ on a dedup conflict at any node, with nothing committed.

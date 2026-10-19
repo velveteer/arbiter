@@ -56,8 +56,7 @@ arbiterRateLimitPoliciesTableName = "arbiter_rate_limit_policies"
 arbiterRateLimitsTableName :: Text
 arbiterRateLimitsTableName = "arbiter_rate_limits"
 
--- | Qualified name of the single bucket table. Its WAL durability is a table-level
--- property reconciled by the migration.
+-- | Qualified name of the single bucket table.
 arbiterRateLimitsTable :: SchemaName -> Text
 arbiterRateLimitsTable schemaName = sharedTable schemaName arbiterRateLimitsTableName
 
@@ -89,9 +88,7 @@ createRateLimitsTableSQL schemaName =
     , ") WITH (fillfactor = 80);"
     ]
 
--- | Converge the bucket table's WAL persistence to a durability. Rewrites the
--- table under @ACCESS EXCLUSIVE@. Callers issue it when the durability differs
--- from the current state.
+-- | Set the bucket table's WAL persistence. Rewrites the table under @ACCESS EXCLUSIVE@.
 alterRateLimitsDurabilitySQL :: SchemaName -> Durability -> Text
 alterRateLimitsDurabilitySQL schemaName dur =
   "ALTER TABLE " <> arbiterRateLimitsTable schemaName <> set <> ";"

@@ -107,6 +107,7 @@ import Data.Aeson
   )
 import Data.Aeson.Encoding (Series)
 import Data.Aeson.Types (Pair)
+import Data.Bifunctor qualified as Bi
 import Data.ByteString.Lazy qualified as BL
 import Data.Int (Int32, Int64)
 import Data.Maybe (isJust)
@@ -209,7 +210,7 @@ toStored = Stored . BL.toStrict . encode
 
 -- | Decode a stored payload, or the reason the type rejects it.
 decodeStored :: (FromJSON payload) => Stored payload -> Either Text payload
-decodeStored = either (Left . ("Failed to decode job payload: " <>) . T.pack) Right . eitherDecodeStrict . storedBytes
+decodeStored = Bi.first (("Failed to decode job payload: " <>) . T.pack) . eitherDecodeStrict . storedBytes
 
 -- | Decode the complete persisted representation of a job.
 instance (FromJSON payload) => FromJSON (JobRead payload) where

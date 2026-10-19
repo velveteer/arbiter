@@ -20,6 +20,9 @@ module Arbiter.Core.Job.Schema
   , addTraceContextColumnSQL
   , addClaimSeqColumnSQL
   , addKindColumnSQL
+  , addClaimedByColumnSQL
+  , addCancelRequestedAtColumnSQL
+  , addArchiveForColumnSQL
   , setMaxAttemptsDefaultSQL
 
     -- * Index creation SQL
@@ -276,6 +279,35 @@ addClaimSeqColumnSQL schemaName tableName =
 addKindColumnSQL :: SchemaName -> TableName -> Text
 addKindColumnSQL schemaName tableName =
   addJobColumnsSQL schemaName tableName ["kind TEXT"]
+
+-- | Idempotent migration adding the @claimed_by@ column to a queue's job and DLQ tables.
+addClaimedByColumnSQL :: SchemaName -> TableName -> Text
+addClaimedByColumnSQL schemaName tableName =
+  T.unlines
+    [ "ALTER TABLE " <> jobQueueTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS claimed_by UUID;"
+    , "ALTER TABLE " <> jobQueueDLQTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS claimed_by UUID;"
+    ]
+
+-- | Idempotent migration adding the @cancel_requested_at@ column to a queue's
+-- job table, with a partial index backing the reaper's flagged-job sweep.
+addCancelRequestedAtColumnSQL :: SchemaName -> TableName -> Text
+addCancelRequestedAtColumnSQL schemaName tableName =
+  T.unlines
+    [ "ALTER TABLE " <> jobQueueTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS cancel_requested_at TIMESTAMPTZ;"
+    , "CREATE INDEX IF NOT EXISTS "
+        <> quoteIdentifier ("idx_" <> tableName <> "_cancel_requested")
+        <> " ON "
+        <> jobQueueTable schemaName tableName
+        <> " (id ASC) WHERE cancel_requested_at IS NOT NULL;"
+    ]
+
+-- | Idempotent migration adding the @archive_for@ column to a queue's job and DLQ tables.
+addArchiveForColumnSQL :: SchemaName -> TableName -> Text
+addArchiveForColumnSQL schemaName tableName =
+  T.unlines
+    [ "ALTER TABLE " <> jobQueueTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS archive_for INT;"
+    , "ALTER TABLE " <> jobQueueDLQTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS archive_for INT;"
+    ]
 
 -- | Backfill NULL @max_attempts@ to the default and set the column default.
 -- The column stays nullable for rolling deploys.

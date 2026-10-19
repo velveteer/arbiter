@@ -54,7 +54,14 @@ data Query a = Query
 
 -- | A query from its pieces, parameters and decoder.
 mkQuery :: [Piece] -> Params -> RowCodec a -> Query a
-mkQuery pieces params = Query pieces params (render (const "?") pieces) (render positional pieces)
+mkQuery pieces params decode =
+  Query
+    { qPieces = pieces
+    , qParams = params
+    , qSql = render (const "?") pieces
+    , qPositional = render positional pieces
+    , qDecode = decode
+    }
   where
     positional index = "$" <> showText index
 

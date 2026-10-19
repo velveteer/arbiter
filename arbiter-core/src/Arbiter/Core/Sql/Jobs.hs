@@ -23,12 +23,11 @@ module Arbiter.Core.Sql.Jobs
   , listJobsWithStatusSQL
   , countJobsFilteredSQL
   , getJobByIdWithStatusSQL
-  , listDLQFilteredSQL
   , buildJobsOrderBy
   , buildDLQOrderBy
   , buildArchiveOrderBy
-  , countDLQFilteredSQL
   , countWhereSQL
+  , buildWhereClause
   , jobColsExceptId
   , dlqCarriedCols
   , requeuedCols
@@ -55,17 +54,17 @@ import Data.UUID.Types (UUID)
 import NeatInterpolation (text)
 
 import Arbiter.Core.Admission (excludedAssignment)
-import Arbiter.Core.Codec (codecColumns, dlqRowCodec, jobRowCodec, joinColumns, writeColumnNames)
+import Arbiter.Core.Codec (codecColumns, jobRowCodec, joinColumns, writeColumnNames)
 import Arbiter.Core.Job.Schema
   ( SchemaName
   , TableName
   , jobQueueDLQTable
   , jobQueueTable
   )
-import Arbiter.Core.Job.Types (JobRead, JobStatus, Stored)
+import Arbiter.Core.Job.Types (JobRead, JobStatus, Stored, jobStatusToText)
 import Arbiter.Core.Sql.Groups (settleGroupLocksCte)
 import Arbiter.Core.Sql.QQ (sql)
-import Arbiter.Core.Sql.Query (Query, mwhen, rows)
+import Arbiter.Core.Sql.Query (Query, mwhen, raw, rows, sepBy)
 import Arbiter.Core.Sql.Tree (wakeParentCte)
 import Arbiter.Core.SqlLiterals (attemptsLeftSQL, attemptsSpentSQL, defaultMaxAttemptsSQL, minMaxAttemptsSQL)
 
@@ -306,21 +305,6 @@ getJobByIdWithStatusSQL schemaName tableName jobId =
   let sub = jobsWithStatusSubquery schemaName tableName
    in [sql|SELECT * FROM ${sub} WHERE id = #{jobId :: CInt8}|]
 
--- | List DLQ jobs under a dynamic WHERE and an @orderBy@ from 'buildDLQOrderBy'.
-listDLQFilteredSQL
-  :: SchemaName -> TableName -> Query () -> Text -> Int64 -> Int64 -> Query (Int64, UTCTime, JobRead (Stored payload))
-listDLQFilteredSQL schemaName tableName whereFrag orderBy limit offset =
-  let dlqTbl = jobQueueDLQTable schemaName tableName
-   in rows
-        (dlqRowCodec tableName)
-        [sql|
-          SELECT ${allDLQColumns}
-          FROM ${dlqTbl}
-          ${whereFrag}
-          ORDER BY ${orderBy}
-          LIMIT #{limit :: CInt8} OFFSET #{offset :: CInt8}
-        |]
-
 -- | How NULLs in a sort column should order relative to non-NULL values.
 data NullsBehavior
   = -- | Column is NOT NULL. Emit no NULLS clause.
@@ -398,15 +382,58 @@ buildDLQOrderBy = buildOrderBy dlqSortColumnName dlqColumnNulls DlqFailedAt DlqI
 buildArchiveOrderBy :: Maybe ArchiveSortColumn -> Maybe SortDir -> Text
 buildArchiveOrderBy = buildOrderBy archiveSortColumnName archiveColumnNulls ArchiveCompletedAt ArchiveId
 
+-- | The @WHERE@ clause a set of filters narrows a listing of one table by. Empty for no filters.
+buildWhereClause :: FilterTable -> [JobFilter] -> Query ()
+buildWhereClause _ [] = mempty
+buildWhereClause table filters = raw "WHERE " <> sepBy " AND " (map (filterToClause table) filters)
+
+filterToClause :: FilterTable -> JobFilter -> Query ()
+filterToClause _ (FilterGroupKey key) = [sql|group_key = #{key :: CText}|]
+filterToClause _ (FilterParentId pid) = [sql|parent_id = #{pid :: CInt8}|]
+filterToClause _ FilterRootsOnly = raw "parent_id IS NULL"
+filterToClause MainTable (FilterStatus status) = [sql|status = #{statusText :: CText}|]
+  where
+    statusText = jobStatusToText status
+filterToClause _ (FilterStatus _) = matchNothing
+filterToClause _ (FilterId jobId) = [sql|id = #{jobId :: CInt8}|]
+filterToClause MainTable (FilterJobId jobId) = [sql|id = #{jobId :: CInt8}|]
+filterToClause _ (FilterJobId jobId) = [sql|job_id = #{jobId :: CInt8}|]
+filterToClause _ (FilterClaimedBy workerId) = [sql|claimed_by = #{workerId :: CUuid}|]
+filterToClause _ (FilterKind kind) = [sql|kind = #{kind :: CText}|]
+filterToClause _ (FilterRateLimitPrefix prefix) = [sql|rate_limit_prefix = #{prefix :: CText}|]
+filterToClause _ (FilterConcurrencyPrefix prefix) = [sql|concurrency_prefix = #{prefix :: CText}|]
+filterToClause _ (FilterInsertedAfter time) = [sql|inserted_at >= #{time :: CTimestamptz}|]
+filterToClause _ (FilterInsertedBefore time) = [sql|inserted_at < #{time :: CTimestamptz}|]
+filterToClause ArchiveTable (FilterCompletedAfter time) = [sql|completed_at >= #{time :: CTimestamptz}|]
+filterToClause ArchiveTable (FilterCompletedBefore time) = [sql|completed_at < #{time :: CTimestamptz}|]
+filterToClause _ (FilterCompletedAfter _) = matchNothing
+filterToClause _ (FilterCompletedBefore _) = matchNothing
+filterToClause _ (FilterPayloadText needle) = containsClause "payload::text" needle
+filterToClause _ (FilterErrorText needle) = containsClause "last_error" needle
+
+-- | A predicate on a column the table does not have.
+matchNothing :: Query ()
+matchNothing = raw "FALSE"
+
+-- | A case-insensitive match of any @column@ text that contains @needle@ literally.
+containsClause :: Text -> Text -> Query ()
+containsClause column needle = [sql|${column} ILIKE #{pat :: CText} ESCAPE '\' |]
+  where
+    pat = "%" <> likeEscape needle <> "%"
+
+-- | Escape the LIKE metacharacters in a substring searched for literally.
+likeEscape :: Text -> Text
+likeEscape = T.concatMap escape
+  where
+    escape ch = if ch `elem` likeMeta then T.pack ['\\', ch] else T.singleton ch
+
+-- | The characters LIKE reads as pattern syntax, plus its own escape character.
+likeMeta :: String
+likeMeta = "\\%_"
+
 -- | Count the rows of @src@ under a dynamic WHERE.
 countWhereSQL :: Text -> Query () -> Query Int64
 countWhereSQL src whereFrag = [sql|SELECT COUNT(*) AS @{count :: CInt8} FROM ${src} ${whereFrag}|]
-
--- | Count DLQ jobs under a dynamic WHERE.
-countDLQFilteredSQL :: SchemaName -> TableName -> Query () -> Query Int64
-countDLQFilteredSQL schemaName tableName whereFrag =
-  let dlqTbl = jobQueueDLQTable schemaName tableName
-   in countWhereSQL dlqTbl whereFrag
 
 -- | The job read columns, in codec order, for SELECT and RETURNING.
 jobReadColumns :: Text
@@ -415,10 +442,6 @@ jobReadColumns = joinColumns jobReadColumnNames
 -- | The job read column names, in codec order.
 jobReadColumnNames :: [Text]
 jobReadColumnNames = codecColumns (jobRowCodec "")
-
--- | The DLQ read columns, in codec order. The DLQ uses @job_id@ for the main-table @id@.
-allDLQColumns :: Text
-allDLQColumns = joinColumns (codecColumns (dlqRowCodec ""))
 
 -- | The job read columns except @id@. The archive INSERT copies them with the main
 -- table's @id@ as @job_id@.
@@ -477,12 +500,9 @@ valsEditing edited reader = joinColumns . map pick
   where
     pick column
       | column `elem` edited = reader column
-      | otherwise = clampedAttemptLimit column
-
-clampedAttemptLimit :: Text -> Text
-clampedAttemptLimit column
-  | column == "max_attempts" = [text|GREATEST(COALESCE(max_attempts, ${defaultMaxAttemptsSQL}), ${minMaxAttemptsSQL})|]
-  | otherwise = column
+      | column == "max_attempts" = clampedMaxAttempts
+      | otherwise = column
+    clampedMaxAttempts = [text|GREATEST(COALESCE(max_attempts, ${defaultMaxAttemptsSQL}), ${minMaxAttemptsSQL})|]
 
 -- | @DO UPDATE SET@ body for a replace-dedup upsert. Copies each writable column
 -- from the excluded row, then re-arms the replaced job for a fresh run.

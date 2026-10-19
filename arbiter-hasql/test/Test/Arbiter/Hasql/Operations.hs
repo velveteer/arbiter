@@ -1,7 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# OPTIONS_GHC -Wno-x-partial #-}
 
 module Test.Arbiter.Hasql.Operations (spec) where
 
@@ -15,8 +14,10 @@ import Arbiter.Test.Fixtures (TestPayload (..))
 import Arbiter.Test.Operations (operationsSpec)
 import Arbiter.Test.Setup (cleanupOnce, setupOnce, sharedPoolSize)
 import Control.Exception (SomeException, bracket, catch, throwIO)
+import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
+import Data.Foldable (traverse_)
 import Data.Int (Int64)
 import Data.Pool (withResource)
 import Data.Proxy (Proxy (..))
@@ -24,7 +25,6 @@ import Data.Text (Text)
 import Hasql.Connection qualified as Hasql
 import Test.Hspec
 
-import Arbiter.Hasql.Compat (acquireConnect)
 import Arbiter.Hasql.Compat qualified as Compat
 import Arbiter.Hasql.HasqlDb
   ( HasqlConfig (..)
@@ -70,18 +70,14 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
 
         withResource sharedPool $ \conn -> do
           Compat.runSQL conn "BEGIN"
-          inTransaction @HasqlOpsTestRegistry conn testSchema $ do
-            _ <- HL.insertJob job
-            pure ()
+          inTransaction @HasqlOpsTestRegistry conn testSchema (void (HL.insertJob job))
           Compat.runSQL conn "COMMIT"
-          pure ()
 
         claimed <- runHasqlDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]
-        length claimed `shouldBe` 1
-        payload (head claimed) `shouldBe` TestMessage "InTx"
+        map payload claimed `shouldBe` [TestMessage "InTx"]
 
       it "prepares no statement when the config disables prepared statements" $ \_ -> do
-        bracket (acquireConnect (testConnect connStr) >>= either fail pure) Hasql.release $ \conn -> do
+        bracket (Compat.acquireConnect (testConnect connStr) >>= either fail pure) Hasql.release $ \conn -> do
           Compat.runSQL conn "BEGIN"
           prepared <- inTransactionWith @HasqlOpsTestRegistry (HasqlConfig False) conn testSchema $ do
             _ <- HL.claimNextVisibleJobs 1 60 :: HasqlOpsDb [JobRead TestPayload]
@@ -94,37 +90,29 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
 
         withResource sharedPool $ \conn -> do
           Compat.runSQL conn "BEGIN"
-          inTransaction @HasqlOpsTestRegistry conn testSchema $ do
-            _ <- HL.insertJob job
-            pure ()
+          inTransaction @HasqlOpsTestRegistry conn testSchema (void (HL.insertJob job))
           Compat.runSQL conn "ROLLBACK"
 
         claimed <- runHasqlDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]
-        length claimed `shouldBe` 0
+        claimed `shouldSatisfy` null
 
-      it "shares transaction with user's database operations" $ \env -> do
+      it "commits two job inserts in one transaction" $ \env -> do
         let job1 = setGroupKey (Just "g1") $ defaultJob (TestMessage "SharedTx")
         let job2 = setGroupKey (Just "g2") $ defaultJob (TestMessage "SharedTx2")
 
-        runHasqlDb env $ do
-          withDbTransaction $ do
-            _ <- HL.insertJob job1
-            _ <- HL.insertJob job2
-            pure ()
+        runHasqlDb env (withDbTransaction (traverse_ HL.insertJob [job1, job2]))
 
         claimed <- runHasqlDb env (HL.claimNextVisibleJobs 2 60) :: IO [JobRead TestPayload]
-        length claimed `shouldBe` 2
         map payload claimed `shouldMatchList` [TestMessage "SharedTx", TestMessage "SharedTx2"]
 
-      it "rolls back both user operations and job when transaction fails" $ \env -> do
+      it "rolls back both job inserts when the transaction fails" $ \env -> do
         let job1 = setGroupKey (Just "g1") $ defaultJob (TestMessage "FirstJob")
         let job2 = setGroupKey (Just "g2") $ defaultJob (TestMessage "SecondJob")
 
         result <-
           ( runHasqlDb env $ do
               withDbTransaction $ do
-                _ <- HL.insertJob job1
-                _ <- HL.insertJob job2
+                traverse_ HL.insertJob [job1, job2]
                 liftIO $ throwIO (userError "Force rollback")
           )
             `catch` \(exception :: SomeException) -> pure (show exception)
@@ -132,4 +120,4 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
         result `shouldContain` "Force rollback"
 
         claimed <- runHasqlDb env (HL.claimNextVisibleJobs 2 60) :: IO [JobRead TestPayload]
-        length claimed `shouldBe` 0
+        claimed `shouldSatisfy` null

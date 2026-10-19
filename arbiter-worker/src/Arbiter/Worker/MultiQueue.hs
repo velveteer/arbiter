@@ -138,11 +138,11 @@ minWorkerConnections = 2
 listenerConnections :: Int
 listenerConnections = 1
 
--- | A single-stripe connection pool sized at twice the enabled pools' thread count plus one
--- for the listener, with a minimum size of three. Unset or blank
--- @ARBITER_ENABLED_QUEUES@ enables all queues. Throws 'Arbiter.Worker.Config.WorkerConfigException' for an
--- invalid enabled pool config, and 'Arbiter.Core.Exceptions.InternalException' when
--- @ARBITER_ENABLED_QUEUES@ has an unknown name or names no queues.
+-- | A single-stripe connection pool sized for the enabled pools' threads and the listener.
+-- Unset or blank @ARBITER_ENABLED_QUEUES@ enables all queues. Throws
+-- 'Arbiter.Worker.Config.WorkerConfigException' for an invalid enabled pool config, and
+-- 'Arbiter.Core.Exceptions.InternalException' when @ARBITER_ENABLED_QUEUES@ has an unknown
+-- name or names no queues.
 poolConfigForWorkers
   :: forall m
    . (RegistryTables (RegistryOf m))

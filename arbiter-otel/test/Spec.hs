@@ -336,7 +336,9 @@ spec = do
 
   -- The one series that tells a stopped refresh loop from a fresh reading.
   describe "reading staleness" $ do
-    let scanned scanAt = Cache.Live (Cache.Cached scanAt (Cache.Snapshot [] Nothing [] [] []))
+    let emptySnapshot =
+          Cache.Snapshot {Cache.queues = [], Cache.db = Nothing, Cache.tables = [], Cache.concurrency = [], Cache.rateLimits = []}
+        scanned scanAt = Cache.Live Cache.Cached {Cache.takenAt = scanAt, Cache.reading = emptySnapshot}
 
     it "keeps the scan time a retired reading was taken at" $
       Cache.lastScan (Cache.retire (scanned 100)) `shouldBe` Just 100

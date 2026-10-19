@@ -11,6 +11,7 @@ module Test.Arbiter.Worker.Sim
   , escaped
   , explorePlans
   , exploreScenario
+  , indexed
   ) where
 
 import Control.Concurrent.Class.MonadSTM (atomically, modifyTVar', newTVarIO, readTVarIO)
@@ -52,6 +53,10 @@ hangExtend = threadDelay neverReturns >> pure []
 -- | Longer than any lease or horizon under test.
 neverReturns :: DiffTime
 neverReturns = 1_000_000
+
+-- | Pair each event with its log index.
+indexed :: [a] -> [(Int, a)]
+indexed = zip [0 ..]
 
 -- | The next scripted reply. The last one repeats, @fallback@ when there are none.
 scripted :: a -> [a] -> (a, [a])

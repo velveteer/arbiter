@@ -1,6 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# OPTIONS_GHC -Wno-x-partial #-}
 
 module Test.Arbiter.Orville.Operations (spec) where
 
@@ -11,8 +10,10 @@ import Arbiter.Test.Fixtures (TestPayload (..))
 import Arbiter.Test.Operations (operationsSpec)
 import Arbiter.Test.Setup (sharedPoolSize)
 import Control.Exception (SomeException, catch, throwIO)
+import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
+import Data.Foldable (traverse_)
 import Data.Text (Text)
 import Orville.PostgreSQL qualified as O
 import Test.Hspec
@@ -35,70 +36,49 @@ spec connStr = beforeAll (setupOrvilleTest connStr testSchema testTable sharedPo
     it "commits job insertion within user transaction" $ \env -> do
       let job = defaultJob (TestMessage "InTx")
 
-      runOrvilleTest env $ do
-        O.withTransaction $ do
-          _ <- HL.insertJob job
-          pure ()
+      runOrvilleTest env (O.withTransaction (void (HL.insertJob job)))
 
-      -- The committed transaction leaves the job in the queue.
       claimed <- runOrvilleTest env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]
-      length claimed `shouldBe` 1
-      payload (head claimed) `shouldBe` TestMessage "InTx"
+      map payload claimed `shouldBe` [TestMessage "InTx"]
 
     it "rolls back job insertion when user transaction fails" $ \env -> do
       let job = defaultJob (TestMessage "RollbackTest")
 
-      -- Start a user transaction and intentionally fail it
       result <-
         ( runOrvilleTest env $ do
             O.withTransaction $ do
               _ <- HL.insertJob job
-              -- Force a rollback by throwing an error
               liftIO $ throwIO (userError "Intentional rollback")
         )
           `catch` \(exception :: SomeException) -> pure (show exception)
 
       result `shouldContain` "Intentional rollback"
 
-      -- The rolled-back transaction leaves no job in the queue.
       claimed <- runOrvilleTest env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]
-      length claimed `shouldBe` 0
+      claimed `shouldSatisfy` null
 
-    it "shares transaction with user's database operations" $ \env -> do
-      let job = setGroupKey (Just "g1") $ defaultJob (TestMessage "SharedTx")
+    it "commits two job inserts in one transaction" $ \env -> do
+      let job1 = setGroupKey (Just "g1") $ defaultJob (TestMessage "SharedTx")
       let job2 = setGroupKey (Just "g2") $ defaultJob (TestMessage "SharedTx2")
 
-      -- Start transaction with both user operation and job insertion
-      runOrvilleTest env $ do
-        O.withTransaction $ do
-          _ <- HL.insertJob job2
-          _ <- HL.insertJob job
-          pure ()
+      runOrvilleTest env (O.withTransaction (traverse_ HL.insertJob [job2, job1]))
 
-      -- Both jobs should be committed
       claimed <- runOrvilleTest env (HL.claimNextVisibleJobs 2 60) :: IO [JobRead TestPayload]
-      length claimed `shouldBe` 2
-
       map payload claimed `shouldMatchList` [TestMessage "SharedTx", TestMessage "SharedTx2"]
 
-    it "rolls back both user operations and job when transaction fails" $ \env -> do
+    it "rolls back both job inserts when the transaction fails" $ \env -> do
       let job1 = setGroupKey (Just "g1") $ defaultJob (TestMessage "FirstJob")
       let job2 = setGroupKey (Just "g2") $ defaultJob (TestMessage "SecondJob")
 
-      -- Start transaction, insert two jobs, then fail
       result <-
         ( runOrvilleTest env $ do
             O.withTransaction $ do
-              _ <- HL.insertJob job1
-              _ <- HL.insertJob job2
-
-              -- Force rollback
+              traverse_ HL.insertJob [job1, job2]
               liftIO $ throwIO (userError "Force rollback")
         )
           `catch` \(exception :: SomeException) -> pure (show exception)
 
       result `shouldContain` "Force rollback"
 
-      -- The rolled-back transaction leaves no jobs in the queue.
       claimed <- runOrvilleTest env (HL.claimNextVisibleJobs 2 60) :: IO [JobRead TestPayload]
-      length claimed `shouldBe` 0
+      claimed `shouldSatisfy` null

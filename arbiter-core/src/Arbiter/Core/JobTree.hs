@@ -94,9 +94,7 @@ insertJobTree
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
   -> TableName
-  -- ^ Table name
   -> JobTree payload
   -> m (Either Text (NonEmpty (JobRead payload)))
 insertJobTree schemaName tableName tree =

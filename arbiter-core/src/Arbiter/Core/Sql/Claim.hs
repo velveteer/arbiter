@@ -427,12 +427,10 @@ judgedCte admission rlPolicies concJoin rlJoin =
                       )
             END AS rl_ok
           |]
-      concCut = mwhen cc ",\n MIN(CASE WHEN NOT conc_ok THEN grp_rank END) OVER (PARTITION BY group_key) AS conc_cut"
-      rlCut = mwhen rl ",\n MIN(CASE WHEN NOT rl_ok THEN grp_rank END) OVER (PARTITION BY group_key) AS rl_cut"
-      admitCols =
-        T.intercalate ",\n" $
-          ["(conc_ok AND (grp_rank IS NULL OR conc_cut IS NULL OR grp_rank < conc_cut)) AS conc_admit" | cc]
-            <> ["(rl_ok AND (grp_rank IS NULL OR rl_cut IS NULL OR grp_rank < rl_cut)) AS rl_admit" | rl]
+      concCut = mwhen cc ", MIN(CASE WHEN NOT conc_ok THEN grp_rank END) OVER (PARTITION BY group_key) AS conc_cut"
+      rlCut = mwhen rl ", MIN(CASE WHEN NOT rl_ok THEN grp_rank END) OVER (PARTITION BY group_key) AS rl_cut"
+      concAdmit = mwhen cc ", (conc_ok AND (grp_rank IS NULL OR conc_cut IS NULL OR grp_rank < conc_cut)) AS conc_admit"
+      rlAdmit = mwhen rl ", (rl_ok AND (grp_rank IS NULL OR rl_cut IS NULL OR grp_rank < rl_cut)) AS rl_admit"
       keyCost =
         mwhen
           rl
@@ -443,8 +441,7 @@ judgedCte admission rlPolicies concJoin rlJoin =
         judged AS MATERIALIZED (
           SELECT judged_admit.*${keyCost}
           FROM (
-            SELECT judged_cut.*,
-              ${admitCols}
+            SELECT judged_cut.*${concAdmit}${rlAdmit}
             FROM (
               SELECT judged_row.*${concCut}${rlCut}
               FROM (

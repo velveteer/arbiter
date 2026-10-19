@@ -16,9 +16,7 @@ import Arbiter.Core.Queues (arbiterQueuesTableName)
 import Arbiter.Core.RateLimit.Schema (arbiterRateLimitPoliciesTableName, arbiterRateLimitsTableName)
 import Arbiter.Core.Worker (arbiterWorkersTableName)
 
--- | Every schema-wide arbiter table except the migration history table, unqualified and
--- unquoted. See also
--- 'Arbiter.Core.Job.Schema.queueTableNames'.
+-- | Every schema-wide arbiter table except the migration history table, unqualified and unquoted.
 sharedArbiterTables :: [TableName]
 sharedArbiterTables =
   [ arbiterGatesTableName

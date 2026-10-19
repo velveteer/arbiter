@@ -50,7 +50,6 @@ data PgDbHealth = PgDbHealth
 -- | Per-table tuple counts, size, scan counters, block traffic, and freeze age.
 data PgTableHealth = PgTableHealth
   { table :: Text
-  -- ^ Table name.
   , liveTup :: Int64
   -- ^ Estimated live rows.
   , deadTup :: Int64

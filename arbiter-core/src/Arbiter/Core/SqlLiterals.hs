@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuasiQuotes #-}
 {-# OPTIONS_HADDOCK not-home #-}
 
 -- | Internal to the arbiter packages. Not covered by the PVP.
@@ -21,13 +22,14 @@ module Arbiter.Core.SqlLiterals
 
 import Data.Text (Text)
 import Data.Text qualified as T
+import NeatInterpolation (text)
 
 import Arbiter.Core.Enum (showText)
 import Arbiter.Core.Job.Types (defaultMaxAttempts, minMaxAttempts)
 
 -- | A single-quoted SQL text literal, escaping embedded quotes.
 textLiteral :: Text -> Text
-textLiteral text = "'" <> T.replace "'" "''" text <> "'"
+textLiteral raw = "'" <> T.replace "'" "''" raw <> "'"
 
 -- | A double-quoted SQL identifier, doubling embedded quotes.
 quoteIdentifier :: Text -> Text
@@ -49,11 +51,11 @@ defaultMaxAttemptsSQL = intLiteral defaultMaxAttempts
 
 -- | Whether a row has attempts left. @col@ prefixes each column.
 attemptsLeftSQL :: Text -> Text
-attemptsLeftSQL col = col <> "attempts < COALESCE(" <> col <> "max_attempts, " <> defaultMaxAttemptsSQL <> ")"
+attemptsLeftSQL col = [text|${col}attempts < COALESCE(${col}max_attempts, ${defaultMaxAttemptsSQL})|]
 
 -- | Whether a row has spent its attempts. @col@ prefixes each column.
 attemptsSpentSQL :: Text -> Text
-attemptsSpentSQL col = col <> "attempts >= COALESCE(" <> col <> "max_attempts, " <> defaultMaxAttemptsSQL <> ")"
+attemptsSpentSQL col = [text|${col}attempts >= COALESCE(${col}max_attempts, ${defaultMaxAttemptsSQL})|]
 
 -- | 'minMaxAttempts' as a SQL literal.
 minMaxAttemptsSQL :: Text

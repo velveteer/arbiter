@@ -70,14 +70,15 @@ import Data.ByteString.Lazy qualified as BL
 import Data.Either (isRight)
 import Data.Foldable (for_, toList, traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
-import Data.Int (Int64)
+import Data.Int (Int32, Int64)
 import Data.List (find)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (diffUTCTime, getCurrentTime)
+import Data.Time (NominalDiffTime, diffUTCTime, getCurrentTime)
+import Data.UUID (UUID)
 import Data.UUID.V4 qualified as UUID
 import Database.PostgreSQL.Simple (Only (..), query)
 import Database.PostgreSQL.Simple qualified as PG
@@ -85,7 +86,8 @@ import Database.PostgreSQL.Simple.Notification (Notification (..), getNotificati
 import System.Directory qualified as Dir
 import System.Timeout (timeout)
 import Test.Hspec
-  ( Spec
+  ( Expectation
+  , Spec
   , before
   , describe
   , expectationFailure
@@ -965,10 +967,10 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         staleWid <- liftIO UUID.nextRandom
         void
           $ runM env
-          $ Ops.registerWorker schema liveWid table Nothing (Just 1) 300 Nothing
+          $ Ops.registerWorker schema liveWid table Nothing (Just testWorkerThreads) farStaleAfter Nothing
         void
           $ runM env
-          $ Ops.registerWorker schema staleWid table Nothing (Just 1) 300 Nothing
+          $ Ops.registerWorker schema staleWid table Nothing (Just testWorkerThreads) farStaleAfter Nothing
 
         -- Age both rows past the query threshold, then bump only the live row.
         threadDelay pastListThresholdMicros
@@ -1540,7 +1542,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         wid <- liftIO UUID.nextRandom
         void
           $ runM env
-          $ Ops.registerWorker schema wid table Nothing (Just 1) 1 Nothing
+          $ Ops.registerWorker schema wid table Nothing (Just testWorkerThreads) briefStaleAfter Nothing
         threadDelay pastStaleMicros
         swept <- runM env $ Ops.sweepStaleWorkers schema
         swept `shouldSatisfy` (>= 1)
@@ -1551,7 +1553,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         wid <- liftIO UUID.nextRandom
         void
           $ runM env
-          $ Ops.registerWorker schema wid table Nothing (Just 1) 1 Nothing
+          $ Ops.registerWorker schema wid table Nothing (Just testWorkerThreads) briefStaleAfter Nothing
         void $ runM env $ Ops.setWorkerPaused schema wid True
         threadDelay pastStaleMicros
         swept <- runM env $ Ops.sweepStaleWorkers schema
@@ -1563,7 +1565,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         wid <- liftIO UUID.nextRandom
         void
           $ runM env
-          $ Ops.registerWorker schema wid table Nothing (Just 1) 1 Nothing
+          $ Ops.registerWorker schema wid table Nothing (Just testWorkerThreads) briefStaleAfter Nothing
         void $ runM env $ Ops.markWorkerShuttingDown schema wid
         threadDelay pastStaleMicros
         swept <- runM env $ Ops.sweepStaleWorkers schema
@@ -1575,51 +1577,43 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         wid <- liftIO UUID.nextRandom
         void
           $ runM env
-          $ Ops.registerWorker schema wid table Nothing (Just 1) 300 Nothing
+          $ Ops.registerWorker schema wid table Nothing (Just testWorkerThreads) farStaleAfter Nothing
         void $ runM env $ Ops.setWorkerPaused schema wid True
         -- Re-register with different metadata to confirm upsert touches the row.
         void
           $ runM env
-          $ Ops.registerWorker schema wid table (Just "fresh-host") (Just 1) 300 Nothing
+          $ Ops.registerWorker schema wid table (Just "fresh-host") (Just testWorkerThreads) farStaleAfter Nothing
         rows <- runM env $ Ops.listWorkers schema (Just table) Nothing
-        case filter ((== wid) . WR.workerId) rows of
-          [row] -> do
-            WR.paused row `shouldBe` True
-            WR.hostName row `shouldBe` Just "fresh-host"
-          _ -> expectationFailure "expected exactly one row for the worker"
+        soleWorkerRow wid rows $ \row -> do
+          WR.paused row `shouldBe` True
+          WR.hostName row `shouldBe` Just "fresh-host"
 
     describe "Worker health" $ do
       it "reports a freshly-registered worker as live" $ \env -> do
         wid <- liftIO UUID.nextRandom
         void
           $ runM env
-          $ Ops.registerWorker schema wid table Nothing (Just 1) 300 Nothing
+          $ Ops.registerWorker schema wid table Nothing (Just testWorkerThreads) farStaleAfter Nothing
         rows <- runM env $ Ops.listWorkers schema (Just table) Nothing
-        case filter ((== wid) . WR.workerId) rows of
-          [row] -> WR.health row `shouldBe` WR.Live
-          _ -> expectationFailure "expected exactly one row for the worker"
+        soleWorkerRow wid rows $ \row -> WR.health row `shouldBe` WR.Live
 
       it "reports a worker past its stale threshold as stale" $ \env -> do
         wid <- liftIO UUID.nextRandom
         void
           $ runM env
-          $ Ops.registerWorker schema wid table Nothing (Just 1) 1 Nothing
+          $ Ops.registerWorker schema wid table Nothing (Just testWorkerThreads) briefStaleAfter Nothing
         threadDelay pastStaleMicros
         rows <- runM env $ Ops.listWorkers schema (Just table) Nothing
-        case filter ((== wid) . WR.workerId) rows of
-          [row] -> WR.health row `shouldBe` WR.Stale
-          _ -> expectationFailure "expected exactly one row for the worker"
+        soleWorkerRow wid rows $ \row -> WR.health row `shouldBe` WR.Stale
 
       it "reports a fresh shutting-down worker as draining" $ \env -> do
         wid <- liftIO UUID.nextRandom
         void
           $ runM env
-          $ Ops.registerWorker schema wid table Nothing (Just 1) 300 Nothing
+          $ Ops.registerWorker schema wid table Nothing (Just testWorkerThreads) farStaleAfter Nothing
         void $ runM env $ Ops.markWorkerShuttingDown schema wid
         rows <- runM env $ Ops.listWorkers schema (Just table) Nothing
-        case filter ((== wid) . WR.workerId) rows of
-          [row] -> WR.health row `shouldBe` WR.Draining
-          _ -> expectationFailure "expected exactly one row for the worker"
+        soleWorkerRow wid rows $ \row -> WR.health row `shouldBe` WR.Draining
 
     describe "Cron schedule defaults" $ do
       it "leaves an unchanged schedule's updated_at alone" $ \env -> do
@@ -1827,9 +1821,27 @@ lockBlockMicros = 300_000
 notifyTimeoutMicros :: Int
 notifyTimeoutMicros = 2_000_000
 
--- | Longer than the stale threshold.
+-- | Longer than 'briefStaleAfter'.
 pastStaleMicros :: Int
 pastStaleMicros = 1_500_000
+
+-- | A stale threshold that a test passes by sleeping 'pastStaleMicros'.
+briefStaleAfter :: NominalDiffTime
+briefStaleAfter = 1
+
+-- | A stale threshold that no test reaches.
+farStaleAfter :: NominalDiffTime
+farStaleAfter = 300
+
+-- | Thread count a test worker registers with.
+testWorkerThreads :: Int32
+testWorkerThreads = 1
+
+-- | Run the check on the one row for this worker. Fails on zero or several.
+soleWorkerRow :: UUID -> [WR.WorkerRow] -> (WR.WorkerRow -> Expectation) -> Expectation
+soleWorkerRow wid rows check = case filter ((== wid) . WR.workerId) rows of
+  [row] -> check row
+  _ -> expectationFailure "expected exactly one row for the worker"
 
 noResult :: (Functor n) => (j -> n ()) -> j -> n (Maybe [Text])
 noResult handler job = Nothing <$ handler job

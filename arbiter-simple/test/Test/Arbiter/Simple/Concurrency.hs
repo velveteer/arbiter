@@ -18,16 +18,16 @@ import Arbiter.Test.Fixtures (TestPayload (..))
 import Arbiter.Test.Poll (bumpRef)
 import Arbiter.Test.Setup (cleanupData, concurrencyPoolSize, createPoolOf, setupOnce, withConn)
 import Control.Concurrent (threadDelay)
-import Control.Monad (replicateM_, void, when)
+import Control.Monad (replicateM_, unless, void, when)
 import Data.ByteString (ByteString)
 import Data.Foldable (for_)
-import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (atomicWriteIORef, newIORef, readIORef)
 import Data.Pool (withResource)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Database.PostgreSQL.Simple qualified as PG
 import Test.Hspec
-import UnliftIO.Async (mapConcurrently)
+import UnliftIO.Async (mapConcurrently, mapConcurrently_)
 
 import Arbiter.Simple.SimpleDb (createSimpleEnvWithPool, inTransaction, runSimpleDb)
 
@@ -46,6 +46,22 @@ groupSerializationRounds = 500
 -- | Wait before a claimer polls again after an empty claim.
 claimerIdleDelayMicros :: Int
 claimerIdleDelayMicros = 1_000
+
+-- | Concurrent claims racing each group serialization round.
+raceClaimerCount :: Int
+raceClaimerCount = 10
+
+-- | Inserters in the out-of-order race.
+inserterCount :: Int
+inserterCount = 5
+
+-- | Jobs each inserter adds in the out-of-order race.
+insertsPerInserter :: Int
+insertsPerInserter = 200
+
+-- | Claimers in the out-of-order race.
+claimerCount :: Int
+claimerCount = 10
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
@@ -71,7 +87,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
           results <-
             mapConcurrently
               id
-              $ replicate 10 (runSimpleDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload])
+              $ replicate raceClaimerCount (runSimpleDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload])
                 <> [ do
                        void
                          $ runSimpleDb env
@@ -101,29 +117,24 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
 
         doneRef <- newIORef False
         let inserter = do
-              replicateM_ 200
+              replicateM_ insertsPerInserter
                 $ void
                 $ runSimpleDb env
                 $ HL.insertJob
                 $ setGroupKey (Just "ooo-race")
                 $ defaultJob (TestMessage "ooo")
-              atomicModifyIORef' doneRef (const (True, ()))
+              atomicWriteIORef doneRef True
 
             claimer = do
-              let go = do
-                    done <- readIORef doneRef
-                    claimed <- runSimpleDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]
-                    for_ claimed $ \job -> void $ runSimpleDb env (HL.ackJob job)
-                    if done && null claimed
-                      then pure ()
-                      else do when (null claimed) $ threadDelay claimerIdleDelayMicros; go
-              go
+              done <- readIORef doneRef
+              claimed <- runSimpleDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]
+              for_ claimed $ \job -> void $ runSimpleDb env (HL.ackJob job)
+              unless (done && null claimed) $ do
+                when (null claimed) $ threadDelay claimerIdleDelayMicros
+                claimer
 
-        _ <-
-          mapConcurrently id $
-            replicate 5 inserter <> replicate 10 claimer
+        mapConcurrently_ id $ replicate inserterCount inserter <> replicate claimerCount claimer
 
-        -- Drain stragglers
         drainAll
           (runSimpleDb env (HL.claimNextVisibleJobs 100 60) :: IO [JobRead TestPayload])
           (void . runSimpleDb env . HL.ackJob)

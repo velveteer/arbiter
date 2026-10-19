@@ -45,15 +45,15 @@ setQueuePausedSQL schemaName queue paused =
       maxIdent = intLiteral maxIdentifierBytes
    in [sql|
         WITH upsert AS (
-          INSERT INTO ${tbl} (queue_name, paused, paused_at)
+          INSERT INTO ${tbl} AS queue_row (queue_name, paused, paused_at)
             VALUES (#{queue :: CText}, #{paused :: CBool},
                     CASE WHEN #{paused :: CBool}::boolean THEN NOW() ELSE NULL END)
           ON CONFLICT (queue_name) DO UPDATE
             SET paused = EXCLUDED.paused,
                 paused_at = CASE
-                  WHEN EXCLUDED.paused AND NOT arbiter_queues.paused THEN NOW()
+                  WHEN EXCLUDED.paused AND NOT queue_row.paused THEN NOW()
                   WHEN NOT EXCLUDED.paused THEN NULL
-                  ELSE arbiter_queues.paused_at
+                  ELSE queue_row.paused_at
                 END,
                 updated_at = NOW()
           RETURNING queue_name, paused

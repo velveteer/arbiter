@@ -45,7 +45,6 @@ startGauges
   -> (forall a. m a -> IO a)
   -- ^ Runs a database action.
   -> Text
-  -- ^ Schema name.
   -> [(Text, [Text])]
   -- ^ Each queue table and its payload kind labels.
   -> NominalDiffTime

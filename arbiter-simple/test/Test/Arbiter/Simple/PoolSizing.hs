@@ -45,6 +45,18 @@ type SizingTestRegistry = '[Queue "arbiter_worker_sizing_test" WorkerTestPayload
 testSchema :: Text
 testSchema = "arbiter_worker_sizing_test"
 
+-- | Handler threads of the sized pool.
+sizedWorkers :: Int
+sizedWorkers = 3
+
+-- | Pool connections each handler thread needs.
+connectionsPerWorker :: Int
+connectionsPerWorker = 2
+
+-- | Pool connections the listener holds.
+listenerConnections :: Int
+listenerConnections = 1
+
 spec :: ByteString -> Spec
 spec connStr = do
   describe "worker configuration" $ do
@@ -73,10 +85,10 @@ spec connStr = do
         ref <- newIORef (0 :: Int)
         let handler :: JobHandler (SimpleDb SizingTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = liftIO $ bumpRef ref
-        config <- transactionalWorkerConfig 3 handler
+        config <- transactionalWorkerConfig sizedWorkers handler
         let pools = [namedWorkerPool config {pollInterval = 0.2, jitter = NoJitter}]
         poolCfg <- poolConfigForWorkers pools
-        poolSize poolCfg `shouldBe` 7 -- 2 * 3 + 1
+        poolSize poolCfg `shouldBe` connectionsPerWorker * sizedWorkers + listenerConnections
         env <- createSimpleEnvWithConfig (Proxy @SizingTestRegistry) connStr testSchema poolCfg
         withAsync (runSimpleDb env $ runWorkerPools pools) $ \_ -> do
           producer <- createSimpleEnv (Proxy @SizingTestRegistry) connStr testSchema

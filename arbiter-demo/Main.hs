@@ -6,8 +6,8 @@ module Main (main) where
 
 import Arbiter.Concurrency qualified as Conc
 import Arbiter.Core qualified as Arb
-import Arbiter.Core.Enum (showText)
-import Arbiter.Core.Threads (micros)
+import Arbiter.Core.Enum qualified as Enum
+import Arbiter.Core.Threads qualified as Threads
 import Arbiter.Migrations qualified as Mig
 import Arbiter.Otel qualified as Otel
 import Arbiter.RateLimit qualified as RL
@@ -140,17 +140,17 @@ emailTier mail = case emailDomain mail of
 -- bucket. Other queues stay unlimited. The migration seeds every branch's policy.
 instance RL.HasRateLimit EmailPayload where
   rateLimitFor = RL.limitByCase emailTier $ \case
-    Internal -> RL.limitBy (RL.tokenBucket "email-internal" 5 30) emailKeySuffix
-    External -> RL.limitBy (RL.tokenBucket "email-external" 2 30) emailKeySuffix
-    System -> RL.globalLimit (RL.tokenBucket "email-system" 1 30) "digests"
+    Internal -> RL.limitBy (RL.tokenBucket "email-internal" internalEmailTokens emailRefillPeriod) emailKeySuffix
+    External -> RL.limitBy (RL.tokenBucket "email-external" externalEmailTokens emailRefillPeriod) emailKeySuffix
+    System -> RL.globalLimit (RL.tokenBucket "email-system" systemEmailTokens emailRefillPeriod) "digests"
 
 instance RL.HasRateLimit NotificationPayload where
-  rateLimitFor = RL.globalLimit (RL.tokenBucket "notify" 2 20) "all"
+  rateLimitFor = RL.globalLimit (RL.tokenBucket "notify" notifyTokens notifyRefillPeriod) "all"
 
 -- | At most 2 emails per recipient domain in flight at once, from the seeded
 -- "email-domain" policy. Orthogonal to the rate limit on the same payload.
 instance Conc.HasConcurrency EmailPayload where
-  concurrencyFor = Conc.concurrencyBy (Conc.concurrencyPolicy "email-domain" 2) emailKeySuffix
+  concurrencyFor = Conc.concurrencyBy (Conc.concurrencyPolicy "email-domain" emailDomainInFlight) emailKeySuffix
 
 -- | The recipient address of an email job.
 emailAddress :: EmailPayload -> Text
@@ -187,8 +187,7 @@ runDemo tel = do
     Mig.MigrationSuccess -> putStrLn "Migrations complete"
     Mig.MigrationError err -> die $ "Migration failed: " <> err
 
-  -- Producer env for seeding and the background load generator. The worker
-  -- pools get their own pool from the managed runner below.
+  -- Producer env for seeding and the background load generator.
   producerEnv <- ArbS.createSimpleEnv (Proxy @DemoRegistry) connStr schema
 
   putStrLn "Seeding demo data..."
@@ -200,9 +199,9 @@ runDemo tel = do
   putStrLn "Server ready"
 
   putStrLn "Creating worker configs..."
-  demoWorkerCfg <- simpleWorker 5 2 10 [demoTicker]
-  emailWorkerCfg <- simpleWorker 3 2 10 [emailDigest]
-  notifWorkerCfg <- simpleWorker 1 0.05 2 [notifBroadcast]
+  demoWorkerCfg <- simpleWorker demoTuning [demoTicker]
+  emailWorkerCfg <- simpleWorker emailTuning [emailDigest]
+  notifWorkerCfg <- simpleWorker notifyTuning [notifBroadcast]
   bulkWorkerCfg <- mkBulkWorker
   pipelineWorkerCfg <- mkPipelineWorker
   putStrLn "Workers configured"
@@ -247,7 +246,7 @@ runDemo tel = do
   -- a clean demo. A value of 0 disables it.
   resetMin <- envOr "RESET_INTERVAL_MINUTES" defaultResetMinutes
   when (resetMin > 0) $ void $ forkIO $ do
-    threadDelay (micros (fromIntegral (resetMin * secondsPerMinute)))
+    threadDelay (Threads.micros (fromIntegral (resetMin * secondsPerMinute)))
     putStrLn $ "[reset] " <> show resetMin <> "m elapsed, restarting for a clean demo"
     Signals.raiseSignal Signals.sigTERM
 
@@ -290,22 +289,26 @@ secondsPerMinute = 60
 simulateWork :: Double -> IO ()
 simulateWork mean = do
   uniform <- randomRIO (1.0e-6, 1.0)
-  threadDelay (micros (realToFrac (mean * negate (log uniform))))
+  threadDelay (Threads.micros (realToFrac (mean * negate (log uniform))))
 
--- | A transactional worker pool whose handler sleeps for @mean@ seconds on average.
+-- | Size and pace of one demo worker.
+data WorkerTuning = WorkerTuning
+  { tuneWorkers :: Int
+  , tuneMeanWork :: Double
+  -- ^ Mean handler delay, in seconds.
+  , tunePoll :: NominalDiffTime
+  }
+
+-- | A transactional worker whose handler sleeps for the tuned mean on average.
 simpleWorker
   :: (Arb.ResultOf DemoM payload ~ ())
-  => Int
-  -- ^ Worker count
-  -> Double
-  -- ^ Mean handler delay (seconds)
-  -> NominalDiffTime
-  -- ^ Poll interval
+  => WorkerTuning
   -> [Worker.CronJob payload]
   -> IO (Worker.WorkerConfig DemoM payload)
-simpleWorker count mean poll crons = do
-  cfg <- Worker.transactionalWorkerConfig count (\_conn _job -> liftIO $ simulateWork mean)
-  pure (polling poll cfg) {Worker.cronJobs = crons}
+simpleWorker tuning crons = do
+  cfg <-
+    Worker.transactionalWorkerConfig (tuneWorkers tuning) (\_conn _job -> liftIO $ simulateWork (tuneMeanWork tuning))
+  pure (polling (tunePoll tuning) cfg) {Worker.cronJobs = crons}
 
 -- | Poll at @interval@ seconds with no liveness file.
 polling :: NominalDiffTime -> Worker.WorkerConfig m payload -> Worker.WorkerConfig m payload
@@ -322,7 +325,7 @@ demoTicker =
     "demo-ticker"
     "* * * * *" -- every minute
     Worker.AllowOverlap
-    (\_ tickTime -> Arb.defaultJob (TestMessage $ "tick:" <> showText tickTime))
+    (\_ tickTime -> Arb.defaultJob (TestMessage $ "tick:" <> Enum.showText tickTime))
 
 emailDigest :: Worker.CronJob EmailPayload
 emailDigest =
@@ -338,7 +341,7 @@ notifBroadcast =
     "notif-broadcast"
     "*/3 * * * *" -- every 3 minutes
     Worker.AllowOverlap
-    (\_ tickTime -> Arb.defaultJob (PushNotification $ "broadcast:" <> showText tickTime))
+    (\_ tickTime -> Arb.defaultJob (PushNotification $ "broadcast:" <> Enum.showText tickTime))
 
 -- | Drains the burst queue. Many workers claim large batches with a near-zero
 -- handler. Sized by BURST_WORKERS and BURST_BATCH.
@@ -347,12 +350,12 @@ mkBulkWorker = do
   count <- envOr "BURST_WORKERS" defaultBurstWorkers
   batch <- envOr "BURST_BATCH" defaultBurstBatch
   cfg <- Worker.batchedWorkerConfig count batch handler
-  pure (polling 1 cfg)
+  pure (polling bulkPoll cfg)
   where
     -- Roughly 300 jobs a second across the pool. A burst drains slowly enough
     -- to be sampled.
     handler jobs cbs = do
-      liftIO $ simulateWork 0.5
+      liftIO $ simulateWork bulkMeanWork
       Worker.ackAll cbs (NE.toList jobs)
 
 -- ---------------------------------------------------------------------------
@@ -361,12 +364,12 @@ mkBulkWorker = do
 
 mkPipelineWorker :: IO (Worker.WorkerConfig DemoM PipelinePayload)
 mkPipelineWorker = do
-  cfg <- Worker.transactionalWorkerConfig 3 handler
-  pure (polling 2 cfg)
+  cfg <- Worker.transactionalWorkerConfig (tuneWorkers pipelineTuning) handler
+  pure (polling (tunePoll pipelineTuning) cfg)
   where
     handler _conn job = case Arb.payload job of
       ProcessChunk chunkName -> do
-        liftIO $ simulateWork 1
+        liftIO $ simulateWork (tuneMeanWork pipelineTuning)
         pure (chunkFindings chunkName)
       AggregateResults _ -> fst <$> Worker.mergedChildResults job
 
@@ -407,7 +410,7 @@ takeNonEmpty n (x :| xs) = x :| take (n - 1) xs
 -- Priority 10 keeps this long run behind the quick pipelines from 'pipelinePulse'.
 seedPipeline :: DemoM ()
 seedPipeline = do
-  let background job = Arb.setPriority 10 $ Arb.defaultJob job
+  let background job = Arb.setPriority backgroundPriority $ Arb.defaultJob job
       chunk = Arb.leaf . background . ProcessChunk
       agg name = Arb.rollup (background (AggregateResults name))
   tracer <- demoTracer
@@ -427,7 +430,7 @@ seedPipeline = do
           Trace.addAttributes seedSpan $
             HM.fromList
               [ ("demo.pipeline.node_count", Attr.toAttribute (NE.length nodes))
-              , ("demo.pipeline.root_id", Attr.toAttribute (showText (Arb.primaryKey (NE.head nodes))))
+              , ("demo.pipeline.root_id", Attr.toAttribute (Enum.showText (Arb.primaryKey (NE.head nodes))))
               ]
       )
       tree
@@ -449,18 +452,18 @@ seedQueues = do
   void $
     Arb.insertJob
       (Arb.setGroupKey (Just "integrations") $ Arb.setMaxAttempts (Just 5) $ Arb.defaultJob (TestMessage "flaky-webhook"))
-  [flaky1] <- Arb.claimNextVisibleJobs @DemoPayload 1 60
+  [flaky1] <- Arb.claimNextVisibleJobs @DemoPayload seedClaimCount seedClaimLease
   void $ Arb.updateJobForRetry 0 "connection reset by upstream" flaky1
-  [flaky2] <- Arb.claimNextVisibleJobs @DemoPayload 1 60
-  void $ Arb.updateJobForRetry 180 "connection reset by upstream" flaky2
+  [flaky2] <- Arb.claimNextVisibleJobs @DemoPayload seedClaimCount seedClaimLease
+  void $ Arb.updateJobForRetry seedRetryBackoff "connection reset by upstream" flaky2
 
   void $
     Arb.insertJob
       (Arb.setGroupKey (Just "ingest") $ Arb.setMaxAttempts (Just 5) $ Arb.defaultJob (TestMessage "corrupt-record"))
   replicateM_ 4 $ do
-    [failed] <- Arb.claimNextVisibleJobs @DemoPayload 1 60
+    [failed] <- Arb.claimNextVisibleJobs @DemoPayload seedClaimCount seedClaimLease
     void $ Arb.updateJobForRetry 0 "unparseable payload" failed
-  [doomed] <- Arb.claimNextVisibleJobs @DemoPayload 1 60
+  [doomed] <- Arb.claimNextVisibleJobs @DemoPayload seedClaimCount seedClaimLease
   void $ Arb.moveToDLQ "unparseable payload after 5 attempts" doomed
 
   -- demo_queue: ready jobs with varied priority and group keys
@@ -468,14 +471,17 @@ seedQueues = do
     ( \(index, (grp, msg)) ->
         void $
           Arb.insertJob
-            (Arb.setGroupKey (Just grp) $ Arb.setPriority (fromIntegral (index `mod` 5)) $ Arb.defaultJob (TestMessage msg))
+            ( Arb.setGroupKey (Just grp)
+                $ Arb.setPriority (fromIntegral (index `mod` priorityLevels))
+                $ Arb.defaultJob (TestMessage msg)
+            )
     )
     (zip [0 :: Int ..] demoTasks)
   -- scheduled (not visible yet) and suspended (paused)
   void $
     Arb.insertJob
       ( Arb.setGroupKey (Just "maintenance")
-          $ Arb.setNotVisibleUntil (Just (addUTCTime 3600 now))
+          $ Arb.setNotVisibleUntil (Just (addUTCTime reindexDelay now))
           $ Arb.defaultJob (TestMessage "nightly-reindex")
       )
   paused <-
@@ -484,12 +490,13 @@ seedQueues = do
 
   -- email_queue: a few ready, one scheduled, one bounced to the DLQ
   void $ Arb.insertJob (Arb.setMaxAttempts (Just 2) $ Arb.defaultJob (SendEmail "nobody@invalid.test"))
-  [rejected] <- Arb.claimNextVisibleJobs @EmailPayload 1 60
+  [rejected] <- Arb.claimNextVisibleJobs @EmailPayload seedClaimCount seedClaimLease
   void $ Arb.updateJobForRetry 0 "recipient rejected (550)" rejected
   traverse_
     (void . Arb.insertJob . Arb.defaultJob . SendEmail)
     (["welcome@acme.test", "receipt@acme.test", "reset@acme.test"] :: [Text])
-  void $ Arb.insertJob (Arb.setNotVisibleUntil (Just (addUTCTime 1800 now)) $ Arb.defaultJob (SendEmail "weekly-digest"))
+  void $
+    Arb.insertJob (Arb.setNotVisibleUntil (Just (addUTCTime digestDelay now)) $ Arb.defaultJob (SendEmail "weekly-digest"))
 
   -- notifications: a few ready
   traverse_
@@ -519,20 +526,24 @@ loadPulse env sec = traverse_ pulse (enumFrom (0 :: Int))
     -- Archive one job in @every@.
     keepEvery every tick = if tick `mod` every == 0 then Just archiveRetention else Nothing
     pulse tick = do
-      threadDelay (micros (fromIntegral sec))
+      threadDelay (Threads.micros (fromIntegral sec))
       ArbS.runSimpleDb env $ do
         void $
           Arb.insertJob
-            ( Arb.setArchiveFor (keepEvery 4 tick)
-                $ Arb.setPriority (fromIntegral (tick `mod` 5))
-                $ Arb.defaultJob (TestMessage ("pulse #" <> showText tick))
+            ( Arb.setArchiveFor (keepEvery demoArchiveEvery tick)
+                $ Arb.setPriority (fromIntegral (tick `mod` priorityLevels))
+                $ Arb.defaultJob (TestMessage ("pulse #" <> Enum.showText tick))
             )
         when (even tick)
           $ void
-          $ Arb.insertJob (Arb.setArchiveFor (keepEvery 6 tick) $ Arb.defaultJob (SendEmail ("digest #" <> showText tick)))
+          $ Arb.insertJob
+            (Arb.setArchiveFor (keepEvery emailArchiveEvery tick) $ Arb.defaultJob (SendEmail ("digest #" <> Enum.showText tick)))
         when (tick `mod` 3 == 0)
           $ void
-          $ Arb.insertJob (Arb.setArchiveFor (keepEvery 9 tick) $ Arb.defaultJob (PushNotification ("alert #" <> showText tick)))
+          $ Arb.insertJob
+            ( Arb.setArchiveFor (keepEvery notifyArchiveEvery tick) $
+                Arb.defaultJob (PushNotification ("alert #" <> Enum.showText tick))
+            )
 
 -- | Burst load. Every @sec@ seconds (jittered by half), insert @size@ jobs as
 -- back-to-back multi-row inserts, with a four-times spike every fifth round.
@@ -545,13 +556,14 @@ burstPulse env sec size groups = traverse_ pulse (enumFrom (0 :: Int))
     spikeFactor = 4
     grouped index
       | groups <= 0 || odd index = id
-      | otherwise = Arb.setGroupKey (Just ("bulk-" <> showText ((index `div` 2) `mod` groups)))
+      | otherwise = Arb.setGroupKey (Just ("bulk-" <> Enum.showText ((index `div` 2) `mod` groups)))
     pulse tick = do
       gap <- randomRIO (0.5, 1.5 :: Double)
-      threadDelay (micros (realToFrac (fromIntegral sec * gap)))
+      threadDelay (Threads.micros (realToFrac (fromIntegral sec * gap)))
       let total = if tick `mod` spikeEvery == spikeEvery - 1 then size * spikeFactor else size
           jobs =
-            [ grouped index (Arb.defaultJob (BulkTask ("burst " <> showText tick <> " #" <> showText index))) | index <- [1 .. total]
+            [ grouped index (Arb.defaultJob (BulkTask ("burst " <> Enum.showText tick <> " #" <> Enum.showText index)))
+            | index <- [1 .. total]
             ]
       ArbS.runSimpleDb env $ traverse_ (void . Arb.insertJobsBatch_) (chunksOf perStatement jobs)
 
@@ -573,10 +585,10 @@ pipelinePulse :: ArbS.SimpleEnv DemoRegistry -> Int -> IO ()
 pipelinePulse env sec = traverse_ pulse (enumFrom (0 :: Int))
   where
     pulse tick = do
-      threadDelay (micros (fromIntegral sec))
+      threadDelay (Threads.micros (fromIntegral sec))
       pick <- randomRIO (0, NE.length quickChunkSets - 1)
       let chosen = quickChunkSets NE.!! pick
-          root = Arb.setArchiveFor (Just archiveRetention) $ Arb.defaultJob (AggregateResults ("quick-report-" <> showText tick))
+          root = Arb.setArchiveFor (Just archiveRetention) $ Arb.defaultJob (AggregateResults ("quick-report-" <> Enum.showText tick))
           leaves = Arb.leaf . Arb.defaultJob . ProcessChunk <$> chosen
       ArbS.runSimpleDb env $ void $ Arb.insertJobTree (Arb.rollup root leaves)
 
@@ -584,6 +596,83 @@ demoTracer :: (MonadIO m) => m Trace.Tracer
 demoTracer = do
   provider <- Trace.getGlobalTracerProvider
   pure (Trace.makeTracer provider "arbiter-demo" Trace.tracerOptions)
+
+internalEmailTokens :: Double
+internalEmailTokens = 5
+
+externalEmailTokens :: Double
+externalEmailTokens = 2
+
+systemEmailTokens :: Double
+systemEmailTokens = 1
+
+emailRefillPeriod :: NominalDiffTime
+emailRefillPeriod = 30
+
+notifyTokens :: Double
+notifyTokens = 2
+
+notifyRefillPeriod :: NominalDiffTime
+notifyRefillPeriod = 20
+
+emailDomainInFlight :: Int32
+emailDomainInFlight = 2
+
+demoTuning :: WorkerTuning
+demoTuning = WorkerTuning {tuneWorkers = 5, tuneMeanWork = 2, tunePoll = 10}
+
+emailTuning :: WorkerTuning
+emailTuning = WorkerTuning {tuneWorkers = 3, tuneMeanWork = 2, tunePoll = 10}
+
+notifyTuning :: WorkerTuning
+notifyTuning = WorkerTuning {tuneWorkers = 1, tuneMeanWork = 0.05, tunePoll = 2}
+
+pipelineTuning :: WorkerTuning
+pipelineTuning = WorkerTuning {tuneWorkers = 3, tuneMeanWork = 1, tunePoll = 2}
+
+-- | Mean bulk handler delay, in seconds.
+bulkMeanWork :: Double
+bulkMeanWork = 0.5
+
+bulkPoll :: NominalDiffTime
+bulkPoll = 1
+
+-- | Priority of the long seeded pipeline. Higher runs later.
+backgroundPriority :: Int32
+backgroundPriority = 10
+
+-- | Distinct priorities the seeded and pulsed demo jobs cycle through.
+priorityLevels :: Int
+priorityLevels = 5
+
+-- | Jobs each seed claim takes.
+seedClaimCount :: Int
+seedClaimCount = 1
+
+seedClaimLease :: NominalDiffTime
+seedClaimLease = 60
+
+-- | Backoff of the seeded job that waits for a retry.
+seedRetryBackoff :: NominalDiffTime
+seedRetryBackoff = 180
+
+-- | How far out the seeded reindex is scheduled.
+reindexDelay :: NominalDiffTime
+reindexDelay = 3600
+
+-- | How far out the seeded digest is scheduled.
+digestDelay :: NominalDiffTime
+digestDelay = 1800
+
+-- | Archive one demo pulse job in this many.
+demoArchiveEvery :: Int
+demoArchiveEvery = 4
+
+emailArchiveEvery :: Int
+emailArchiveEvery = 6
+
+notifyArchiveEvery :: Int
+notifyArchiveEvery = 9
 
 -- | How long pulse jobs stay in the archive.
 archiveRetention :: Int32

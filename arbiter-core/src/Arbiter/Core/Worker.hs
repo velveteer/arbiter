@@ -4,8 +4,7 @@
 
 -- | Internal to the arbiter packages. Not covered by the PVP.
 --
--- Types and DDL for the @arbiter_workers@ table, and column migrations for the queue
--- job tables.
+-- Types and DDL for the @arbiter_workers@ table.
 module Arbiter.Core.Worker
   ( WorkerRow (..)
   , WorkerHealth (..)
@@ -14,9 +13,6 @@ module Arbiter.Core.Worker
   , arbiterWorkersTable
   , arbiterWorkersTableName
   , createWorkersTableSQL
-  , addClaimedByColumnSQL
-  , addCancelRequestedAtColumnSQL
-  , addArchiveForColumnSQL
   ) where
 
 import Data.Aeson (FromJSON (..), ToJSON (..), Value, withText)
@@ -29,8 +25,8 @@ import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
 
 import Arbiter.Core.Enum (enumFromText)
-import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueDLQTable, jobQueueTable)
-import Arbiter.Core.SqlLiterals (quoteIdentifier, sharedTable)
+import Arbiter.Core.Job.Schema (SchemaName)
+import Arbiter.Core.SqlLiterals (sharedTable)
 
 -- | Heartbeat-derived health of a worker. Independent of its 'paused' flag.
 data WorkerHealth
@@ -111,33 +107,4 @@ createWorkersTableSQL schemaName =
     , "  stale_threshold_secs DOUBLE PRECISION NOT NULL DEFAULT 300,"
     , "  metadata JSONB"
     , ");"
-    ]
-
--- | Idempotent migration adding the @claimed_by@ column to a queue's job and DLQ tables.
-addClaimedByColumnSQL :: SchemaName -> TableName -> Text
-addClaimedByColumnSQL schemaName tableName =
-  T.unlines
-    [ "ALTER TABLE " <> jobQueueTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS claimed_by UUID;"
-    , "ALTER TABLE " <> jobQueueDLQTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS claimed_by UUID;"
-    ]
-
--- | Idempotent migration adding the @cancel_requested_at@ column to a queue's
--- job table, with a partial index backing the reaper's flagged-job sweep.
-addCancelRequestedAtColumnSQL :: SchemaName -> TableName -> Text
-addCancelRequestedAtColumnSQL schemaName tableName =
-  T.unlines
-    [ "ALTER TABLE " <> jobQueueTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS cancel_requested_at TIMESTAMPTZ;"
-    , "CREATE INDEX IF NOT EXISTS "
-        <> quoteIdentifier ("idx_" <> tableName <> "_cancel_requested")
-        <> " ON "
-        <> jobQueueTable schemaName tableName
-        <> " (id ASC) WHERE cancel_requested_at IS NOT NULL;"
-    ]
-
--- | Idempotent migration adding the @archive_for@ column to a queue's job and DLQ tables.
-addArchiveForColumnSQL :: SchemaName -> TableName -> Text
-addArchiveForColumnSQL schemaName tableName =
-  T.unlines
-    [ "ALTER TABLE " <> jobQueueTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS archive_for INT;"
-    , "ALTER TABLE " <> jobQueueDLQTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS archive_for INT;"
     ]
