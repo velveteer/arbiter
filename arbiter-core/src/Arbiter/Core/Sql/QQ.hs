@@ -18,16 +18,18 @@
 --   * @\@{name :: CInt8}@ emits the identifier @name@ and adds @col \"name\"
 --     CInt8@ to the decoder (@Maybe CInt8@ uses @ncol@). The quote's result type
 --     is @Query ()@ with no @\@{...}@ holes, @Query@ of the bare value with
---     one, and @Query@ of a tuple with 2 to 8.
+--     one, and @Query@ of a tuple with 2 to 'maxOutputHoles'.
 --
 -- A @?@ in the template is literal SQL. Do not use it in a template with holes.
 -- The @?@-placeholder form cannot tell it from a hole.
 module Arbiter.Core.Sql.QQ
   ( sql
   , stmt
+  , maxOutputHoles
   ) where
 
 import Data.Containers.ListUtils (nubOrd)
+import Data.List (dropWhileEnd)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Language.Haskell.TH (Exp, Name, Q)
@@ -195,8 +197,8 @@ paramsExp _ = [|[]|]
 -- | Applicative decoder for the output holes, as a tuple for arity >= 2.
 mkDecoder :: [(Text, Bool, Text)] -> Q Exp
 mkDecoder holes
-  | length holes > 8 =
-      fail "sql: more than 8 @{} output holes. Attach a handwritten codec with `rows` instead"
+  | length holes > maxOutputHoles =
+      fail ("sql: more than " <> show maxOutputHoles <> " @{} output holes. Attach a handwritten codec with `rows` instead")
   | otherwise = case map colDecoder holes of
       [] -> [|pure ()|]
       [single] -> single
@@ -207,6 +209,10 @@ mkDecoder holes
       colN <- colConName colType
       let dec = if nullable then 'ncol else 'col
       [|$(TH.varE dec) (T.pack $(TH.stringE (T.unpack name))) $(TH.conE colN)|]
+
+-- | The most @\@{...}@ holes one quote decodes as a tuple.
+maxOutputHoles :: Int
+maxOutputHoles = 8
 
 -- | The 'Col' constructor 'Name' for a column-type token.
 colConName :: Text -> Q Name
@@ -235,4 +241,4 @@ normalizeIndent template =
   where
     isBlank = T.null . T.strip
     leading = T.length . T.takeWhile (== ' ')
-    dropTrailingBlank = reverse . dropWhile isBlank . reverse
+    dropTrailingBlank = dropWhileEnd isBlank

@@ -12,13 +12,12 @@ module Arbiter.Core.Health
 
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Int (Int64)
-import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 
 import Arbiter.Core.Codec (Col (..), RowCodec, col, ncol)
 import Arbiter.Core.Job.Schema (TableName)
-import Arbiter.Core.MonadArbiter (MonadArbiter (..))
+import Arbiter.Core.MonadArbiter (MonadArbiter (..), queryMaybe)
 import Arbiter.Core.SchemaTables (allSchemaTables)
 import Arbiter.Core.Sql.Health qualified as Sql
 import Arbiter.Core.Sql.Query (rows)
@@ -116,4 +115,4 @@ getPgHealth queueTables = do
 
 -- | The database-wide half on its own.
 getPgDbHealth :: (MonadArbiter m) => m (Maybe PgDbHealth)
-getPgDbHealth = listToMaybe <$> executeQuery (rows pgDbHealthCodec Sql.pgDbHealthSQL)
+getPgDbHealth = queryMaybe (rows pgDbHealthCodec Sql.pgDbHealthSQL)

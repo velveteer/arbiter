@@ -1,4 +1,3 @@
-{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -180,7 +179,7 @@ instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
   parseJSON = withObject "JobWrite" $ \obj -> do
     payload <- obj .: "payload"
     group <- obj .:? "groupKey"
-    priority <- obj .:? "priority" .!= 0
+    priority <- obj .:? "priority"
     visibleAt <- obj .:? "notVisibleUntil"
     dedup <- obj .:? "dedupKey"
     attempts <- obj .:? "maxAttempts"
@@ -190,7 +189,7 @@ instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
       $ Arb.setMaxAttempts attempts
       $ Arb.setDedupKey dedup
       $ Arb.setNotVisibleUntil visibleAt
-      $ Arb.setPriority priority
+      $ maybe id Arb.setPriority priority
       $ Arb.setGroupKey group
       $ Arb.defaultJob payload
 
@@ -304,7 +303,7 @@ data ClaimRequest = ClaimRequest
   -- ^ Lease length in seconds. See 'defaultLeaseSeconds' and 'leaseSecondsRange'.
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving (FromJSON, ToJSON) via Generically ClaimRequest
 
 -- | Jobs returned by one claim. Each job contains the lease fields required for
 -- finalization.
@@ -415,11 +414,11 @@ instance (ToJSON payload) => ToJSON (PayloadEdit payload) where
   toJSON edit = object ["payload" .= editPayload edit]
 
 -- | When a rescheduled job becomes visible.
-data RescheduleRequest = RescheduleRequest
+newtype RescheduleRequest = RescheduleRequest
   { runAt :: UTCTime
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving (FromJSON, ToJSON) via Generically RescheduleRequest
 
 -- | Tokens to add to one rate-limit bucket.
 newtype AddTokensRequest = AddTokensRequest
@@ -434,18 +433,18 @@ instance ToJSON AddTokensRequest where
   toJSON request = object ["tokens" .= addedTokens request]
 
 -- | Jobs a token grant made claimable again.
-data AddTokensResponse = AddTokensResponse
+newtype AddTokensResponse = AddTokensResponse
   { woken :: Int64
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving (FromJSON, ToJSON) via Generically AddTokensResponse
 
 -- | Rows a prune deleted.
-data PruneResponse = PruneResponse
+newtype PruneResponse = PruneResponse
   { pruned :: Int64
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving (FromJSON, ToJSON) via Generically PruneResponse
 
 -- | A page of a queue's open groups.
 type GroupsResponse = Page GroupSummary
@@ -460,22 +459,22 @@ data StatsResponse = StatsResponse
   -- ^ When the stats were read.
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving (FromJSON, ToJSON) via Generically StatsResponse
 
 -- | Every queue's stats, for the landing overview.
-data AllStatsResponse = AllStatsResponse
+newtype AllStatsResponse = AllStatsResponse
   { queues :: [QueueOverview]
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving (FromJSON, ToJSON) via Generically AllStatsResponse
 
 -- | Queues list response.
-data QueuesResponse = QueuesResponse
+newtype QueuesResponse = QueuesResponse
   { queues :: [Text]
   -- ^ Registry queue names.
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving (FromJSON, ToJSON) via Generically QueuesResponse
 
 -- | Request body for batch job insert.
 newtype BatchInsertRequest payload = BatchInsertRequest
@@ -493,18 +492,18 @@ data BatchInsertResponse payload = BatchInsertResponse
   deriving (FromJSON, ToJSON) via Generically (BatchInsertResponse payload)
 
 -- | Request body for a batch DLQ or archive delete.
-data BatchDeleteRequest = BatchDeleteRequest
+newtype BatchDeleteRequest = BatchDeleteRequest
   { ids :: [Int64]
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving (FromJSON, ToJSON) via Generically BatchDeleteRequest
 
 -- | Response body for a batch DLQ or archive delete.
-data BatchDeleteResponse = BatchDeleteResponse
+newtype BatchDeleteResponse = BatchDeleteResponse
   { deleted :: Int64
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving (FromJSON, ToJSON) via Generically BatchDeleteResponse
 
 -- | A cron schedule row plus the next tick its effective expression fires at.
 -- A disabled schedule, an expression that never fires again, or one the server
@@ -527,52 +526,52 @@ instance FromJSON CronScheduleView where
     CronScheduleView <$> parseJSON (Object obj) <*> obj .:? "nextRunAt"
 
 -- | Cron schedules response.
-data CronSchedulesResponse = CronSchedulesResponse
+newtype CronSchedulesResponse = CronSchedulesResponse
   { schedules :: [CronScheduleView]
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving (FromJSON, ToJSON) via Generically CronSchedulesResponse
 
 -- | Worker registry response.
-data WorkersResponse = WorkersResponse
+newtype WorkersResponse = WorkersResponse
   { workers :: [WorkerRow]
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving (FromJSON, ToJSON) via Generically WorkersResponse
 
 -- | Rate-limit policies response.
-data RateLimitPoliciesResponse = RateLimitPoliciesResponse
+newtype RateLimitPoliciesResponse = RateLimitPoliciesResponse
   { policies :: [RateLimitPolicyView]
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving (FromJSON, ToJSON) via Generically RateLimitPoliciesResponse
 
 -- | Rate-limit buckets response (one prefix's keys).
 type RateLimitBucketsResponse = Items RateLimitBucketView
 
 -- | Number of buckets a reset refilled to full.
-data RateLimitResetResponse = RateLimitResetResponse
+newtype RateLimitResetResponse = RateLimitResetResponse
   { reset :: Int64
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving (FromJSON, ToJSON) via Generically RateLimitResetResponse
 
 -- | Concurrency policies response.
-data ConcurrencyPoliciesResponse = ConcurrencyPoliciesResponse
+newtype ConcurrencyPoliciesResponse = ConcurrencyPoliciesResponse
   { policies :: [ConcurrencyPolicyView]
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving (FromJSON, ToJSON) via Generically ConcurrencyPoliciesResponse
 
 -- | Concurrency keys response (one prefix's keys).
 type ConcurrencyKeysResponse = Items ConcurrencyKeyView
 
 -- | Number of count rows repaired from live jobs.
-data ConcurrencyReconcileResponse = ConcurrencyReconcileResponse
+newtype ConcurrencyReconcileResponse = ConcurrencyReconcileResponse
   { reconciled :: Int64
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving (FromJSON, ToJSON) via Generically ConcurrencyReconcileResponse
 
 -- | Whether the API can reach its database.
 data HealthStatus
@@ -607,11 +606,11 @@ data HealthResponse = HealthResponse
   -- ^ Connection and age counters. Null when the database is unreachable or reports no row.
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving (FromJSON, ToJSON) via Generically HealthResponse
 
 -- | The process is running. Answered without touching the database.
-data LivenessResponse = LivenessResponse
+newtype LivenessResponse = LivenessResponse
   { alive :: Bool
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving (FromJSON, ToJSON) via Generically LivenessResponse

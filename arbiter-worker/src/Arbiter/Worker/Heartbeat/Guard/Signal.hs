@@ -19,9 +19,9 @@ import Control.Monad (unless, void, when)
 import Control.Monad.Class.MonadFork (MonadFork (..), MonadThread (..))
 import Control.Monad.Class.MonadThrow (Exception (..), MonadCatch (..), MonadMask (..), MonadThrow (..), SomeException)
 import Control.Monad.Class.MonadTime.SI (MonadMonotonicTime (..), MonadTime (..), Time, addTime, diffTime, diffUTCTime)
-import Data.Foldable (toList, traverse_)
+import Data.Foldable (fold, toList, traverse_)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, maybeToList)
+import Data.Maybe (maybeToList)
 import Data.Set qualified as Set
 
 import Arbiter.Worker.Heartbeat.Guard.State
@@ -98,7 +98,7 @@ guardBatch guard batch action =
       carrying <- uninterruptibleMask_ $ do
         carrying <- atomically $ do
           modifyTVar' (guardEntries guard) (Map.delete (guardedToken entry))
-          stateTVar (guardedStatus entry) (\status -> (fromMaybe [] (couriers status), status {couriers = Nothing}))
+          stateTVar (guardedStatus entry) (\status -> (fold (couriers status), status {couriers = Nothing}))
         carrying <$ traverse_ killThread carrying
       -- A signal a courier had already sent lands here, inside the boundary, and is dropped.
       unless (null carrying) $ interruptible (pure ()) `catch` \GuardSignal {} -> pure ()

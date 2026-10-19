@@ -35,6 +35,7 @@ module Arbiter.Core.Exceptions
   , throwParsing
   , orThrowParsing
   , throwInternal
+  , orThrowInternal
   , throwJobGone
   , throwJobGoneIds
   , throwScopedFailure
@@ -203,6 +204,10 @@ orThrowParsing = either throwParsing pure
 -- | Fail on an arbiter-internal error.
 throwInternal :: (MonadIO m) => Text -> m a
 throwInternal msg = UE.throwIO (InternalException msg)
+
+-- | The 'Right' value, or 'throwInternal' on the rendered 'Left'.
+orThrowInternal :: (MonadIO m) => (e -> Text) -> Either e a -> m a
+orThrowInternal render = either (throwInternal . render) pure
 
 -- | Throw 'JobGoneException' naming the jobs that went away.
 throwJobGoneIds :: (MonadIO m) => Text -> [Int64] -> m a

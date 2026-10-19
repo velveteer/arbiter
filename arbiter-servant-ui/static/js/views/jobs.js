@@ -72,6 +72,8 @@ const DELAYS = [
 
 // Bulk actions whose request can take a selected job's descendants with it.
 const CASCADES = new Set(['cancel', 'move-to-dlq']);
+// Cancel takes a job's descendants with it, and a move to the DLQ takes a rollup's.
+const takesTree = (action, j) => CASCADES.has(action) && (action === 'cancel' || j.isRollup);
 
 const blankInsert = () => ({
   open: false,
@@ -358,13 +360,11 @@ export const JobsTab = {
       );
     }
 
-    // Cancel takes a job's descendants with it, and a move to the DLQ takes a rollup's.
     // The topmost selected ancestor whose request takes this job with it.
     function cascadeRoot(byId, sel, id, action) {
-      if (!CASCADES.has(action)) return null;
       let root = null;
       for (const up of ancestors(byId, byId.get(String(id)), (j) => j.parentId)) {
-        if (sel.has(up.primaryKey) && (action === 'cancel' || up.isRollup)) root = up.primaryKey;
+        if (sel.has(up.primaryKey) && takesTree(action, up)) root = up.primaryKey;
       }
       return root;
     }
@@ -373,7 +373,7 @@ export const JobsTab = {
     // Ancestors off the page are fetched only when a selected job can cascade.
     function bulk(action, done) {
       const byId = new Map(selectable.value.map((j) => [String(j.primaryKey), j]));
-      const cascades = (j) => CASCADES.has(action) && j?._childCount > 0 && (action === 'cancel' || j.isRollup);
+      const cascades = (j) => j?._childCount > 0 && takesTree(action, j);
       const prepare = async (all) => {
         const sel = new Set(all);
         const picked = all.map((id) => byId.get(String(id)));
@@ -423,12 +423,13 @@ export const JobsTab = {
 
     // Insert opens clean of the last error, but keeps what was typed.
     const openInsert = () => Object.assign(insert, { open: true, error: '' });
-    const insertInvalid = computed(() => !!insert.payload.trim() && !!parsePayload(insert.payload.trim()).error);
+    const insertParsed = computed(() => parsePayload(insert.payload.trim()));
+    const insertInvalid = computed(() => !!insert.payload.trim() && !!insertParsed.value.error);
 
     function submitInsert() {
       const f = insert;
       const raw = f.payload.trim();
-      const parsed = raw ? parsePayload(raw) : { error: true };
+      const parsed = insertParsed.value;
       const priority = parseOptionalInt(f.priority);
       const maxAttempts = parseOptionalInt(f.maxAttempts, 1);
       const at = f.notVisibleUntil ? toIsoInstant(f.notVisibleUntil) : null;

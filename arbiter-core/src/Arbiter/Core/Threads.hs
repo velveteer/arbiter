@@ -3,10 +3,13 @@
 
 -- | Internal to the arbiter packages. Not covered by the PVP.
 --
--- RTS thread labels for an eventlog, ThreadScope session or @ghc-debug@ dump.
+-- RTS thread labels for an eventlog, ThreadScope session or @ghc-debug@ dump, and the
+-- time units of the timeout and delay primitives.
 module Arbiter.Core.Threads
   ( labelArbiterThread
   , microsPerSecond
+  , millisPerSecond
+  , micros
   ) where
 
 import Control.Concurrent (myThreadId)
@@ -14,6 +17,7 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Foldable (toList)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Time (NominalDiffTime)
 import GHC.Conc.Sync (labelThread)
 
 -- | Label the calling thread @arbiter:role[:queue]@. Only the role is slugged. For
@@ -28,3 +32,11 @@ labelArbiterThread role mQueue = liftIO $ do
 -- | Microseconds in one second.
 microsPerSecond :: (Num a) => a
 microsPerSecond = 1_000_000
+
+-- | Milliseconds in one second.
+millisPerSecond :: (Num a) => a
+millisPerSecond = 1000
+
+-- | An interval in microseconds, for the timeout and delay primitives.
+micros :: NominalDiffTime -> Int
+micros seconds = round (realToFrac seconds * microsPerSecond :: Double)

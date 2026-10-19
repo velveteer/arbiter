@@ -112,7 +112,7 @@ inTransaction drv conn schemaName =
   runDb
     Env
       { schema = schemaName
-      , poolState = PoolState {connectionPool = Nothing, pinned = Just (conn, 1)}
+      , poolState = PoolState {connectionPool = Nothing, pinned = Just (conn, outermostDepth)}
       , listener = Nothing
       , driverConfig = initialConfig drv
       }
@@ -178,7 +178,7 @@ withConn action = do
 
 -- | Pin one pooled connection for the action.
 pinConnection :: (HasPoolState conn m, MonadUnliftIO m) => m a -> m a
-pinConnection action = withConn $ \conn -> localPoolState (\st -> st {pinned = Just (conn, maybe 0 snd (pinned st))}) action
+pinConnection action = withConn $ \conn -> localPoolState (\st -> st {pinned = Just (conn, maybe noTransactionDepth snd (pinned st))}) action
 
 -- | Transaction bracket over the backend's own statement runner and bracket. Nests via
 -- savepoints.
@@ -191,7 +191,7 @@ withSavepointTransaction
 withSavepointTransaction runSql transaction action = do
   st <- getPoolState
   case pinned st of
-    Just (conn, depth) | depth > 0 -> mask $ \restore -> do
+    Just (conn, depth) | depth > noTransactionDepth -> mask $ \restore -> do
       let spName = "arbiter_sp_" <> BSC.pack (show depth)
       liftIO $ runSql conn ("SAVEPOINT " <> spName)
       result <-
@@ -202,7 +202,15 @@ withSavepointTransaction runSql transaction action = do
     _ -> withConn $ \conn -> withRunInIO $ \run ->
       transaction conn
         $ run
-        $ localPoolState (\s -> s {pinned = Just (conn, 1)}) action
+        $ localPoolState (\s -> s {pinned = Just (conn, outermostDepth)}) action
+
+-- | The transaction depth of a pinned connection outside any transaction.
+noTransactionDepth :: Int
+noTransactionDepth = 0
+
+-- | The transaction depth of a pinned connection inside its outermost transaction.
+outermostDepth :: Int
+outermostDepth = 1
 
 noConnection :: Text
 noConnection = "No active connection and no connection pool available"

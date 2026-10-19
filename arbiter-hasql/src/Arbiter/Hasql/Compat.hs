@@ -18,12 +18,13 @@ module Arbiter.Hasql.Compat
   , withDedicatedListenConn
   ) where
 
-import Arbiter.Core.Exceptions (throwInternal)
-import Arbiter.Core.Listen (ListenConn)
+import Arbiter.Core.Enum (showText)
+import Arbiter.Core.Exceptions (orThrowInternal, throwInternal)
+import Arbiter.Core.Listen (ListenConn (..))
 import Data.Bifunctor (first)
 import Data.ByteString (ByteString)
 import Data.Either (fromRight)
-import Data.Text qualified as T
+import Data.Text (Text)
 import Data.Text.Encoding qualified as TE
 import Data.Text.Encoding.Error qualified as TE
 import Hasql.Connection qualified as Hasql
@@ -31,7 +32,7 @@ import Hasql.Connection.Settings qualified as Settings
 import Hasql.Session qualified as Session
 
 #if MIN_VERSION_hasql(2,0,0)
-import Arbiter.Core.Listen (ListenConn (..), Notification (..))
+import Arbiter.Core.Listen (Notification (..))
 import Arbiter.Core.Listen.Driver
   ( ConnStatus (..)
   , ConnectDriver (..)
@@ -51,10 +52,10 @@ import Database.PostgreSQL.LibPQ qualified as PQ
 runSQL :: Hasql.Connection -> ByteString -> IO ()
 runSQL conn sql =
   Hasql.use conn (Session.script (lenientText sql))
-    >>= either (\err -> throwInternal $ "hasql runSQL error: " <> T.pack (show err)) pure
+    >>= orThrowInternal (("hasql runSQL error: " <>) . showText)
 
 -- | Decode UTF-8, replacing invalid bytes.
-lenientText :: ByteString -> T.Text
+lenientText :: ByteString -> Text
 lenientText = TE.decodeUtf8With TE.lenientDecode
 
 #if MIN_VERSION_hasql(2,0,0)

@@ -12,6 +12,7 @@ module Arbiter.Otel.Telemetry
   ) where
 
 import Arbiter.Core.Exceptions (displayEx)
+import Arbiter.Core.Threads (microsPerSecond)
 import Arbiter.Core.Trace (resolveTracer)
 import Arbiter.Worker.Logger (LogConfig, LogDestination)
 import Control.Exception (SomeException, bracket)
@@ -226,10 +227,6 @@ baseTelemetry meterProvider =
 -- | A metric reader's export interval.
 refreshFor :: PeriodicMetricReaderOptions -> NominalDiffTime
 refreshFor opts = fromIntegral (periodicIntervalMicros opts) / microsPerSecond
-
--- | Microseconds in one second.
-microsPerSecond :: NominalDiffTime
-microsPerSecond = 1_000_000
 
 -- | 'withTelemetry', or an inert handle when @OTEL_SDK_DISABLED@ is @true@.
 withTelemetryFromEnv :: (Telemetry -> IO a) -> IO a

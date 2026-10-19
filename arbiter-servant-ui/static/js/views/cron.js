@@ -43,7 +43,7 @@ function lastFired(s) {
 
 const SORT_KEYS = {
   name: (s) => s.name,
-  queue: (s) => s.queueName || '',
+  queue: (s) => s.queueName,
   overlap,
   timezone,
   enabled: (s) => (s.enabled ? 1 : 0),
@@ -329,10 +329,10 @@ export const CronView = {
       </div>
       <div v-else-if="d.cur" class="offcanvas-body" tabindex="0">
         <dl class="row">
-          <kv l="Queue">{{ d.cur.queueName ?? EMPTY }}</kv>
+          <kv l="Queue">{{ d.cur.queueName }}</kv>
           <kv l="Expression"><span class="font-monospace small">{{ expression(d.cur) }}</span></kv>
           <kv l="Runs">{{ describe(expression(d.cur)) || EMPTY }}</kv>
-          <kv l="Declared expression"><span class="font-monospace small">{{ d.cur.defaultExpression ?? EMPTY }}</span></kv>
+          <kv l="Declared expression"><span class="font-monospace small">{{ d.cur.defaultExpression }}</span></kv>
           <kv l="Overlap policy">{{ overlapLabel(overlap(d.cur)) }}</kv>
           <kv l="Timezone">{{ timezone(d.cur) }}</kv>
           <kv l="Enabled">{{ d.cur.enabled ? 'Yes' : 'No' }}</kv>

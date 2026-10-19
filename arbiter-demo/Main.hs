@@ -4,66 +4,39 @@
 
 module Main (main) where
 
-import Arbiter.Concurrency (HasConcurrency (..), concurrencyBy, concurrencyPolicy)
-import Arbiter.Core.HighLevel qualified as HL
-import Arbiter.Core.Job.Types
-  ( HasKind
-  , JobWrite
-  , defaultJob
-  , payload
-  , primaryKey
-  , setArchiveFor
-  , setGroupKey
-  , setMaxAttempts
-  , setNotVisibleUntil
-  , setPriority
-  )
-import Arbiter.Core.JobTree qualified as JT
-import Arbiter.Core.MonadArbiter (ResultOf)
-import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
-import Arbiter.Migrations (MigrationConfig (..), MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
+import Arbiter.Concurrency qualified as Conc
+import Arbiter.Core qualified as Arb
+import Arbiter.Core.Enum (showText)
+import Arbiter.Core.Threads (micros)
+import Arbiter.Migrations qualified as Mig
 import Arbiter.Otel qualified as Otel
-import Arbiter.RateLimit (HasRateLimit (..), globalLimit, limitBy, limitByCase, tokenBucket)
-import Arbiter.Servant (createArbiterServer)
-import Arbiter.Servant.API (ArbiterAPI)
-import Arbiter.Servant.OpenApi (openApiSpec)
-import Arbiter.Servant.Server (ArbiterServerConfig, arbiterServer)
-import Arbiter.Servant.UI (AdminUI, adminUIServer, adminUIServerDev)
-import Arbiter.Simple
-import Arbiter.Worker
-  ( BatchCallbacks (..)
-  , CronJob
-  , OverlapPolicy (..)
-  , TickKind
-  , WorkerConfig (..)
-  , batchedWorkerConfig
-  , cronJob
-  , defaultLogConfig
-  , mergedChildResults
-  , namedWorkerPool
-  , poolConfigForWorkers
-  , shutdownWorkerPools
-  , transactionalWorkerConfig
-  )
+import Arbiter.RateLimit qualified as RL
+import Arbiter.Servant qualified as Servant
+import Arbiter.Servant.OpenApi qualified as OpenApi
+import Arbiter.Servant.UI qualified as ServantUI
+import Arbiter.Simple qualified as ArbS
+import Arbiter.Worker qualified as Worker
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (race_)
+import Control.Exception (bracket)
 import Control.Monad (replicateM_, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString.Char8 qualified as BS
 import Data.Foldable (traverse_)
 import Data.HashMap.Strict qualified as HM
+import Data.Int (Int32)
 import Data.List (unfoldr)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Maybe (fromMaybe)
 import Data.OpenApi (ToSchema)
 import Data.Proxy (Proxy (..))
-import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
 import Database.PostgreSQL.Simple qualified as PG
+import Database.PostgreSQL.Simple.Types qualified as PGT
 import GHC.Generics (Generic)
 import Network.Wai.Handler.Warp
   ( defaultSettings
@@ -94,22 +67,22 @@ import Text.Read (readMaybe)
 data DemoPayload
   = TestMessage Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, HasKind, ToJSON, ToSchema)
+  deriving anyclass (Arb.HasKind, FromJSON, ToJSON, ToSchema)
 
 data EmailPayload
   = SendEmail Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, HasKind, ToJSON, ToSchema)
+  deriving anyclass (Arb.HasKind, FromJSON, ToJSON, ToSchema)
 
 data NotificationPayload
   = PushNotification Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, HasKind, ToJSON, ToSchema)
+  deriving anyclass (Arb.HasKind, FromJSON, ToJSON, ToSchema)
 
 -- | Cheap throwaway work the burst generator floods its queue with.
 newtype BulkPayload = BulkTask Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, HasKind, ToJSON, ToSchema)
+  deriving anyclass (Arb.HasKind, FromJSON, ToJSON, ToSchema)
 
 -- | Pipeline payload for the rollup demo.
 --
@@ -119,30 +92,30 @@ data PipelinePayload
   = ProcessChunk Text
   | AggregateResults Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, HasKind, ToJSON, ToSchema)
+  deriving anyclass (Arb.HasKind, FromJSON, ToJSON, ToSchema)
 
 -- | The demo's routes: the queue API, an OpenAPI description of it with a Swagger UI
 -- to read it in, and the dashboard. The dashboard is a catch-all and comes last.
 type DemoAPI =
-  ArbiterAPI DemoRegistry
+  Servant.ArbiterAPI DemoRegistry
     :<|> SwaggerSchemaUI "docs" "openapi.json"
-    :<|> AdminUI
+    :<|> ServantUI.AdminUI
 
 -- | The demo application. @mDevDir@ serves the dashboard from disk when set.
-demoApp :: Maybe FilePath -> ArbiterServerConfig (SimpleDb DemoRegistry IO) DemoRegistry -> Application
+demoApp :: Maybe FilePath -> Servant.ArbiterServerConfig (ArbS.SimpleDb DemoRegistry IO) DemoRegistry -> Application
 demoApp mDevDir config =
   serve (Proxy @DemoAPI) $
-    arbiterServer config
-      :<|> swaggerSchemaUIServer (openApiSpec @DemoRegistry "demo")
-      :<|> maybe adminUIServer adminUIServerDev mDevDir
+    Servant.arbiterServer config
+      :<|> swaggerSchemaUIServer (OpenApi.openApiSpec @DemoRegistry "demo")
+      :<|> maybe ServantUI.adminUIServer ServantUI.adminUIServerDev mDevDir
 
 -- | Demo registry with multiple queues
 type DemoRegistry =
-  '[ Queue "demo_queue" DemoPayload
-   , Queue "email_queue" EmailPayload
-   , Queue "notifications" NotificationPayload
-   , Queue "bulk_queue" BulkPayload
-   , QueueWithResult "pipeline" PipelinePayload [Text]
+  '[ Arb.Queue "demo_queue" DemoPayload
+   , Arb.Queue "email_queue" EmailPayload
+   , Arb.Queue "notifications" NotificationPayload
+   , Arb.Queue "bulk_queue" BulkPayload
+   , Arb.QueueWithResult "pipeline" PipelinePayload [Text]
    ]
 
 -- | Email recipient tiers, each rate-limited separately.
@@ -165,19 +138,19 @@ emailTier mail = case emailDomain mail of
 -- | Rate-limit selection for the demo. Emails are limited per recipient tier via an
 -- N-way 'limitByCase', each tier its own bucket. Notifications share one global
 -- bucket. Other queues stay unlimited. The migration seeds every branch's policy.
-instance HasRateLimit EmailPayload where
-  rateLimitFor = limitByCase emailTier $ \case
-    Internal -> limitBy (tokenBucket "email-internal" 5 30) emailKeySuffix
-    External -> limitBy (tokenBucket "email-external" 2 30) emailKeySuffix
-    System -> globalLimit (tokenBucket "email-system" 1 30) "digests"
+instance RL.HasRateLimit EmailPayload where
+  rateLimitFor = RL.limitByCase emailTier $ \case
+    Internal -> RL.limitBy (RL.tokenBucket "email-internal" 5 30) emailKeySuffix
+    External -> RL.limitBy (RL.tokenBucket "email-external" 2 30) emailKeySuffix
+    System -> RL.globalLimit (RL.tokenBucket "email-system" 1 30) "digests"
 
-instance HasRateLimit NotificationPayload where
-  rateLimitFor = globalLimit (tokenBucket "notify" 2 20) "all"
+instance RL.HasRateLimit NotificationPayload where
+  rateLimitFor = RL.globalLimit (RL.tokenBucket "notify" 2 20) "all"
 
 -- | At most 2 emails per recipient domain in flight at once, from the seeded
 -- "email-domain" policy. Orthogonal to the rate limit on the same payload.
-instance HasConcurrency EmailPayload where
-  concurrencyFor = concurrencyBy (concurrencyPolicy "email-domain" 2) emailKeySuffix
+instance Conc.HasConcurrency EmailPayload where
+  concurrencyFor = Conc.concurrencyBy (Conc.concurrencyPolicy "email-domain" 2) emailKeySuffix
 
 -- | The recipient address of an email job.
 emailAddress :: EmailPayload -> Text
@@ -197,34 +170,33 @@ runDemo tel = do
     maybe "host=localhost port=5432 user=postgres password=master dbname=postgres" BS.pack
       <$> lookupEnv "DATABASE_URL"
   schemaStr <- fromMaybe "arbiter_demo" <$> lookupEnv "SCHEMA"
-  port <- envOr "PORT" (8080 :: Int)
+  port <- envOr "PORT" defaultPort
   let schema = T.pack schemaStr
   putStrLn "Resetting schema..."
-  conn <- PG.connectPostgreSQL connStr
-  void $ PG.execute_ conn $ "DROP SCHEMA IF EXISTS " <> fromString schemaStr <> " CASCADE"
-  PG.close conn
+  bracket (PG.connectPostgreSQL connStr) PG.close $ \conn ->
+    void $ PG.execute conn "DROP SCHEMA IF EXISTS ? CASCADE" (PG.Only (PGT.Identifier schema))
 
   putStrLn "Running migrations..."
   migrationResult <-
-    runMigrationsForRegistry
+    Mig.runMigrationsForRegistry
       (Proxy @DemoRegistry)
       connStr
       schema
-      defaultMigrationConfig {enableEventStreaming = True}
+      Mig.defaultMigrationConfig {Mig.enableEventStreaming = True}
   case migrationResult of
-    MigrationSuccess -> putStrLn "Migrations complete"
-    MigrationError err -> die $ "Migration failed: " <> err
+    Mig.MigrationSuccess -> putStrLn "Migrations complete"
+    Mig.MigrationError err -> die $ "Migration failed: " <> err
 
   -- Producer env for seeding and the background load generator. The worker
   -- pools get their own pool from the managed runner below.
-  producerEnv <- createSimpleEnv (Proxy @DemoRegistry) connStr schema
+  producerEnv <- ArbS.createSimpleEnv (Proxy @DemoRegistry) connStr schema
 
   putStrLn "Seeding demo data..."
-  seedDemoData producerEnv schema
+  seedDemoData producerEnv
 
   putStrLn ""
   putStrLn "Setting up server..."
-  serverConfig <- createArbiterServer (runSimpleDb producerEnv)
+  serverConfig <- Servant.createArbiterServer (ArbS.runSimpleDb producerEnv)
   putStrLn "Server ready"
 
   putStrLn "Creating worker configs..."
@@ -260,150 +232,143 @@ runDemo tel = do
   putStrLn ""
 
   let workers =
-        [ namedWorkerPool demoWorkerCfg
-        , namedWorkerPool emailWorkerCfg
-        , namedWorkerPool notifWorkerCfg
-        , namedWorkerPool bulkWorkerCfg
-        , namedWorkerPool pipelineWorkerCfg
+        [ Worker.namedWorkerPool demoWorkerCfg
+        , Worker.namedWorkerPool emailWorkerCfg
+        , Worker.namedWorkerPool notifWorkerCfg
+        , Worker.namedWorkerPool bulkWorkerCfg
+        , Worker.namedWorkerPool pipelineWorkerCfg
         ]
-  let handler = Signals.Catch $ shutdownWorkerPools workers
+  let handler = Signals.Catch $ Worker.shutdownWorkerPools workers
   void $ Signals.installHandler Signals.sigTERM handler Nothing
   void $ Signals.installHandler Signals.sigINT handler Nothing
 
   -- Self-restart watchdog. After RESET_INTERVAL_MINUTES, raise SIGTERM. The
   -- handler above exits the process and the container's restart policy reseeds
   -- a clean demo. A value of 0 disables it.
-  resetMin <- envOr "RESET_INTERVAL_MINUTES" (20 :: Int)
+  resetMin <- envOr "RESET_INTERVAL_MINUTES" defaultResetMinutes
   when (resetMin > 0) $ void $ forkIO $ do
-    threadDelay (secondsToMicros (fromIntegral (resetMin * secondsPerMinute)))
+    threadDelay (micros (fromIntegral (resetMin * secondsPerMinute)))
     putStrLn $ "[reset] " <> show resetMin <> "m elapsed, restarting for a clean demo"
     Signals.raiseSignal Signals.sigTERM
 
   -- Background load generator. Pulse a few jobs on an interval. A value of 0
   -- disables it.
-  pulseSec <- envOr "LOAD_PULSE_SECONDS" 5
+  pulseSec <- envOr "LOAD_PULSE_SECONDS" defaultLoadPulseSeconds
   when (pulseSec > 0) $ void $ forkIO $ loadPulse producerEnv pulseSec
 
   -- Emit a small archivable pipeline on an interval. A value of 0 disables it.
-  pipeSec <- envOr "PIPELINE_PULSE_SECONDS" 2
-  when (pipeSec > 0) $ void $ forkIO $ pipelinePulse producerEnv schema pipeSec
+  pipeSec <- envOr "PIPELINE_PULSE_SECONDS" defaultPipelinePulseSeconds
+  when (pipeSec > 0) $ void $ forkIO $ pipelinePulse producerEnv pipeSec
 
   -- Bursty batch inserts into bulk_queue. A spike of multi-row inserts on a
   -- jittered interval. Either value at 0 disables it.
-  burstSec <- envOr "BURST_INTERVAL_SECONDS" 10
-  burstSize <- envOr "BURST_SIZE" 1000
-  burstGroups <- envOr "BURST_GROUPS" 8
+  burstSec <- envOr "BURST_INTERVAL_SECONDS" defaultBurstSeconds
+  burstSize <- envOr "BURST_SIZE" defaultBurstSize
+  burstGroups <- envOr "BURST_GROUPS" defaultBurstGroups
   when (burstSec > 0 && burstSize > 0) $ do
     putStrLn $ "Burst load: ~" <> show burstSize <> " jobs every ~" <> show burstSec <> "s into bulk_queue"
     void $ forkIO $ burstPulse producerEnv burstSec burstSize burstGroups
 
-  poolCfg <- poolConfigForWorkers workers
-  workerEnv <- createSimpleEnvWithConfig (Proxy @DemoRegistry) connStr schema poolCfg
+  poolCfg <- Worker.poolConfigForWorkers workers
+  workerEnv <- ArbS.createSimpleEnvWithConfig (Proxy @DemoRegistry) connStr schema poolCfg
 
   putStrLn $ "Telemetry: " <> T.unpack (Otel.telemetrySummary tel)
   race_
-    (runSimpleDb workerEnv $ Otel.runWorkerPoolsWith tel defaultLogConfig workers)
+    (ArbS.runSimpleDb workerEnv $ Otel.runWorkerPoolsWith tel Worker.defaultLogConfig workers)
     (runSettings (setPort port defaultSettings) app)
 
 -- ---------------------------------------------------------------------------
 -- Worker configs
 -- ---------------------------------------------------------------------------
 
-type DemoM = SimpleDb DemoRegistry IO
-
--- | Microseconds in one second.
-microsPerSecond :: Double
-microsPerSecond = 1_000_000
+type DemoM = ArbS.SimpleDb DemoRegistry IO
 
 -- | Seconds in one minute.
 secondsPerMinute :: Int
 secondsPerMinute = 60
 
--- | A delay in seconds as 'threadDelay' microseconds.
-secondsToMicros :: Double -> Int
-secondsToMicros seconds = round (seconds * microsPerSecond)
-
 simulateWork :: Double -> IO ()
 simulateWork mean = do
   uniform <- randomRIO (1.0e-6, 1.0)
-  threadDelay (secondsToMicros (mean * negate (log uniform)))
+  threadDelay (micros (realToFrac (mean * negate (log uniform))))
 
 -- | A transactional worker pool whose handler sleeps for @mean@ seconds on average.
 simpleWorker
-  :: (ResultOf DemoM payload ~ ())
+  :: (Arb.ResultOf DemoM payload ~ ())
   => Int
   -- ^ Worker count
   -> Double
   -- ^ Mean handler delay (seconds)
   -> NominalDiffTime
   -- ^ Poll interval
-  -> [CronJob payload]
-  -> IO (WorkerConfig DemoM payload)
+  -> [Worker.CronJob payload]
+  -> IO (Worker.WorkerConfig DemoM payload)
 simpleWorker count mean poll crons = do
-  cfg <- transactionalWorkerConfig count (\_conn _job -> liftIO $ simulateWork mean)
-  pure (polling poll cfg) {cronJobs = crons}
+  cfg <- Worker.transactionalWorkerConfig count (\_conn _job -> liftIO $ simulateWork mean)
+  pure (polling poll cfg) {Worker.cronJobs = crons}
 
 -- | Poll at @interval@ seconds with no liveness file.
-polling :: NominalDiffTime -> WorkerConfig m payload -> WorkerConfig m payload
-polling interval cfg = cfg {pollInterval = interval, livenessFile = Nothing}
+polling :: NominalDiffTime -> Worker.WorkerConfig m payload -> Worker.WorkerConfig m payload
+polling interval cfg = cfg {Worker.pollInterval = interval, Worker.livenessFile = Nothing}
 
 -- | 'cronJob' for a literal expression. A bad expression is a crash.
-mustCron :: Text -> Text -> OverlapPolicy -> (TickKind -> UTCTime -> JobWrite payload) -> CronJob payload
-mustCron name expr policy = either error id . cronJob name expr policy
+mustCron
+  :: Text -> Text -> Worker.OverlapPolicy -> (Worker.TickKind -> UTCTime -> Arb.JobWrite payload) -> Worker.CronJob payload
+mustCron name expr policy = either error id . Worker.cronJob name expr policy
 
-demoTicker :: CronJob DemoPayload
+demoTicker :: Worker.CronJob DemoPayload
 demoTicker =
   mustCron
     "demo-ticker"
     "* * * * *" -- every minute
-    AllowOverlap
-    (\_ tickTime -> defaultJob (TestMessage $ "tick:" <> tshow tickTime))
+    Worker.AllowOverlap
+    (\_ tickTime -> Arb.defaultJob (TestMessage $ "tick:" <> showText tickTime))
 
-emailDigest :: CronJob EmailPayload
+emailDigest :: Worker.CronJob EmailPayload
 emailDigest =
   mustCron
     "email-digest"
     "*/2 * * * *" -- every 2 minutes
-    SkipOverlap
-    (\_ _ -> defaultJob (SendEmail "scheduled-digest"))
+    Worker.SkipOverlap
+    (\_ _ -> Arb.defaultJob (SendEmail "scheduled-digest"))
 
-notifBroadcast :: CronJob NotificationPayload
+notifBroadcast :: Worker.CronJob NotificationPayload
 notifBroadcast =
   mustCron
     "notif-broadcast"
     "*/3 * * * *" -- every 3 minutes
-    AllowOverlap
-    (\_ tickTime -> defaultJob (PushNotification $ "broadcast:" <> tshow tickTime))
+    Worker.AllowOverlap
+    (\_ tickTime -> Arb.defaultJob (PushNotification $ "broadcast:" <> showText tickTime))
 
 -- | Drains the burst queue. Many workers claim large batches with a near-zero
 -- handler. Sized by BURST_WORKERS and BURST_BATCH.
-mkBulkWorker :: IO (WorkerConfig DemoM BulkPayload)
+mkBulkWorker :: IO (Worker.WorkerConfig DemoM BulkPayload)
 mkBulkWorker = do
-  count <- envOr "BURST_WORKERS" 6
-  batch <- envOr "BURST_BATCH" 25
-  cfg <- batchedWorkerConfig count batch handler
+  count <- envOr "BURST_WORKERS" defaultBurstWorkers
+  batch <- envOr "BURST_BATCH" defaultBurstBatch
+  cfg <- Worker.batchedWorkerConfig count batch handler
   pure (polling 1 cfg)
   where
     -- Roughly 300 jobs a second across the pool. A burst drains slowly enough
     -- to be sampled.
     handler jobs cbs = do
       liftIO $ simulateWork 0.5
-      ackAll cbs (NE.toList jobs)
+      Worker.ackAll cbs (NE.toList jobs)
 
 -- ---------------------------------------------------------------------------
 -- Pipeline worker - rollup demo
 -- ---------------------------------------------------------------------------
 
-mkPipelineWorker :: IO (WorkerConfig DemoM PipelinePayload)
+mkPipelineWorker :: IO (Worker.WorkerConfig DemoM PipelinePayload)
 mkPipelineWorker = do
-  cfg <- transactionalWorkerConfig 3 handler
+  cfg <- Worker.transactionalWorkerConfig 3 handler
   pure (polling 2 cfg)
   where
-    handler _conn job = case payload job of
+    handler _conn job = case Arb.payload job of
       ProcessChunk chunkName -> do
         liftIO $ simulateWork 1
         pure (chunkFindings chunkName)
-      AggregateResults _ -> fst <$> mergedChildResults job
+      AggregateResults _ -> fst <$> Worker.mergedChildResults job
 
 -- | Deterministic fake findings for each chunk name.
 chunkFindings :: Text -> [Text]
@@ -424,9 +389,9 @@ chunkFindings name
 -- | Seed a varied initial dataset across every queue and every status the
 -- admin UI can show: ready, scheduled, suspended, backoff, in-flight (as
 -- workers claim jobs), and dead-letter.
-seedDemoData :: SimpleEnv DemoRegistry -> Text -> IO ()
-seedDemoData env schemaName = runSimpleDb env $ do
-  seedPipeline schemaName
+seedDemoData :: ArbS.SimpleEnv DemoRegistry -> IO ()
+seedDemoData env = ArbS.runSimpleDb env $ do
+  seedPipeline
   seedQueues
   liftIO $ putStrLn "  Seeded jobs across demo_queue, email_queue, notifications, and pipeline"
 
@@ -440,15 +405,15 @@ takeNonEmpty n (x :| xs) = x :| take (n - 1) xs
 
 -- | A 3-level rollup pipeline. Results flow up from leaves through finalizers.
 -- Priority 10 keeps this long run behind the quick pipelines from 'pipelinePulse'.
-seedPipeline :: Text -> DemoM ()
-seedPipeline schemaName = do
-  let background job = setPriority 10 $ defaultJob job
-      chunk = JT.leaf . background . ProcessChunk
-      agg name = JT.rollup (background (AggregateResults name))
+seedPipeline :: DemoM ()
+seedPipeline = do
+  let background job = Arb.setPriority 10 $ Arb.defaultJob job
+      chunk = Arb.leaf . background . ProcessChunk
+      agg name = Arb.rollup (background (AggregateResults name))
   tracer <- demoTracer
   result <- Trace.inSpan' tracer "seed pipeline" Trace.defaultSpanArguments $ \seedSpan -> do
     tree <-
-      JT.insertJobTree schemaName "pipeline" $
+      Arb.insertJobTree $
         agg
           "final-report"
           ( takeNonEmpty seedPipelineBranches $
@@ -458,11 +423,11 @@ seedPipeline schemaName = do
                 ]
           )
     traverse_
-      ( \(root :| rest) ->
+      ( \nodes ->
           Trace.addAttributes seedSpan $
             HM.fromList
-              [ ("demo.pipeline.node_count", Attr.toAttribute (1 + length rest :: Int))
-              , ("demo.pipeline.root_id", Attr.toAttribute (tshow (primaryKey root)))
+              [ ("demo.pipeline.node_count", Attr.toAttribute (NE.length nodes))
+              , ("demo.pipeline.root_id", Attr.toAttribute (showText (Arb.primaryKey (NE.head nodes))))
               ]
       )
       tree
@@ -470,7 +435,9 @@ seedPipeline schemaName = do
   case result of
     Left err -> liftIO $ die $ "pipeline seed failed: " <> show err
     Right (root :| rest) ->
-      liftIO $ putStrLn $ "  pipeline: root #" <> show (primaryKey root) <> " with " <> show (length rest) <> " descendants"
+      liftIO
+        $ putStrLn
+        $ "  pipeline: root #" <> show (Arb.primaryKey root) <> " with " <> show (length rest) <> " descendants"
 
 -- | A spread across the flat queues covering ready, scheduled, suspended,
 -- backoff, and dead-letter, with varied priorities and group keys.
@@ -480,50 +447,53 @@ seedQueues = do
 
   -- Backoff and DLQ examples are produced through the normal lifecycle.
   void $
-    HL.insertJob
-      (setGroupKey (Just "integrations") $ setMaxAttempts (Just 5) $ defaultJob (TestMessage "flaky-webhook"))
-  [flaky1] <- HL.claimNextVisibleJobs @DemoPayload 1 60
-  void $ HL.updateJobForRetry 0 "connection reset by upstream" flaky1
-  [flaky2] <- HL.claimNextVisibleJobs @DemoPayload 1 60
-  void $ HL.updateJobForRetry 180 "connection reset by upstream" flaky2
+    Arb.insertJob
+      (Arb.setGroupKey (Just "integrations") $ Arb.setMaxAttempts (Just 5) $ Arb.defaultJob (TestMessage "flaky-webhook"))
+  [flaky1] <- Arb.claimNextVisibleJobs @DemoPayload 1 60
+  void $ Arb.updateJobForRetry 0 "connection reset by upstream" flaky1
+  [flaky2] <- Arb.claimNextVisibleJobs @DemoPayload 1 60
+  void $ Arb.updateJobForRetry 180 "connection reset by upstream" flaky2
 
   void $
-    HL.insertJob
-      (setGroupKey (Just "ingest") $ setMaxAttempts (Just 5) $ defaultJob (TestMessage "corrupt-record"))
+    Arb.insertJob
+      (Arb.setGroupKey (Just "ingest") $ Arb.setMaxAttempts (Just 5) $ Arb.defaultJob (TestMessage "corrupt-record"))
   replicateM_ 4 $ do
-    [failed] <- HL.claimNextVisibleJobs @DemoPayload 1 60
-    void $ HL.updateJobForRetry 0 "unparseable payload" failed
-  [doomed] <- HL.claimNextVisibleJobs @DemoPayload 1 60
-  void $ HL.moveToDLQ "unparseable payload after 5 attempts" doomed
+    [failed] <- Arb.claimNextVisibleJobs @DemoPayload 1 60
+    void $ Arb.updateJobForRetry 0 "unparseable payload" failed
+  [doomed] <- Arb.claimNextVisibleJobs @DemoPayload 1 60
+  void $ Arb.moveToDLQ "unparseable payload after 5 attempts" doomed
 
   -- demo_queue: ready jobs with varied priority and group keys
   traverse_
     ( \(index, (grp, msg)) ->
-        void $ HL.insertJob (setGroupKey (Just grp) $ setPriority (fromIntegral (index `mod` 5)) $ defaultJob (TestMessage msg))
+        void $
+          Arb.insertJob
+            (Arb.setGroupKey (Just grp) $ Arb.setPriority (fromIntegral (index `mod` 5)) $ Arb.defaultJob (TestMessage msg))
     )
     (zip [0 :: Int ..] demoTasks)
   -- scheduled (not visible yet) and suspended (paused)
   void $
-    HL.insertJob
-      ( setGroupKey (Just "maintenance")
-          $ setNotVisibleUntil (Just (addUTCTime 3600 now))
-          $ defaultJob (TestMessage "nightly-reindex")
+    Arb.insertJob
+      ( Arb.setGroupKey (Just "maintenance")
+          $ Arb.setNotVisibleUntil (Just (addUTCTime 3600 now))
+          $ Arb.defaultJob (TestMessage "nightly-reindex")
       )
-  paused <- need =<< HL.insertJob (setGroupKey (Just "maintenance") $ defaultJob (TestMessage "paused-migration"))
-  void $ HL.suspendJob @DemoPayload (primaryKey paused)
+  paused <-
+    need =<< Arb.insertJob (Arb.setGroupKey (Just "maintenance") $ Arb.defaultJob (TestMessage "paused-migration"))
+  void $ Arb.suspendJob @DemoPayload (Arb.primaryKey paused)
 
   -- email_queue: a few ready, one scheduled, one bounced to the DLQ
-  void $ HL.insertJob (setMaxAttempts (Just 2) $ defaultJob (SendEmail "nobody@invalid.test"))
-  [rejected] <- HL.claimNextVisibleJobs @EmailPayload 1 60
-  void $ HL.updateJobForRetry 0 "recipient rejected (550)" rejected
+  void $ Arb.insertJob (Arb.setMaxAttempts (Just 2) $ Arb.defaultJob (SendEmail "nobody@invalid.test"))
+  [rejected] <- Arb.claimNextVisibleJobs @EmailPayload 1 60
+  void $ Arb.updateJobForRetry 0 "recipient rejected (550)" rejected
   traverse_
-    (void . HL.insertJob . defaultJob . SendEmail)
+    (void . Arb.insertJob . Arb.defaultJob . SendEmail)
     (["welcome@acme.test", "receipt@acme.test", "reset@acme.test"] :: [Text])
-  void $ HL.insertJob (setNotVisibleUntil (Just (addUTCTime 1800 now)) $ defaultJob (SendEmail "weekly-digest"))
+  void $ Arb.insertJob (Arb.setNotVisibleUntil (Just (addUTCTime 1800 now)) $ Arb.defaultJob (SendEmail "weekly-digest"))
 
   -- notifications: a few ready
   traverse_
-    (void . HL.insertJob . defaultJob . PushNotification)
+    (void . Arb.insertJob . Arb.defaultJob . PushNotification)
     (["deploy finished", "build green", "nightly backup ok"] :: [Text])
   where
     need :: Maybe a -> DemoM a
@@ -543,54 +513,54 @@ demoTasks =
   ]
 
 -- | Background load generator. A small pulse of jobs every @sec@ seconds.
-loadPulse :: SimpleEnv DemoRegistry -> Int -> IO ()
-loadPulse env sec = go 0
+loadPulse :: ArbS.SimpleEnv DemoRegistry -> Int -> IO ()
+loadPulse env sec = traverse_ pulse (enumFrom (0 :: Int))
   where
     -- Archive one job in @every@.
-    keepEvery every tick = if tick `mod` every == 0 then Just 3600 else Nothing
-    go :: Int -> IO ()
-    go tick = do
-      threadDelay (secondsToMicros (fromIntegral sec))
-      runSimpleDb env $ do
+    keepEvery every tick = if tick `mod` every == 0 then Just archiveRetention else Nothing
+    pulse tick = do
+      threadDelay (micros (fromIntegral sec))
+      ArbS.runSimpleDb env $ do
         void $
-          HL.insertJob
-            ( setArchiveFor (keepEvery 4 tick)
-                $ setPriority (fromIntegral (tick `mod` 5))
-                $ defaultJob (TestMessage ("pulse #" <> tshow tick))
+          Arb.insertJob
+            ( Arb.setArchiveFor (keepEvery 4 tick)
+                $ Arb.setPriority (fromIntegral (tick `mod` 5))
+                $ Arb.defaultJob (TestMessage ("pulse #" <> showText tick))
             )
         when (even tick)
           $ void
-          $ HL.insertJob (setArchiveFor (keepEvery 6 tick) $ defaultJob (SendEmail ("digest #" <> tshow tick)))
+          $ Arb.insertJob (Arb.setArchiveFor (keepEvery 6 tick) $ Arb.defaultJob (SendEmail ("digest #" <> showText tick)))
         when (tick `mod` 3 == 0)
           $ void
-          $ HL.insertJob (setArchiveFor (keepEvery 9 tick) $ defaultJob (PushNotification ("alert #" <> tshow tick)))
-      go (tick + 1)
+          $ Arb.insertJob (Arb.setArchiveFor (keepEvery 9 tick) $ Arb.defaultJob (PushNotification ("alert #" <> showText tick)))
 
 -- | Burst load. Every @sec@ seconds (jittered by half), insert @size@ jobs as
 -- back-to-back multi-row inserts, with a four-times spike every fifth round.
 -- Half of each burst joins one of @groups@ group keys.
-burstPulse :: SimpleEnv DemoRegistry -> Int -> Int -> Int -> IO ()
-burstPulse env sec size groups = go 0
+burstPulse :: ArbS.SimpleEnv DemoRegistry -> Int -> Int -> Int -> IO ()
+burstPulse env sec size groups = traverse_ pulse (enumFrom (0 :: Int))
   where
     perStatement = 250
+    spikeEvery = 5
+    spikeFactor = 4
     grouped index
       | groups <= 0 || odd index = id
-      | otherwise = setGroupKey (Just ("bulk-" <> tshow ((index `div` 2) `mod` groups)))
-    go :: Int -> IO ()
-    go tick = do
+      | otherwise = Arb.setGroupKey (Just ("bulk-" <> showText ((index `div` 2) `mod` groups)))
+    pulse tick = do
       gap <- randomRIO (0.5, 1.5 :: Double)
-      threadDelay (secondsToMicros (fromIntegral sec * gap))
-      let total = if tick `mod` 5 == 4 then size * 4 else size
-          jobs = [grouped index (defaultJob (BulkTask ("burst " <> tshow tick <> " #" <> tshow index))) | index <- [1 .. total]]
-      runSimpleDb env $ traverse_ (void . HL.insertJobsBatch_) (chunksOf perStatement jobs)
-      go (tick + 1)
+      threadDelay (micros (realToFrac (fromIntegral sec * gap)))
+      let total = if tick `mod` spikeEvery == spikeEvery - 1 then size * spikeFactor else size
+          jobs =
+            [ grouped index (Arb.defaultJob (BulkTask ("burst " <> showText tick <> " #" <> showText index))) | index <- [1 .. total]
+            ]
+      ArbS.runSimpleDb env $ traverse_ (void . Arb.insertJobsBatch_) (chunksOf perStatement jobs)
 
 -- | Split into chunks of at most @chunkSize@.
 chunksOf :: Int -> [a] -> [[a]]
 chunksOf chunkSize = unfoldr (\remaining -> if null remaining then Nothing else Just (splitAt chunkSize remaining))
 
 -- | Chunk sets a quick pipeline picks from, for variety across runs.
-quickChunkSets :: [[Text]]
+quickChunkSets :: NonEmpty (NonEmpty Text)
 quickChunkSets =
   [ ["revenue-data", "expense-data", "forecast-data"]
   , ["inventory-data", "shipping-data", "support-data"]
@@ -599,29 +569,55 @@ quickChunkSets =
   ]
 
 -- | Insert a small rollup every @sec@ seconds. Its root archives its merged result.
-pipelinePulse :: SimpleEnv DemoRegistry -> Text -> Int -> IO ()
-pipelinePulse env schemaName sec = go 0
+pipelinePulse :: ArbS.SimpleEnv DemoRegistry -> Int -> IO ()
+pipelinePulse env sec = traverse_ pulse (enumFrom (0 :: Int))
   where
-    go :: Int -> IO ()
-    go tick = do
-      threadDelay (secondsToMicros (fromIntegral sec))
-      pick <- randomRIO (0, length quickChunkSets - 1)
-      let chosen = quickChunkSets !! pick
-          root = setArchiveFor (Just 3600) $ defaultJob (AggregateResults ("quick-report-" <> tshow tick))
-          leaves = NE.fromList (map (JT.leaf . defaultJob . ProcessChunk) chosen)
-      runSimpleDb env $ void $ JT.insertJobTree schemaName "pipeline" (JT.rollup root leaves)
-      go (tick + 1)
+    pulse tick = do
+      threadDelay (micros (fromIntegral sec))
+      pick <- randomRIO (0, NE.length quickChunkSets - 1)
+      let chosen = quickChunkSets NE.!! pick
+          root = Arb.setArchiveFor (Just archiveRetention) $ Arb.defaultJob (AggregateResults ("quick-report-" <> showText tick))
+          leaves = Arb.leaf . Arb.defaultJob . ProcessChunk <$> chosen
+      ArbS.runSimpleDb env $ void $ Arb.insertJobTree (Arb.rollup root leaves)
 
 demoTracer :: (MonadIO m) => m Trace.Tracer
 demoTracer = do
   provider <- Trace.getGlobalTracerProvider
   pure (Trace.makeTracer provider "arbiter-demo" Trace.tracerOptions)
 
+-- | How long pulse jobs stay in the archive.
+archiveRetention :: Int32
+archiveRetention = 3600
+
+defaultPort :: Int
+defaultPort = 8080
+
+defaultResetMinutes :: Int
+defaultResetMinutes = 20
+
+defaultLoadPulseSeconds :: Int
+defaultLoadPulseSeconds = 5
+
+defaultPipelinePulseSeconds :: Int
+defaultPipelinePulseSeconds = 2
+
+defaultBurstSeconds :: Int
+defaultBurstSeconds = 10
+
+defaultBurstSize :: Int
+defaultBurstSize = 1000
+
+defaultBurstGroups :: Int
+defaultBurstGroups = 8
+
+defaultBurstWorkers :: Int
+defaultBurstWorkers = 6
+
+defaultBurstBatch :: Int
+defaultBurstBatch = 25
+
 -- | Read an environment variable, or the default when unset.
 envOr :: (Read a) => String -> a -> IO a
 envOr name fallback = lookupEnv name >>= maybe (pure fallback) parse
   where
     parse raw = maybe (die (name <> ": cannot parse " <> show raw)) pure (readMaybe raw)
-
-tshow :: (Show a) => a -> Text
-tshow = T.pack . show

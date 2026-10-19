@@ -23,6 +23,7 @@ module Arbiter.Core.Trace
 
     -- | Internal to the arbiter packages. Not covered by the PVP.
   , Tracer
+  , instrumentationScope
   , ConsumeSpan
   , ConsumeShape (..)
   , toConsumeShape
@@ -57,6 +58,7 @@ import OpenTelemetry.Trace.Core
   ( ExceptionClassification (..)
   , ExceptionHandler
   , ExceptionResponse (..)
+  , InstrumentationLibrary
   , NewEvent (..)
   , NewLink (..)
   , SpanArguments (..)
@@ -122,8 +124,12 @@ currentTraceContext = maybe (pure Nothing) encoded =<< getActiveSpan
 resolveTracer :: (MonadIO m) => m (Maybe Tracer)
 resolveTracer = do
   provider <- getGlobalTracerProvider
-  let tracer = makeTracer provider "arbiter" arbiterTracerOptions
+  let tracer = makeTracer provider instrumentationScope arbiterTracerOptions
   pure (if tracerIsEnabled tracer then Just tracer else Nothing)
+
+-- | Instrumentation scope for arbiter's tracer, meter and logger.
+instrumentationScope :: InstrumentationLibrary
+instrumentationScope = "arbiter"
 
 arbiterTracerOptions :: TracerOptions
 arbiterTracerOptions = tracerOptions {tracerExceptionHandlerOptions = [routineControlFlow]}

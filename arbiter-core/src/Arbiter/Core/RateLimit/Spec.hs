@@ -142,9 +142,13 @@ class HasRateLimit payload where
 
   -- | How many tokens this job spends, clamped to the bucket's range. Defaults to 1.
   rateLimitCost :: payload -> Double
-  rateLimitCost _ = 1
+  rateLimitCost _ = defaultRateLimitCost
 
 instance {-# OVERLAPPABLE #-} HasRateLimit payload
+
+-- | The tokens a job spends when its payload sets no cost.
+defaultRateLimitCost :: Double
+defaultRateLimitCost = 1
 
 instance (HasRateLimit payload) => CollectFor payload RateLimitPolicy where
   collectFor = collectPolicies (rateLimitFor @payload)

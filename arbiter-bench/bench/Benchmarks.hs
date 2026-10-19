@@ -1,6 +1,5 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeFamilies #-}
 
 module Main (main) where
 
@@ -103,10 +102,22 @@ trialDurationUs = 10_000_000
 
 -- | Per-test timeout. Each test runs trialCount trials plus per-trial preloads.
 benchTimeout :: Integer
-benchTimeout = fromIntegral trialCount * fromIntegral trialDurationUs * 40
+benchTimeout = fromIntegral trialCount * fromIntegral trialDurationUs * benchTimeoutMargin
+
+-- | How many trial durations a test may take, preloads included.
+benchTimeoutMargin :: Integer
+benchTimeoutMargin = 40
 
 steadyStateWarmupUs :: Int
 steadyStateWarmupUs = 2_000_000
+
+-- | Concurrent producer threads in a steady-state trial.
+steadyProducers :: Int
+steadyProducers = 10
+
+-- | Microseconds between a steady-state producer's batches.
+steadyProducerDelayUs :: Int
+steadyProducerDelayUs = 50_000
 
 data BenchPayload
   = BenchMessage Int
@@ -164,7 +175,6 @@ data QueueFlavor
   | Grouped Int
   | -- | Grouped with 80 percent of jobs assigned to a small hot set.
     GroupedSkewed Int Int
-  | Mixed Int
   | -- | Grouped. A fraction of jobs is scheduled into the near future. A fraction
     -- fails once into backoff. Exercises the next_due and in_flight_until claim
     -- sources alongside the ready window.
@@ -284,9 +294,6 @@ flavorJob flavor now index = case flavor of
   Ungrouped -> defaultJob (BenchBatch index)
   Grouped numGroups -> defaultGroupedJob (modGroupKey numGroups index) (BenchBatch index)
   GroupedSkewed numGroups hotGroups -> defaultGroupedJob (skewedGroupKey numGroups hotGroups index) (BenchBatch index)
-  Mixed numGroups
-    | even index -> defaultJob (BenchBatch index)
-    | otherwise -> defaultGroupedJob (modGroupKey numGroups index) (BenchBatch index)
   GroupedBacklog numGroups -> backlogJob now numGroups index
   GroupedDormant numGroups -> dormantJob now numGroups index
   UngroupedDormant -> dormantUngroupedJob now index
@@ -452,8 +459,8 @@ captureTableSnaps conn names = do
       conn
       "SELECT relname::text, n_tup_upd, n_tup_hot_upd, n_dead_tup, autovacuum_count \
       \FROM pg_stat_user_tables \
-      \WHERE schemaname = 'arbiter' AND relname IN ?"
-      (Only (In names))
+      \WHERE schemaname = ? AND relname IN ?"
+      (benchSchema, In names)
   pure (wal, snapRow rows)
 
 captureDbSnapshot :: Connection -> IO DbSnapshot
@@ -729,8 +736,8 @@ steadyStateTrial telemetry runM producerRunM statsConn mkSingle durationUs numPo
       instrumented
       processedCounter
       producerBatchSize
-      10
-      50_000
+      steadyProducers
+      steadyProducerDelayUs
       flavor
       durationUs
 
@@ -881,8 +888,8 @@ runGatedSteadyTrial
 runGatedSteadyTrial runM producerRunM statsConn cfgs processedCounter table mkJob durationUs = do
   batchCounter <- newIORef (0 :: Int)
   let producer = do
-        offset <- atomicModifyIORef' batchCounter (\count -> (count + 100, count))
-        producerRunM $ void $ HL.insertJobsBatch_ [mkJob (offset + index) | index <- [1 .. 100]]
+        offset <- atomicModifyIORef' batchCounter (\count -> (count + gatedProducerBatch, count))
+        producerRunM $ void $ HL.insertJobsBatch_ [mkJob (offset + index) | index <- [1 .. gatedProducerBatch]]
         producer
   (throughput, processed, snap0, snap1, trg) <-
     runMeasuredWindow
@@ -891,7 +898,7 @@ runGatedSteadyTrial runM producerRunM statsConn cfgs processedCounter table mkJo
       [table, table <> "_groups"]
       statsConn
       processedCounter
-      (map (runM . runWorkerPool) cfgs <> replicate 10 producer)
+      (map (runM . runWorkerPool) cfgs <> replicate gatedProducers producer)
       durationUs
   pure (mkGatedResult throughput processed snap0 snap1 trg)
 
@@ -918,10 +925,10 @@ hasqlGatedSteadyTrial runM producerRunM statsConn mode pools table mkJob duratio
   processedCounter <- newIORef (0 :: Int)
   cfgs <- replicateM pools $ runM $ case mode of
     BenchSingleJobMode ->
-      transactionalWorkerConfig 10 $ \(_conn :: Hasql.Connection) (_job :: JobRead payload) ->
+      transactionalWorkerConfig gatedWorkers $ \(_conn :: Hasql.Connection) (_job :: JobRead payload) ->
         countProcessed processedCounter
     BenchBatchedJobsMode batchSize ->
-      batchedWorkerConfig 10 batchSize $ \(jobs :: NonEmpty (JobRead payload)) callbacks -> do
+      batchedWorkerConfig gatedWorkers batchSize $ \(jobs :: NonEmpty (JobRead payload)) callbacks -> do
         ackAll callbacks (toList jobs)
         countProcessedN processedCounter (length jobs)
   runGatedSteadyTrial runM producerRunM statsConn (map benchTune cfgs) processedCounter table mkJob durationUs
@@ -929,6 +936,18 @@ hasqlGatedSteadyTrial runM producerRunM statsConn mode pools table mkJob duratio
 -- | Pools per gated trial. One dispatcher claims for each pool.
 gatedPools :: Int
 gatedPools = 1
+
+-- | Handler threads per gated pool.
+gatedWorkers :: Int
+gatedWorkers = 10
+
+-- | Concurrent producer threads in a gated trial.
+gatedProducers :: Int
+gatedProducers = 10
+
+-- | Jobs per gated producer insert.
+gatedProducerBatch :: Int
+gatedProducerBatch = 100
 
 -- | Pools for the wide single-mode cell, so several dispatchers claim at once.
 gatedPoolsWide :: Int
@@ -1024,8 +1043,9 @@ main = do
   -- Suppress "index does not exist, skipping" NOTICEs.
   execute_ statsConn "SET client_min_messages = WARNING"
   -- Keep autovacuum off the shared gated tables.
-  execute_ statsConn "ALTER TABLE arbiter.arbiter_concurrency SET (autovacuum_enabled = false)"
-  execute_ statsConn "ALTER TABLE arbiter.arbiter_rate_limits SET (autovacuum_enabled = false)"
+  traverse_
+    (\table -> execute_ statsConn ("ALTER TABLE " <> benchSchema <> "." <> table <> " SET (autovacuum_enabled = false)"))
+    ["arbiter_concurrency", "arbiter_rate_limits" :: Text]
   [Only trackSetting] <- PG.query_ statsConn "SHOW track_functions"
   when (trackSetting /= ("all" :: Text))
     $ putStrLn
@@ -1128,11 +1148,7 @@ mkWorkerBenches simpleEnv trial =
   [ bgroup (poolLabel pools <> " x " <> show workers <> " workers") $
       mkWorkerFlavorBenches simpleEnv trial pools workers defaultFlavors
   | (pools, workers) <-
-      [ -- (1, 5)
-        (4, 10)
-        -- , (1, 20)
-        -- , (4, 20)
-      ]
+      [(4, 10)]
   ]
   where
     poolLabel :: Int -> String
@@ -1142,12 +1158,9 @@ mkWorkerBenches simpleEnv trial =
     defaultFlavors =
       [ ("ungrouped", Ungrouped)
       , ("ungrouped (dormant)", UngroupedDormant)
-      , -- , ("10 groups", Grouped 10)
-        ("50000 groups", Grouped 50000)
+      , ("50000 groups", Grouped 50000)
       , ("50000 groups (scheduled + backoff)", GroupedBacklog 50000)
       , ("50000 groups (dormant)", GroupedDormant 50000)
-      -- , ("200000 groups", Grouped 200000)
-      -- , ("mixed (50000 groups + ungrouped)", Mixed 50000)
       ]
 
 mkWorkerFlavorBenches

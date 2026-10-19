@@ -26,7 +26,13 @@ import Arbiter.Core.Codec (archiveRowCodec, codecColumns, jobRowCodec, joinColum
 import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueArchiveTable, jobQueueTable)
 import Arbiter.Core.Job.Types (JobRead, Stored)
 import Arbiter.Core.Sql.Insert (RowEdit (..), editJoin)
-import Arbiter.Core.Sql.Jobs (countWhereSQL, enqueuedAgainCols, enqueuedAgainValsEditing, jobColsExceptId, jobColumns)
+import Arbiter.Core.Sql.Jobs
+  ( countWhereSQL
+  , enqueuedAgainCols
+  , enqueuedAgainValsEditing
+  , jobColsExceptId
+  , jobReadColumns
+  )
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, rows)
 import Arbiter.Core.SqlLiterals (intLiteral)
@@ -71,16 +77,12 @@ updateArchiveResultsBatchSQL schemaName tableName jobIds results =
         WHERE archive_row.job_id = src.job_id
       |]
 
--- | Per-queue cap on archived jobs purged in one reaper pass.
-archivePurgeBatch :: Int
-archivePurgeBatch = 10000
-
 -- | Delete a bounded batch of archived jobs whose per-row @archive_expires_at@ has passed.
-purgeArchiveSQL :: SchemaName -> TableName -> Text
-purgeArchiveSQL schemaName tableName =
+purgeArchiveSQL :: SchemaName -> TableName -> Int -> Query ()
+purgeArchiveSQL schemaName tableName limit =
   let archiveTbl = jobQueueArchiveTable schemaName tableName
-      lim = intLiteral archivePurgeBatch
-   in [text|
+      lim = intLiteral limit
+   in [sql|
         DELETE FROM ${archiveTbl}
         WHERE ctid IN (
           SELECT ctid FROM ${archiveTbl}
@@ -138,5 +140,5 @@ reEnqueueFromArchiveSQL schemaName tableName archiveId edit =
           SELECT ${vals}
           FROM ${archiveTbl} ${joinedEdit}
           WHERE id = #{archiveId :: CInt8}
-          RETURNING ${jobColumns}
+          RETURNING ${jobReadColumns}
         |]

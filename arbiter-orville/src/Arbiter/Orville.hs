@@ -1,16 +1,16 @@
 -- | Convenience re-exports for the @orville-postgresql@ backend.
 --
 -- @
--- import Arbiter.Core
--- import Arbiter.Orville
+-- import Arbiter.Core qualified as Arb
+-- import Arbiter.Orville qualified as ArbO
 -- import Control.Monad (void)
 -- import Orville.PostgreSQL (MonadOrville)
 -- import UnliftIO (MonadUnliftIO)
 --
 -- enqueue :: (MonadOrville m, MonadUnliftIO m) => m ()
 -- enqueue =
---   runOrvilleDb \@MyRegistry OrvilleEnv {schema = "arbiter", listener = Nothing} $
---     void $ insertJob (defaultJob myPayload)
+--   ArbO.runOrvilleDb \@MyRegistry ArbO.OrvilleEnv {ArbO.schema = "arbiter", ArbO.listener = Nothing} $
+--     void $ Arb.insertJob (Arb.defaultJob myPayload)
 -- @
 --
 -- "Arbiter.Orville.MonadArbiter" has the primitives for an application's own instance.

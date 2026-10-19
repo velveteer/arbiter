@@ -3,12 +3,12 @@
 -- | The postgresql-simple database monad with a built-in 'MonadArbiter' instance:
 --
 -- @
--- import Arbiter.Core
--- import Arbiter.Simple
+-- import Arbiter.Core qualified as Arb
+-- import Arbiter.Simple qualified as ArbS
 -- import Control.Monad (void)
 --
--- myFunction :: SimpleDb MyRegistry IO ()
--- myFunction = void $ insertJob (defaultJob myPayload)
+-- myFunction :: ArbS.SimpleDb MyRegistry IO ()
+-- myFunction = void $ Arb.insertJob (Arb.defaultJob myPayload)
 -- @
 module Arbiter.Simple.SimpleDb
   ( -- * Database monad
@@ -118,10 +118,11 @@ runSimpleDb env = runDb env . unSimpleDb
 --
 -- @
 -- import Arbiter.Core qualified as Arb
+-- import Arbiter.Simple qualified as ArbS
 --
 -- PG.withTransaction conn $ do
 --   PG.execute conn \"INSERT INTO orders ...\" params
---   inTransaction \@MyRegistry conn \"arbiter\" $
+--   ArbS.inTransaction \@MyRegistry conn \"arbiter\" $
 --     Arb.insertJob (Arb.defaultJob (ProcessOrder orderId))
 -- @
 inTransaction

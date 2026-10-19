@@ -65,6 +65,7 @@ library
 
   other-modules:
     Arbiter.Test.Worker.Rows
+
   build-depends:
     , aeson                 >=2.2  && <2.3
     , arbiter-core          >=0.1  && <0.2

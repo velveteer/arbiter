@@ -79,8 +79,8 @@ export const EventsView = {
               <span v-else class="text-muted">{{ e.job_id || EMPTY }}</span>
             </td>
           </tr>
-          <tr v-if="matched.length > shown.length"><td colspan="4" class="text-muted text-center">The newest {{ shown.length }} of {{ matched.length }}. Filter by queue to see more.</td></tr>
-          <tr v-if="!shown.length"><td colspan="4" class="text-muted text-center">{{ STATE_TEXT[app.sseState][1] }}</td></tr>
+          <tr v-if="matched.length > shown.length"><td :colspan="COLS.length" class="text-muted text-center">The newest {{ shown.length }} of {{ matched.length }}. Filter by queue to see more.</td></tr>
+          <tr v-if="!shown.length"><td :colspan="COLS.length" class="text-muted text-center">{{ STATE_TEXT[app.sseState][1] }}</td></tr>
         </tbody>
       </table>
     </div>`,

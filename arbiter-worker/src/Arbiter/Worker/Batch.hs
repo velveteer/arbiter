@@ -62,7 +62,6 @@ import Data.Ord (Down (..))
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
 
 import Arbiter.Worker.Heartbeat.Guard (Batch (..), HeartbeatGuard, guardBatch, guardKey, trySync)
@@ -652,7 +651,7 @@ classifyException exception
   | Just (BranchCancel (BranchCancelException msg)) <- fromException exception = (msg, BranchCancelFailure)
   | Just (ParsingException msg) <- fromException exception = (msg, PermanentFailure)
   | Just (JobDeadlineExceeded msg) <- fromException exception = (msg, RetryFailure)
-  | otherwise = (T.pack (show exception), RetryFailure)
+  | otherwise = (displayEx exception, RetryFailure)
 
 -- | Whether a failure deletes a job tree or updates the job claim.
 cancelsTree :: FailureKind -> Bool

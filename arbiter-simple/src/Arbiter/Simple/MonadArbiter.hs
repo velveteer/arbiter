@@ -5,17 +5,18 @@
 -- inside the worker transaction:
 --
 -- @
--- import Arbiter.Simple.MonadArbiter
+-- import Arbiter.Core qualified as Arb
+-- import Arbiter.Simple qualified as ArbS
 -- import Database.PostgreSQL.Simple (Connection)
 --
--- instance MonadArbiter MyApp where
+-- instance Arb.MonadArbiter MyApp where
 --   type RegistryOf MyApp = MyRegistry
 --   type Handler MyApp job result = Connection -> job -> MyApp result
 --   getSchema                = asks appSchema
---   executeQuery             = simpleExecuteQuery
---   executeStatement         = simpleExecuteStatement
---   withDbTransaction        = simpleWithDbTransaction
---   runHandlerWithConnection = simpleRunHandlerWithConnection
+--   executeQuery             = ArbS.simpleExecuteQuery
+--   executeStatement         = ArbS.simpleExecuteStatement
+--   withDbTransaction        = ArbS.simpleWithDbTransaction
+--   runHandlerWithConnection = ArbS.simpleRunHandlerWithConnection
 --   getListener              = asks appListener
 -- @
 --
@@ -36,7 +37,15 @@ module Arbiter.Simple.MonadArbiter
   ) where
 
 import Arbiter.Core.Backend (HasPoolState, pinConnection, withConn, withSavepointTransaction)
-import Arbiter.Core.MonadArbiter hiding (Query (..))
+import Arbiter.Core.MonadArbiter
+  ( Col (..)
+  , NullCol (..)
+  , ParamType (..)
+  , SomeParam (..)
+  , Stored (..)
+  , runCodec
+  , storedBytes
+  )
 import Arbiter.Core.MonadArbiter qualified as MA
 import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)

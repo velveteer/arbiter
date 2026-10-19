@@ -22,7 +22,7 @@ import Arbiter.Core.Admission (effectivePolicyCol)
 import Arbiter.Core.Concurrency.Schema (arbiterConcurrencyPoliciesTable, arbiterConcurrencyTable)
 import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueGroupsTable, jobQueueTable)
 import Arbiter.Core.RateLimit.Schema (arbiterRateLimitPoliciesTable, arbiterRateLimitsTable, bucketSeedInsert)
-import Arbiter.Core.Sql.Jobs (claimablePred, jobColumns)
+import Arbiter.Core.Sql.Jobs (claimablePred, jobReadColumns)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen)
 import Arbiter.Core.Sql.RateLimit (defaultThrottleWaitSeconds, refilledExpr)
@@ -461,6 +461,14 @@ judgedCte admission rlPolicies concJoin rlJoin =
         ),
       |]
 
+-- | The share of a denied job's wait that its defer adds at most as jitter.
+deferJitterShare :: Double
+deferJitterShare = 0.5
+
+-- | The most jitter a denied job's defer adds, in seconds.
+maxDeferJitterSeconds :: Double
+maxDeferJitterSeconds = 2.0
+
 -- | Rate-limit spend. Debits each held bucket by the cost admitted by every gate, only
 -- where that cost is above 0, banks the accrued refill, then computes a jittered defer
 -- time for denied jobs whose bucket this claim holds. A stale-leased job on a count row
@@ -468,6 +476,8 @@ judgedCte admission rlPolicies concJoin rlJoin =
 rlSpendCtes :: ClaimAdmission -> Text -> Text
 rlSpendCtes admission buckets =
   let fallback = doubleLiteral defaultThrottleWaitSeconds
+      jitterShare = doubleLiteral deferJitterShare
+      maxJitter = doubleLiteral maxDeferJitterSeconds
       admit = admitExpr admission
       deferGuard = mwhen (admitConcurrent admission) " AND (claimed_by IS NULL OR concurrency_key IS NULL OR pool_held)"
       -- Time to accrue the token deficit when the policy refills, else one
@@ -496,7 +506,7 @@ rlSpendCtes admission buckets =
         ),
         rl_deferred AS (
           SELECT id,
-            NOW() + ((wait + random() * LEAST(wait * 0.5, 2.0))
+            NOW() + ((wait + random() * LEAST(wait * ${jitterShare}, ${maxJitter}))
                      * interval '1 second') AS defer_until
           FROM (
             SELECT judged.id, GREATEST(${rlWaitExpr}, 0) AS wait
@@ -545,7 +555,7 @@ claimStatement admission tbl timeout ctes claimant =
         WITH
         ${ctes}
         ${claimed}
-        SELECT ${jobColumns} FROM claimed${admitFilter} ORDER BY priority ASC, id ASC
+        SELECT ${jobReadColumns} FROM claimed${admitFilter} ORDER BY priority ASC, id ASC
       |]
 
 -- | The @claimed@ UPDATE. Under rate limiting a deferred row moves its claim token

@@ -14,6 +14,7 @@ module Arbiter.Worker.Cron.Scheduler
   ) where
 
 import Arbiter.Core.CronSchedule qualified as CS
+import Arbiter.Core.Enum (showText)
 import Arbiter.Core.Exceptions (displayEx)
 import Arbiter.Core.HighLevel (QueueOperation)
 import Arbiter.Core.HighLevel qualified as HL
@@ -38,6 +39,7 @@ import UnliftIO
   , atomically
   , checkSTM
   , liftIO
+  , orElse
   , readTVar
   , registerDelay
   , tryAny
@@ -69,8 +71,8 @@ initCronSchedules logCfg queueName jobs = do
       (overlapPolicyToText (overlap cron))
       (timezone cron)
       (initiallyEnabled cron)
-  liftIO . tryLog logCfg Info $
-    "Cron schedules initialized: " <> T.pack (show (length jobs)) <> " schedule(s) upserted"
+  tryLog logCfg Info $
+    "Cron schedules initialized: " <> showText (length jobs) <> " schedule(s) upserted"
 
 -- | Scheduler entry point. Exits when the worker state becomes 'ShuttingDown'.
 runCronScheduler
@@ -89,24 +91,23 @@ runCronScheduler logCfg stateVar runNowVar schemaName queueName jobs = do
   cronLog <- newCronLog logCfg
   startupNow <- liftIO getCurrentTime
   shuttingDown <- atomically (isShuttingDown stateVar)
-  unless shuttingDown $ do
-    processRunRequests cronLog schemaName jobs startupNow
-    processCronCatchUp cronLog schemaName queueName jobs startupNow
-  logCron cronLog Info $ "Cron scheduler started with " <> T.pack (show (length jobs)) <> " schedule(s)"
+  unless shuttingDown $ catchUp cronLog startupNow
+  logCron cronLog Info $ "Cron scheduler started with " <> showText (length jobs) <> " schedule(s)"
   loop cronLog
   where
+    catchUp cronLog now = do
+      processRunRequests cronLog schemaName jobs now
+      processCronCatchUp cronLog schemaName queueName jobs now
     loop cronLog = do
       now <- liftIO getCurrentTime
-      timerVar <- liftIO $ registerDelay (computeDelayMicros now)
+      timerVar <- registerDelay (computeDelayMicros now)
       serve cronLog timerVar
     serve cronLog timerVar = do
       wake <- waitForWake stateVar runNowVar timerVar
       case wake of
         WakeShutdown -> pure ()
         WakeMinute -> do
-          now <- liftIO getCurrentTime
-          processRunRequests cronLog schemaName jobs now
-          processCronCatchUp cronLog schemaName queueName jobs now
+          liftIO getCurrentTime >>= catchUp cronLog
           loop cronLog
         WakeRunNow -> do
           now <- liftIO getCurrentTime
@@ -133,34 +134,21 @@ processCronCatchUp cronLog schemaName queueName jobs now = traverse_ processOneC
   where
     currentTick = truncateToMinute now
     processOneCron cron = do
-      void $ tryCron cronLog ("Cron '" <> name cron <> "' tick") $ do
+      void $ tryCron cronLog (cronLabel cron <> " tick") $ do
         mRow <- Ops.getCronScheduleByName schemaName (name cron)
         completed <- processOne mRow cron
         when completed $ void $ Ops.touchCronChecked schemaName [name cron] currentTick
     processOne mRow cron = case resolveAndParse cron mRow of
       Disabled -> pure True
-      ParseError expr err -> do
-        logCron cronLog Error $
-          "Cron schedule '"
-            <> name cron
-            <> "' has invalid effective expression '"
-            <> expr
-            <> "': "
-            <> T.pack err
-        pure True
-      InvalidTimezone tzName -> do
-        logCron cronLog Error $
-          "Cron schedule '"
-            <> name cron
-            <> "' has unknown timezone '"
-            <> tzName
-            <> "'"
-        pure True
+      ParseError expr err ->
+        True <$ logCron cronLog Error (cronLabel cron <> " has invalid effective expression '" <> expr <> "': " <> T.pack err)
+      InvalidTimezone tzName ->
+        True <$ logCron cronLog Error (cronLabel cron <> " has unknown timezone '" <> tzName <> "'")
       Effective effectiveOv sched effectiveTz -> do
         let ticksInWindow = enumerateCatchUpTicks (backfill cron) (mRow >>= CS.lastCheckedAt) currentTick
             ticksToFire = filter (matchesInTimezone effectiveTz sched) ticksInWindow
             fireTick tick = do
-              result <- tryCron cronLog ("Cron '" <> name cron <> "' insert") . withDbTransaction $ do
+              result <- tryCron cronLog (cronLabel cron <> " insert") . withDbTransaction $ do
                 haveLeader <- case backfill cron of
                   NoBackfill -> pure True
                   Backfill _ -> Ops.tryAcquireCronLeader schemaName queueName (name cron)
@@ -169,8 +157,8 @@ processCronCatchUp cronLog schemaName queueName jobs now = traverse_ processOneC
                   else pure TickNoLeader
               let outcome = fromRight TickFailed result
               case outcome of
-                TickHandled _ -> logCron cronLog Debug $ "Cron schedule '" <> name cron <> "' processed at " <> formatMinute tick
-                TickNoLeader -> logCron cronLog Debug $ "Cron '" <> name cron <> "' skipped, another pool holds the lock"
+                TickHandled _ -> logCron cronLog Debug $ cronLabel cron <> " processed at " <> formatMinute tick
+                TickNoLeader -> logCron cronLog Debug $ cronLabel cron <> " skipped, another pool holds the lock"
                 TickFailed -> pure ()
               pure outcome
             replayedBy tick outcome = if tick /= currentTick && outcome == TickHandled True then 1 else 0
@@ -186,7 +174,7 @@ processCronCatchUp cronLog schemaName queueName jobs now = traverse_ processOneC
           SkipOverlap -> runTicks (/= TickFailed)
         when (replayed > 0)
           $ logCron cronLog Info
-          $ "Replayed " <> T.pack (show replayed) <> " missed tick(s) for '" <> name cron <> "'"
+          $ cronLabel cron <> " replayed " <> showText replayed <> " missed tick(s)"
         pure $ case (lastOutcome, backfill cron) of
           (TickHandled _, _) -> True
           (TickFailed, NoBackfill) -> True
@@ -285,12 +273,12 @@ processRunRequests cronLog schemaName jobs now = do
         maybe (pure NotRequested) (fireClaimed cron) claimed
       case outcome of
         Left exception ->
-          logCron cronLog Error $ "Cron '" <> name cron <> "' run-now aborted: " <> displayEx exception
+          logCron cronLog Error $ cronLabel cron <> " run-now aborted: " <> displayEx exception
         Right NotRequested -> pure ()
         Right Fired ->
-          logCron cronLog Info $ "Cron '" <> name cron <> "' run-now fired at " <> formatMinute tick
+          logCron cronLog Info $ cronLabel cron <> " run-now fired at " <> formatMinute tick
         Right Skipped ->
-          logCron cronLog Warning $ "Cron '" <> name cron <> "' run-now skipped, a job is already active"
+          logCron cronLog Warning $ cronLabel cron <> " run-now skipped, a job is already active"
     fireClaimed cron row = do
       let key = case effectiveOverlapFor cron row of
             SkipOverlap -> Just (IgnoreDuplicate (skipOverlapKey (name cron)))
@@ -312,6 +300,10 @@ data CronLog = CronLog
 -- | A 'CronLog' with no gate tripped, for one scheduler run.
 newCronLog :: (MonadIO m) => LogConfig -> m CronLog
 newCronLog logCfg = CronLog logCfg <$> newFailureGates
+
+-- | A schedule's name as a log prefix.
+cronLabel :: CronJob payload -> Text
+cronLabel cron = "Cron '" <> name cron <> "'"
 
 -- | Log a cron message, swallowing logger failures.
 logCron :: (MonadIO m) => CronLog -> LogLevel -> Text -> m ()
@@ -350,18 +342,13 @@ data WakeReason = WakeShutdown | WakeMinute | WakeRunNow
 -- | Block until @timerVar@ elapses, a run-now signal arrives, or shutdown.
 -- Shutdown wins, then an elapsed minute boundary, then a pending run-now.
 waitForWake :: (MonadIO m) => TVar WorkerState -> TVar Bool -> TVar Bool -> m WakeReason
-waitForWake stateVar runNowVar timerVar = liftIO . atomically $ do
+waitForWake stateVar runNowVar timerVar = atomically $ do
   state <- readTVar stateVar
   case state of
     ShuttingDown -> pure WakeShutdown
     _ -> do
-      timedOut <- readTVar timerVar
-      reason <-
-        if timedOut
-          then pure WakeMinute
-          else do
-            requested <- readTVar runNowVar
-            checkSTM requested
-            pure WakeRunNow
+      reason <- (WakeMinute <$ awaitSet timerVar) `orElse` (WakeRunNow <$ awaitSet runNowVar)
       writeTVar runNowVar False
       pure reason
+  where
+    awaitSet var = readTVar var >>= checkSTM

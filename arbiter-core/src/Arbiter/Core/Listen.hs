@@ -211,6 +211,10 @@ baseBackoff, maxBackoff :: Int
 baseBackoff = 1 * microsPerSecond
 maxBackoff = 30 * microsPerSecond
 
+-- | The factor that each failed reconnect applies to the backoff.
+backoffFactor :: Int
+backoffFactor = 2
+
 -- | Uptime past which a failure restarts backoff at the base.
 stableSeconds :: Double
 stableSeconds = 30
@@ -238,7 +242,7 @@ hubLoop listener hub = newFailureGate >>= go baseBackoff
       worth <- holdFailure gate repeatAfter msg
       when worth $ reportFailure gate msg
       threadDelay backoff
-      go (if uptime >= stableSeconds then baseBackoff else min maxBackoff (backoff * 2)) gate
+      go (if uptime >= stableSeconds then baseBackoff else min maxBackoff (backoff * backoffFactor)) gate
     -- Not held when it reached no one.
     reportFailure gate msg =
       logHub hubError hub msg >>= \sent -> unless sent (void (clearFailure gate))

@@ -10,6 +10,7 @@ module Arbiter.Core.Job.Dedup
   , dedupParts
   , dedupFromParts
   , dedupStrategyText
+  , isReplaceDuplicate
   , dedupFromStrategy
   ) where
 
@@ -45,6 +46,11 @@ instance FromJSON DedupKey where
 dedupStrategyText :: DedupKey -> Text
 dedupStrategyText IgnoreDuplicate {} = "ignore"
 dedupStrategyText ReplaceDuplicate {} = "replace"
+
+-- | Whether a job's dedup key replaces a duplicate.
+isReplaceDuplicate :: Maybe DedupKey -> Bool
+isReplaceDuplicate (Just ReplaceDuplicate {}) = True
+isReplaceDuplicate _ = False
 
 -- | The 'DedupKey' constructor for a @dedup_strategy@ text.
 dedupFromStrategy :: Text -> Maybe (Text -> DedupKey)

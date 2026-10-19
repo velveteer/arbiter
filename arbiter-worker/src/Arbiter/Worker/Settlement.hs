@@ -192,8 +192,8 @@ ackOrGone statements job = do
     throwJobGoneIds reclaimedReason [Job.primaryKey job]
 
 -- | The job's own attempt budget, or the default.
-jobMaxAtts :: Job.JobRead payload -> Int32
-jobMaxAtts job = fromMaybe Job.defaultMaxAttempts (Job.maxAttempts job)
+jobMaxAttempts :: Job.JobRead payload -> Int32
+jobMaxAttempts job = fromMaybe Job.defaultMaxAttempts (Job.maxAttempts job)
 
 -- | What the consumer span over this batch covers. A batch of one narrows it to
 -- that job.
@@ -262,7 +262,7 @@ handleJobFailure
 handleJobFailure config locks (errorMsg, failureKind) job
   -- A batch sibling's cancel takes out the whole tree. Zero rows still means gone.
   | cancelsTree failureKind = Right . TreeCancelled <$> cancelJobFor failureKind job
-  | failureKind == PermanentFailure || Job.attempts job >= jobMaxAtts job = do
+  | failureKind == PermanentFailure || Job.attempts job >= jobMaxAttempts job = do
       schemaName <- getSchema
       wrote "no longer available for the dead-letter queue" DeadLettered
         <$> Ops.moveToDLQ locks schemaName (Job.queueName job) errorMsg job

@@ -9,7 +9,7 @@ import Arbiter.Core.Exceptions (displayEx)
 import Arbiter.Core.Threads (labelArbiterThread)
 import Control.Monad (unless)
 import Control.Monad.Trans.Cont (ContT (..))
-import Data.Text qualified as T
+import Data.Text (Text)
 import UnliftIO (MonadUnliftIO, liftIO, tryAny)
 import UnliftIO.Async (Async, race, withAsync)
 import UnliftIO.Concurrent (threadDelay)
@@ -27,9 +27,9 @@ spawnRetried
   :: (MonadUnliftIO m)
   => TVar WorkerState
   -> LogConfig
-  -> T.Text
+  -> Text
   -- ^ The queue this thread serves, for its RTS label.
-  -> T.Text
+  -> Text
   -- ^ Label for log messages, and the role in its RTS label.
   -> m ()
   -- ^ Action to run.

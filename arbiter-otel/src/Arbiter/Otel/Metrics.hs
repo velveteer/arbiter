@@ -22,6 +22,7 @@ import Arbiter.Core.Job.Types
   , payloadKeys
   )
 import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
+import Arbiter.Core.Trace (instrumentationScope)
 import Arbiter.Worker.Config (MaintenanceOp, maintenanceOpName)
 import Control.Monad (mfilter)
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -60,7 +61,7 @@ data ArbiterMeters = ArbiterMeters
 
 -- | Arbiter's instrumentation scope, shared by every meter the project registers.
 arbiterMeter :: MeterProvider -> IO Meter
-arbiterMeter meterProvider = getMeter meterProvider "arbiter"
+arbiterMeter meterProvider = getMeter meterProvider instrumentationScope
 
 -- | Create the instruments on a meter provider.
 newArbiterMeters :: MeterProvider -> IO ArbiterMeters

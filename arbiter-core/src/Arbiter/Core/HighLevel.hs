@@ -1010,7 +1010,7 @@ countJobs
   :: forall payload m
    . (QueueOperation m payload)
   => m Int64
-countJobs = onQueue @payload $ \schemaName tableName -> Ops.countJobs schemaName tableName
+countJobs = onQueue @payload Ops.countJobs
 
 -- | Count a group's jobs.
 countJobsByGroup
@@ -1035,7 +1035,7 @@ countDLQJobs
   :: forall payload m
    . (QueueOperation m payload)
   => m Int64
-countDLQJobs = onQueue @payload $ \schemaName tableName -> Ops.countDLQJobs schemaName tableName
+countDLQJobs = onQueue @payload Ops.countDLQJobs
 
 -- | Child counts as @(total, suspended)@ per parent id, over a batch. Parents with none
 -- are absent.

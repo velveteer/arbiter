@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# OPTIONS_HADDOCK not-home #-}
 
@@ -98,10 +99,16 @@ resumeChildrenSQL schemaName tableName parentId =
 -- The walk does not deduplicate.
 descendantsFromCte :: Text -> Query () -> Query ()
 descendantsFromCte tbl seed =
+  let walk = descendantsAs tbl "UNION ALL" seed
+   in [sql|WITH RECURSIVE ${walk}|]
+
+-- | The @descendants@ CTE body. @setOp@ joins the seed rows and each step down.
+descendantsAs :: Text -> Text -> Query () -> Query ()
+descendantsAs tbl setOp seed =
   [sql|
-    WITH RECURSIVE descendants AS (
+    descendants AS (
       SELECT id FROM ${tbl} WHERE ${seed}
-      UNION ALL
+      ${setOp}
       SELECT job.id FROM ${tbl} job JOIN descendants descendant ON job.parent_id = descendant.id
     )
   |]
@@ -176,13 +183,8 @@ rootsFromCte tbl seed =
 -- locks in one pass. Deduplicating.
 descendantsOfCte :: Text -> [Int64] -> Query ()
 descendantsOfCte tbl jobIds =
-  [sql|
-    WITH RECURSIVE descendants AS (
-      SELECT id FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]})
-      UNION
-      SELECT job.id FROM ${tbl} job JOIN descendants descendant ON job.parent_id = descendant.id
-    )
-  |]
+  let walk = descendantsAs tbl "UNION" [sql|id = ANY(#{jobIds :: [CInt8]})|]
+   in [sql|WITH RECURSIVE ${walk}|]
 
 -- | Lock the named jobs and all their descendants, several trees in one pass. Locks rows
 -- in descending id order. Then lock the group summaries of the rows and their parents.
@@ -225,15 +227,12 @@ lockJobTreesFromRootSQL :: SchemaName -> TableName -> [Int64] -> Query Int64
 lockJobTreesFromRootSQL schemaName tableName jobIds =
   let tbl = jobQueueTable schemaName tableName
       cte = rootsFromCte tbl [sql|id = ANY(#{jobIds :: [CInt8]})|]
+      walk = descendantsAs tbl "UNION" [sql|id = ANY(#{jobIds :: [CInt8]}) OR id IN (SELECT id FROM roots)|]
       locked = lockDescendantsCte tbl
       groups = lockTreeGroupsCte tbl (jobQueueGroupsTable schemaName tableName)
    in [sql|
         ${cte},
-        descendants AS (
-          SELECT id FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]}) OR id IN (SELECT id FROM roots)
-          UNION
-          SELECT job.id FROM ${tbl} job JOIN descendants descendant ON job.parent_id = descendant.id
-        ),
+        ${walk},
         ${locked},
         ${groups}
         SELECT (SELECT count(*) FROM locked) AS @{count :: CInt8}
@@ -374,14 +373,11 @@ cancelJobTreeSQL :: SchemaName -> TableName -> Int64 -> Query Int64
 cancelJobTreeSQL schemaName tableName jobId =
   let tbl = jobQueueTable schemaName tableName
       cte = rootsFromCte tbl [sql|id = #{jobId :: CInt8}|]
+      walk = descendantsAs tbl "UNION ALL" [sql|id IN (SELECT id FROM roots)|]
       locked = lockDescendantsCte tbl
    in [sql|
         ${cte},
-        descendants AS (
-          SELECT id FROM ${tbl} WHERE id IN (SELECT id FROM roots)
-          UNION ALL
-          SELECT job.id FROM ${tbl} job JOIN descendants descendant ON job.parent_id = descendant.id
-        ),
+        ${walk},
         ${locked},
         deleted AS (
           DELETE FROM ${tbl} WHERE id IN (SELECT id FROM locked)

@@ -29,11 +29,11 @@ import Arbiter.Core.Codec (jobRowCodec)
 import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueDLQTable, jobQueueGroupsTable, jobQueueTable)
 import Arbiter.Core.Job.Types (JobRead, Stored)
 import Arbiter.Core.Sql.Insert (RowEdit (..), editJoin)
-import Arbiter.Core.Sql.Jobs (dlqCarriedCols, jobColumns, requeuedCols, requeuedValsEditing)
+import Arbiter.Core.Sql.Jobs (dlqCarriedCols, jobReadColumns, requeuedCols, requeuedValsEditing)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen, rows)
 import Arbiter.Core.Sql.Tree (childDescendantsCte, lockedByIdsCte)
-import Arbiter.Core.SqlLiterals (defaultMaxAttemptsSQL, intLiteral, lockGroupKeyOnConflictSQL)
+import Arbiter.Core.SqlLiterals (attemptsSpentSQL, intLiteral, lockGroupKeyOnConflictSQL)
 
 -- | Whether a DLQ move re-checks the attempt budget it was selected on.
 data DLQMove
@@ -46,9 +46,10 @@ data DLQMove
 -- | The sweep's predicate. Unsuspended, uncancelled, visible, and out of attempts.
 sweepableGuard :: Text
 sweepableGuard =
-  [text|
+  let spent = attemptsSpentSQL ""
+   in [text|
         NOT suspended AND cancel_requested_at IS NULL
-        AND attempts >= COALESCE(max_attempts, ${defaultMaxAttemptsSQL})
+        AND ${spent}
         AND (not_visible_until IS NULL OR not_visible_until <= NOW())
       |]
 
@@ -147,7 +148,7 @@ retryFromDLQSQL schemaName tableName dlqId edit =
             AND NOT suspended
             AND NOT (claimed_by IS NOT NULL AND not_visible_until IS NOT NULL AND not_visible_until > NOW())
         )
-        SELECT ${jobColumns} FROM inserted WHERE id = (SELECT job_id FROM target)
+        SELECT ${jobReadColumns} FROM inserted WHERE id = (SELECT job_id FROM target)
       |]
 
 -- | Recursive CTEs binding @root_job_id@ to the root of the DLQ tree that holds

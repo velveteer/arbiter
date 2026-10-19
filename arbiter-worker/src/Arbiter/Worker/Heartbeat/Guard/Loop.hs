@@ -13,6 +13,7 @@ module Arbiter.Worker.Heartbeat.Guard.Loop
   , trySync
   ) where
 
+import Arbiter.Core.Enum (showText)
 import Arbiter.Core.Exceptions (JobDeadlineExceeded (..), JobForceCancelled (..), JobGoneException (..), displayEx)
 import Arbiter.Core.HighLevel (SetVisibilityResult (..))
 import Arbiter.Core.Job.Types (JobId)
@@ -42,11 +43,12 @@ import Control.Monad.Class.MonadTime.SI
   )
 import Control.Monad.Class.MonadTimer.SI (MonadTimer (..))
 import Data.Foldable (for_, toList, traverse_)
+import Data.List.NonEmpty (nonEmpty)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, isNothing, mapMaybe)
 import Data.Set qualified as Set
-import Data.Text qualified as T
+import Data.Text (Text)
 import Data.Void (Void)
 import UnliftIO.Exception (isSyncException)
 
@@ -83,7 +85,7 @@ plan guard = do
   abandoned <- readTVar (guardAbandoned guard)
   entries <- snapshot guard
   let times = toList (abandonAt abandoned inFlight) <> concatMap (dueTimes inFlight) entries
-  let target = if null times then Nothing else Just (minimum times)
+  let target = minimum <$> nonEmpty times
   writeTVar (wakeTarget (guardWake guard)) target
   (,) target <$> readTVar (wakeCount (guardWake guard))
 
@@ -145,10 +147,10 @@ lapse guard woke entry = do
   when lapsed (writeTVar (guardedStatus entry) status {leaseLapsed = True})
   pure (lapsed, not (leaseLapsed status || lapsed))
 
-durationMessage :: HeartbeatGuard n job -> T.Text
+durationMessage :: HeartbeatGuard n job -> Text
 durationMessage guard =
   "claim hooks and handler ran past the maximum job duration"
-    <> foldMap ((" of " <>) . T.pack . show) (configMaxDuration (guardConfig guard))
+    <> foldMap ((" of " <>) . showText) (configMaxDuration (guardConfig guard))
 
 -- ---------------------------------------------------------------------------
 -- The extend in flight

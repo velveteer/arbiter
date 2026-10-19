@@ -92,7 +92,7 @@ import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
 import Data.UUID.Types (UUID)
 import Data.UUID.V4 qualified as UUID
 import GHC.TypeLits (KnownNat, KnownSymbol, symbolVal)
-import Network.HTTP.Types (hContentType, status200)
+import Network.HTTP.Types (hCacheControl, hContentType, status200)
 import Network.Wai (responseStream)
 import Network.Wai.Handler.Warp (Port, defaultSettings, runSettings, setPort)
 import Servant
@@ -179,6 +179,22 @@ dlqJobNotFound = "DLQ job not found"
 -- | 404 body for an archive id that matches no row.
 archivedJobNotFound :: LBS.ByteString
 archivedJobNotFound = "Archived job not found"
+
+-- | 404 body for a rate-limit prefix that matches no policy.
+rateLimitPolicyNotFound :: LBS.ByteString
+rateLimitPolicyNotFound = "Rate-limit policy not found"
+
+-- | 404 body for a cron name that matches no schedule.
+cronScheduleNotFound :: LBS.ByteString
+cronScheduleNotFound = "Cron schedule not found"
+
+-- | 404 body for a worker id that matches no registry row.
+workerNotFound :: LBS.ByteString
+workerNotFound = "Worker not found"
+
+-- | 404 body for a concurrency prefix that matches no policy.
+concurrencyPolicyNotFound :: LBS.ByteString
+concurrencyPolicyNotFound = "Concurrency policy not found"
 
 -- | Answer a handler that decided its own error.
 noContentOr :: Either ServerError () -> Handler NoContent
@@ -350,7 +366,7 @@ listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mJobId roots
 
   let childCounts = fmap fst combined
       pausedParents = Map.keys $ Map.filter (\(childTotal, childPaused) -> childPaused == childTotal) combined
-      apiJobs = map (uncurry ApiJobWithStatus) jobs
+      apiJobs = map (\(found, jobStatus) -> ApiJobWithStatus {ajwsJob = found, ajwsStatus = jobStatus}) jobs
   pure $
     JobsResponse
       { jobsPage = toPage (limit, offset) total apiJobs
@@ -377,7 +393,7 @@ insertJobHandler tableName config (ApiJobWrite jobWrite) = do
         maybe (Left vanished) Right
           <$> (Ops.getJobByDedupKey schemaName tableName duplicateKey >>= traverse Ops.typedRow)
       _ -> pure (Left blocked)
-  either throwError (pure . JobResponse) found
+  either throwError (\fresh -> pure JobResponse {job = fresh}) found
   where
     vanished = err409 {errBody = "Duplicate job was deleted before it could be read"}
     blocked = err409 {errBody = "Replace blocked: existing job is actively claimed, force-cancel flagged, or has children"}
@@ -409,7 +425,7 @@ getJobHandler
   -> Int64
   -> Handler (JobResponse (ApiJobWithStatus (Job.Stored payload)))
 getJobHandler tableName config jobId =
-  (\(found, jobStatus) -> JobResponse {job = ApiJobWithStatus found jobStatus})
+  (\(found, jobStatus) -> JobResponse {job = ApiJobWithStatus {ajwsJob = found, ajwsStatus = jobStatus}})
     <$> orNotFound config (Ops.getJobByIdWithStatus (serverSchema config) tableName jobId) jobNotFound
 
 -- | Cancel a job (delete it from the queue).
@@ -501,7 +517,6 @@ pauseChildrenHandler
   -> Int64
   -> Handler NoContent
 pauseChildrenHandler tableName config jobId =
-  -- When no child is paused, it succeeds. The children can be in flight, suspended or done. A gone parent is a 404.
   mutateChildren tableName config jobId Ops.pauseChildren
 
 -- | Resume all suspended children of a parent job.
@@ -513,7 +528,6 @@ resumeChildrenHandler
   -> Int64
   -> Handler NoContent
 resumeChildrenHandler tableName config jobId =
-  -- When no child is resumed, it succeeds. The children can be unsuspended or done. A gone parent is a 404.
   mutateChildren tableName config jobId Ops.resumeChildren
 
 -- | Suspend a job (make it unclaimable).
@@ -529,7 +543,7 @@ suspendJobHandler tableName config jobId =
   where
     refuse job _
       | Job.suspended job = "Job is already suspended"
-      | otherwise = "Job is in-flight - cannot suspend"
+      | otherwise = "Job is in flight - cannot suspend"
 
 -- | Resume a suspended job, making it claimable again. Refuses a finalizer with children
 -- still running.
@@ -716,7 +730,7 @@ statsServer
   -> StatsAPI (AsServerT Handler)
 statsServer tableName config =
   StatsAPI
-    { getStats = getStatsHandler @registry tableName (kindsFor @payload) config
+    { getStats = getStatsHandler @registry tableName config (kindsFor @payload)
     }
 
 -- | Get queue statistics.
@@ -724,10 +738,10 @@ getStatsHandler
   :: forall registry m
    . (HasRegistry m registry)
   => Text
-  -> [Text]
   -> ArbiterServerConfig m registry
+  -> [Text]
   -> Handler StatsResponse
-getStatsHandler tableName kinds config =
+getStatsHandler tableName config kinds =
   liftIO $ cachedForKey (statsCacheTtl config) (queueStatsCache config) tableName $ do
     let schemaName = serverSchema config
 
@@ -744,7 +758,7 @@ getAllStatsHandler
   -> [(Text, [Text])]
   -> Handler AllStatsResponse
 getAllStatsHandler config queueKinds =
-  cachedRead config (allQueueStatsCache config) AllStatsResponse $
+  cachedRead config (allQueueStatsCache config) (\overviews -> AllStatsResponse {queues = overviews}) $
     Ops.getAllQueueStats (serverSchema config) queueKinds
 
 -- | Table API handlers for a specific table.
@@ -823,10 +837,12 @@ claimJobsHandler tableName config req = liftIO $ do
       then pure []
       else do
         (jobs, rejected) <-
-          Ops.claimJobsCached (Ops.mkJobStatements @payload schemaName tableName 1 0 leaseSecs claimant) wanted
+          Ops.claimJobsCached
+            (Ops.mkJobStatements @payload schemaName tableName Ops.singleJobBatchSize Ops.noStagedCapacities leaseSecs claimant)
+            wanted
         traverse_ deadLetter rejected
         pure jobs
-  pure $ ClaimResponse claimed
+  pure ClaimResponse {jobs = claimed}
   where
     deadLetter rejected =
       tryReportedOn
@@ -892,29 +908,25 @@ withHeldJob
   -> JobLease
   -> (Text -> Job.JobRead (Job.Stored payload) -> m Int64)
   -> Handler NoContent
-withHeldJob tableName config jobId lease finalize = do
-  let schemaName = serverSchema config
-      held job = Job.claimedBy job == Just (jlClaimedBy lease) && Job.claimSeq job == jlClaimSeq lease
-      refuse body = Left err409 {errBody = body}
-
-  result <- runDb config $ do
-    mJob <- Ops.getJobById @_ @payload schemaName tableName jobId
-    case mJob of
-      Nothing -> pure $ Left err404 {errBody = jobNotFound}
-      Just job
-        | not (held job) -> pure $ refuse "Job is not held by this lease"
-        | otherwise -> do
-            pooled <- Ops.workerRegistered schemaName (jlClaimedBy lease)
-            if pooled
-              then pure $ refuse "Job is held by a registered worker"
-              else do
-                rowsAffected <- finalize schemaName job
-                pure $
-                  if rowsAffected > 0
-                    then Right ()
-                    else refuse (if Job.suspended job then "Job is suspended" else "Lease no longer held")
-
-  noContentOr result
+withHeldJob tableName config jobId lease finalize =
+  noContentOr
+    =<< runDb config (Ops.getJobById @_ @payload schemaName tableName jobId >>= maybe (pure notFound) finalizeHeld)
+  where
+    schemaName = serverSchema config
+    notFound = Left err404 {errBody = jobNotFound}
+    refuse body = Left err409 {errBody = body}
+    held job = Job.claimedBy job == Just (jlClaimedBy lease) && Job.claimSeq job == jlClaimSeq lease
+    finalizeHeld job
+      | not (held job) = pure (refuse "Job is not held by this lease")
+      | otherwise = do
+          pooled <- Ops.workerRegistered schemaName (jlClaimedBy lease)
+          if pooled
+            then pure (refuse "Job is held by a registered worker")
+            else decide job <$> finalize schemaName job
+    decide job rowsAffected
+      | rowsAffected > 0 = Right ()
+      | Job.suspended job = refuse "Job is suspended"
+      | otherwise = refuse "Lease no longer held"
 
 -- | Maintenance API handler.
 maintenanceServer
@@ -945,7 +957,7 @@ maintenanceHandler config = liftIO $ do
     runDb config $
       runMaintenancePass (serverLogConfig config) report pace (maintenanceTimeout config)
   ops <- readIORef touched
-  pure $ MaintenanceResponse ops (map maintenanceOpName failed)
+  pure MaintenanceResponse {maintenanceOps = ops, maintenanceFailed = map maintenanceOpName failed}
 
 -- | Queues API handler.
 queuesServer
@@ -1009,8 +1021,8 @@ eventsServer config = Tagged $ \_req sendResponse -> do
             pump
   where
     sseHeaders =
-      [ ("Content-Type", "text/event-stream")
-      , ("Cache-Control", "no-cache")
+      [ (hContentType, "text/event-stream")
+      , (hCacheControl, "no-cache")
       , ("Connection", "keep-alive")
       , ("X-Accel-Buffering", "no")
       ]
@@ -1131,7 +1143,7 @@ setWorkerPausedHandler
   -> UUID
   -> Handler NoContent
 setWorkerPausedHandler config pauseFlag workerId =
-  mutateOr404 config "Worker not found" $ \schemaName -> Ops.setWorkerPaused schemaName workerId pauseFlag
+  mutateOr404 config workerNotFound $ \schemaName -> Ops.setWorkerPaused schemaName workerId pauseFlag
 
 -- | Rate-limit management/observability handlers.
 rateLimitsServer
@@ -1290,7 +1302,7 @@ listRateLimitsHandler config =
     (\views -> RateLimitPoliciesResponse {policies = views})
     HL.listRateLimitPolicies
 
--- | List a prefix's buckets with fill levels, paginated (default 100, max 1000).
+-- | List a prefix's buckets with fill levels, paginated.
 listRateLimitBucketsHandler
   :: forall registry m
    . (HasRegistry m registry)
@@ -1320,14 +1332,6 @@ orNotFound
   -> Handler a
 orNotFound config action notFound =
   runDb config action >>= maybe (throwError err404 {errBody = notFound}) pure
-
--- | 404 body for a rate-limit prefix that matches no policy.
-rateLimitPolicyNotFound :: LBS.ByteString
-rateLimitPolicyNotFound = "Rate-limit policy not found"
-
--- | 404 body for a cron name that matches no schedule.
-cronScheduleNotFound :: LBS.ByteString
-cronScheduleNotFound = "Cron schedule not found"
 
 -- | Set or clear a policy's override params, then return the updated view.
 updateRateLimitPolicyHandler
@@ -1428,7 +1432,7 @@ listConcurrencyHandler config =
     (\views -> ConcurrencyPoliciesResponse {policies = views})
     HL.listConcurrencyPolicies
 
--- | List a prefix's keys with in-flight fill levels, paginated (default 100, max 1000).
+-- | List a prefix's keys with in-flight fill levels, paginated.
 listConcurrencyKeysHandler
   :: forall registry m
    . (HasRegistry m registry)
@@ -1452,7 +1456,7 @@ updateConcurrencyPolicyHandler config prefix upd@(ConcurrencyPolicyUpdate mLimit
   -- An absent overrideLimit reads the view without rewriting the row.
   let action = when (isJust mLimit) (void (HL.updateConcurrencyPolicyOverrides prefix upd)) >> HL.getConcurrencyPolicy prefix
   invalidating (concurrencyPoliciesCache config) $
-    orNotFound config action "Concurrency policy not found"
+    orNotFound config action concurrencyPolicyNotFound
 
 -- | Recompute every key's in-flight count from live jobs. Returns rows repaired.
 reconcileConcurrencyHandler

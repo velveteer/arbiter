@@ -103,13 +103,13 @@ insertJobTree schemaName tableName tree =
   withPublishSpan tableName (treeWrites tree) $ do
     inserted <- UE.try $ do
       stamp <- Ops.traceStamp
-      withDbTransaction $ go stamp Nothing (rootSuspended tree) tree
+      -- A finalizer root waits suspended for its children.
+      withDbTransaction $ go stamp Nothing (not (isLeaf tree)) tree
     either (\(TreeInsertFailed msg) -> Left msg <$ markSpanError msg) (pure . Right) inserted
   where
-    -- Finalizer roots are suspended (waiting for children to complete).
-    rootSuspended :: JobTree payload -> Bool
-    rootSuspended (Finalizer _ _) = True
-    rootSuspended _ = False
+    isLeaf :: JobTree payload -> Bool
+    isLeaf (Leaf _) = True
+    isLeaf _ = False
 
     treeWrites :: JobTree payload -> [JobWrite payload]
     treeWrites (Leaf job) = [job]
@@ -152,6 +152,3 @@ insertJobTree schemaName tableName tree =
           subTreeJobs <- go stamp (Just parentPK) True subTree
           remaining <- insertChildren parentPK rest
           pure (NE.toList subTreeJobs <> remaining)
-
-        isLeaf (Leaf _) = True
-        isLeaf _ = False

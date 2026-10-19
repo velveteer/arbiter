@@ -12,7 +12,6 @@ module Arbiter.Worker.Logger.Internal
   , tryWarnWith
   ) where
 
-import Arbiter.Core.Exceptions (displayEx)
 import Arbiter.Core.Job.Types qualified as Job
 import Control.Monad (void)
 import Data.Aeson (KeyValue (..), object)
@@ -60,11 +59,7 @@ runHook
   -> m ()
   -- ^ Hook action
   -> m ()
-runHook cfg hookName action =
-  tryAny action
-    >>= either
-      (\exception -> tryLog cfg Warning $ "Observability hook '" <> hookName <> "' failed: " <> displayEx exception)
-      pure
+runHook cfg hookName = tryWarn cfg ("Observability hook '" <> hookName <> "' failed")
 
 -- | Run an observability hook with the job in the log context.
 jobHook :: (MonadUnliftIO m) => LogConfig -> Job.JobRead payload -> Text -> m () -> m ()

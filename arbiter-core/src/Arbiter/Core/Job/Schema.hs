@@ -70,7 +70,7 @@ module Arbiter.Core.Job.Schema
     -- * Table name helpers
   , queueTableNames
   , dlqSuffix
-  , qualifiedTable
+  , qualifiedName
   , jobQueueTable
   , jobQueueDLQTable
   , jobQueueArchiveTable
@@ -114,8 +114,7 @@ pauseNotifyChannelPrefix schemaName = "arbiter_pause_" <> schemaName <> "_"
 -- | Per-queue NOTIFY channel for pause/resume changes. Workers LISTEN on the
 -- channel for their own queue.
 pauseNotifyChannel :: SchemaName -> Text -> Text
-pauseNotifyChannel schemaName queueName =
-  T.take maxIdentifierBytes $ pauseNotifyChannelPrefix schemaName <> queueName
+pauseNotifyChannel schemaName = truncatedChannel (pauseNotifyChannelPrefix schemaName)
 
 -- | Prefix for per-queue cancel NOTIFY channels. See 'cancelNotifyChannel'.
 cancelNotifyChannelPrefix :: SchemaName -> Text
@@ -124,12 +123,15 @@ cancelNotifyChannelPrefix schemaName = "arbiter_cancel_" <> schemaName <> "_"
 -- | Per-queue NOTIFY channel for force-cancel signals. The payload identifies
 -- the target worker and job. Only the matching worker reacts.
 cancelNotifyChannel :: SchemaName -> Text -> Text
-cancelNotifyChannel schemaName queueName =
-  T.take maxIdentifierBytes $ cancelNotifyChannelPrefix schemaName <> queueName
+cancelNotifyChannel schemaName = truncatedChannel (cancelNotifyChannelPrefix schemaName)
 
 -- | Per-schema NOTIFY channel for manual cron run-now requests.
 cronRunNotifyChannel :: SchemaName -> Text
-cronRunNotifyChannel schemaName = T.take maxIdentifierBytes $ "arbiter_cron_run_" <> schemaName
+cronRunNotifyChannel = truncatedChannel "arbiter_cron_run_"
+
+-- | A channel name from a prefix and a suffix, cut to the identifier limit.
+truncatedChannel :: Text -> Text -> Text
+truncatedChannel prefix suffix = T.take maxIdentifierBytes (prefix <> suffix)
 
 -- | Per-table NOTIFY trigger function name.
 notifyFunctionName :: TableName -> Text
@@ -190,29 +192,29 @@ eventStreamingObjectCommentPrefix = "arbiter:event-stream:"
 eventStreamingAdoptedObjectComment :: Text
 eventStreamingAdoptedObjectComment = eventStreamingObjectCommentPrefix <> "adopted"
 
--- | Any schema-qualified table: @qualifiedTable "arbiter" "arbiter_workers"@ -> @"arbiter"."arbiter_workers"@
-qualifiedTable :: SchemaName -> TableName -> Text
-qualifiedTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier tableName
+-- | Any schema-qualified name: @qualifiedName "arbiter" "arbiter_workers"@ -> @"arbiter"."arbiter_workers"@
+qualifiedName :: SchemaName -> TableName -> Text
+qualifiedName schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier tableName
 
 -- | Qualified table name: @jobQueueTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs"@
 jobQueueTable :: SchemaName -> TableName -> Text
-jobQueueTable = qualifiedTable
+jobQueueTable = qualifiedName
 
 -- | Qualified DLQ table name: @jobQueueDLQTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_dlq"@
 jobQueueDLQTable :: SchemaName -> TableName -> Text
-jobQueueDLQTable schemaName tableName = qualifiedTable schemaName (tableName <> dlqSuffix)
+jobQueueDLQTable schemaName tableName = qualifiedName schemaName (tableName <> dlqSuffix)
 
 -- | Qualified archive table name: @jobQueueArchiveTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_archive"@
 jobQueueArchiveTable :: SchemaName -> TableName -> Text
-jobQueueArchiveTable schemaName tableName = qualifiedTable schemaName (tableName <> archiveSuffix)
+jobQueueArchiveTable schemaName tableName = qualifiedName schemaName (tableName <> archiveSuffix)
 
 -- | Qualified results table name: @jobQueueResultsTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_results"@
 jobQueueResultsTable :: SchemaName -> TableName -> Text
-jobQueueResultsTable schemaName tableName = qualifiedTable schemaName (tableName <> resultsSuffix)
+jobQueueResultsTable schemaName tableName = qualifiedName schemaName (tableName <> resultsSuffix)
 
 -- | Qualified groups table name: @jobQueueGroupsTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_groups"@
 jobQueueGroupsTable :: SchemaName -> TableName -> Text
-jobQueueGroupsTable schemaName tableName = qualifiedTable schemaName (tableName <> groupsSuffix)
+jobQueueGroupsTable schemaName tableName = qualifiedName schemaName (tableName <> groupsSuffix)
 
 dlqSuffix, archiveSuffix, resultsSuffix, groupsSuffix :: Text
 dlqSuffix = "_dlq"
@@ -423,7 +425,7 @@ createJobQueueUngroupedDueIndexSQL schemaName tableName =
 migrateUngroupedReadySplitIndexesSQL :: SchemaName -> TableName -> Text
 migrateUngroupedReadySplitIndexesSQL schemaName tableName =
   T.unlines
-    [ "DROP INDEX IF EXISTS " <> qualifiedTable schemaName ("idx_" <> tableName <> "_ungrouped_ranking") <> ";"
+    [ "DROP INDEX IF EXISTS " <> qualifiedName schemaName ("idx_" <> tableName <> "_ungrouped_ranking") <> ";"
     , createJobQueueUngroupedReadyRankingIndexSQL schemaName tableName
     , createJobQueueUngroupedDueIndexSQL schemaName tableName
     ]
@@ -489,13 +491,13 @@ maintenanceFunctionNames :: SchemaName -> Text -> (Text, Text, Text)
 maintenanceFunctionNames schemaName baseName =
   (func "_insert", func "_delete", func "_update")
   where
-    func suffix = qualifiedTable schemaName (baseName <> suffix)
+    func suffix = qualifiedName schemaName (baseName <> suffix)
 
 -- | One statement-level AFTER trigger. Drops then recreates, wiring the
 -- @\<baseName\>\<suffix\>@ function over @tbl@ with the given event and REFERENCING clause.
 statementTriggerSQL :: SchemaName -> Text -> Text -> Text -> Text -> Text -> Text
 statementTriggerSQL schemaName tbl baseName suffix event referencing =
-  let func = qualifiedTable schemaName (baseName <> suffix)
+  let func = qualifiedName schemaName (baseName <> suffix)
       trig = quoteIdentifier (baseName <> suffix)
    in T.intercalate
         "\n"
@@ -523,7 +525,7 @@ createMaintenanceTriggersSQL schemaName tbl baseName =
 -- a string literal.
 createNotifyFunctionSQL :: SchemaName -> TableName -> Text
 createNotifyFunctionSQL schemaName tableName =
-  let func = qualifiedTable schemaName (notifyFunctionName tableName)
+  let func = qualifiedName schemaName (notifyFunctionName tableName)
       channel = textLiteral (notificationChannelForTable tableName)
    in T.unlines
         [ "CREATE OR REPLACE FUNCTION " <> func <> "()"
@@ -535,14 +537,14 @@ createNotifyFunctionSQL schemaName tableName =
         , "  RETURN NULL;"
         , "END;"
         , dollarQuote <> " LANGUAGE plpgsql;"
-        , "COMMENT ON FUNCTION " <> func <> "() IS '" <> notifyObjectComment <> "';"
+        , "COMMENT ON FUNCTION " <> func <> "() IS " <> textLiteral notifyObjectComment <> ";"
         ]
 
 -- | A table's job-arrival NOTIFY trigger. Statement-level. A batch insert notifies
 -- one time.
 createNotifyTriggerSQL :: SchemaName -> TableName -> Text
 createNotifyTriggerSQL schemaName tableName =
-  let func = qualifiedTable schemaName (notifyFunctionName tableName)
+  let func = qualifiedName schemaName (notifyFunctionName tableName)
       trigName = quoteIdentifier (notifyTriggerName tableName)
       tbl = jobQueueTable schemaName tableName
    in T.unlines
@@ -552,7 +554,7 @@ createNotifyTriggerSQL schemaName tableName =
         , "REFERENCING NEW TABLE AS new_table"
         , "FOR EACH STATEMENT"
         , "EXECUTE FUNCTION " <> func <> "();"
-        , "COMMENT ON TRIGGER " <> trigName <> " ON " <> tbl <> " IS '" <> notifyObjectComment <> "';"
+        , "COMMENT ON TRIGGER " <> trigName <> " ON " <> tbl <> " IS " <> textLiteral notifyObjectComment <> ";"
         ]
 
 -- ---------------------------------------------------------------------------
@@ -564,7 +566,7 @@ createNotifyTriggerSQL schemaName tableName =
 -- reports its original job id. A lease-extend update emits no event.
 createEventStreamingFunctionSQL :: SchemaName -> Text
 createEventStreamingFunctionSQL schemaName =
-  let funcName = qualifiedTable schemaName eventStreamingFunctionName
+  let funcName = qualifiedName schemaName eventStreamingFunctionName
    in T.unlines
         [ "CREATE OR REPLACE FUNCTION " <> funcName <> "() RETURNS trigger AS " <> dollarQuote
         , "DECLARE"
@@ -597,7 +599,7 @@ createEventStreamingFunctionSQL schemaName =
         , "      job_id := OLD.id;"
         , "  END CASE;"
         , ""
-        , "  PERFORM pg_notify('" <> eventStreamingChannel <> "',"
+        , "  PERFORM pg_notify(" <> textLiteral eventStreamingChannel <> ","
         , "    json_build_object("
         , "      'event', event_type,"
         , "      'table', queue_name,"
@@ -607,7 +609,7 @@ createEventStreamingFunctionSQL schemaName =
         , "  RETURN NULL;"
         , "END;"
         , dollarQuote <> " LANGUAGE plpgsql;"
-        , "COMMENT ON FUNCTION " <> funcName <> "() IS '" <> eventStreamingObjectComment <> "';"
+        , "COMMENT ON FUNCTION " <> funcName <> "() IS " <> textLiteral eventStreamingObjectComment <> ";"
         ]
   where
     leaseStripped row = "(to_jsonb(" <> row <> ") - 'not_visible_until' - 'updated_at')"
@@ -617,7 +619,7 @@ createEventStreamingTriggersSQL :: SchemaName -> TableName -> Text
 createEventStreamingTriggersSQL schemaName tableName =
   let tbl = jobQueueTable schemaName tableName
       dlqTbl = jobQueueDLQTable schemaName tableName
-      funcName = qualifiedTable schemaName eventStreamingFunctionName
+      funcName = qualifiedName schemaName eventStreamingFunctionName
       triggerCall isDLQ =
         "FOR EACH ROW EXECUTE FUNCTION "
           <> funcName
@@ -663,4 +665,4 @@ dropEventStreamingTriggersSQL schemaName tableName =
 -- | Drop the schema-wide event-streaming function after its triggers are detached.
 dropEventStreamingFunctionSQL :: SchemaName -> Text
 dropEventStreamingFunctionSQL schemaName =
-  "DROP FUNCTION IF EXISTS " <> qualifiedTable schemaName eventStreamingFunctionName <> "();"
+  "DROP FUNCTION IF EXISTS " <> qualifiedName schemaName eventStreamingFunctionName <> "();"

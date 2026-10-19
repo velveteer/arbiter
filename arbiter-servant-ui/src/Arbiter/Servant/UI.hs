@@ -58,7 +58,17 @@ import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Network.HTTP.Media (Encoding, matchAccept)
-import Network.HTTP.Types (HeaderName, status200, status301, status404)
+import Network.HTTP.Types
+  ( HeaderName
+  , hAcceptEncoding
+  , hCacheControl
+  , hContentEncoding
+  , hContentType
+  , hLocation
+  , status200
+  , status301
+  , status404
+  )
 import Network.Wai (Request, pathInfo, rawPathInfo, rawQueryString, requestHeaders, responseLBS)
 import Numeric (showHex)
 import Servant
@@ -88,7 +98,7 @@ versionedFiles = map stampPage staticFiles
 -- | Put an asset below a path segment that identifies the build. Path segments
 -- give reverse proxies and build tools stable cache keys.
 versionedPath :: FilePath -> FilePath
-versionedPath path = T.unpack versionPrefix <> "/" <> BS8.unpack buildVersion <> "/" <> path
+versionedPath path = T.unpack versionPrefix <> "/" <> T.unpack buildVersion <> "/" <> path
 
 -- | The segment that introduces a version.
 versionPrefix :: Text
@@ -153,8 +163,8 @@ binary :: ByteString -> FileType
 binary media = FileType {mediaType = media, compressible = False}
 
 -- | One version for all files embedded in the binary.
-buildVersion :: ByteString
-buildVersion = BS8.pack (showHex (fromIntegral (hash (map snd staticFiles)) :: Word) "")
+buildVersion :: Text
+buildVersion = T.pack (showHex (fromIntegral (hash (map snd staticFiles)) :: Word) "")
 
 replaceAll :: ByteString -> ByteString -> ByteString -> ByteString
 replaceAll needle new haystack
@@ -206,24 +216,24 @@ serveStaticApp caching resolveFile req sendResponse = sendResponse =<< reply
       | isIndex && isJust version = pure notFound
       | any unsafeSegment segments = pure notFound
       | T.null path && not ("/" `BS.isSuffixOf` rawPathInfo req) =
-          pure $ responseLBS status301 [("Location", rawPathInfo req <> "/" <> rawQueryString req)] ""
+          pure $ responseLBS status301 [(hLocation, rawPathInfo req <> "/" <> rawQueryString req)] ""
       | otherwise = maybe notFound found <$> resolveFile filePath
     found asset =
       let (body, encodingHeaders) = negotiate req asset
        in responseLBS
             status200
             ( securityHeaders
-                ++ cacheHeaders (currentBuild caching version)
-                ++ [("Content-Type", mediaType (fileType filePath))]
-                ++ encodingHeaders
+                <> cacheHeaders (currentBuild caching version)
+                <> [(hContentType, mediaType (fileType filePath))]
+                <> encodingHeaders
             )
             (LBS.fromStrict body)
-    notFound = responseLBS status404 [("Content-Type", "text/plain")] "Not found"
+    notFound = responseLBS status404 [(hContentType, "text/plain")] "Not found"
 
 -- | The body for a request and the headers that describe its encoding.
 negotiate :: Request -> Asset -> (ByteString, [(HeaderName, ByteString)])
 negotiate req asset = case assetGzip asset of
-  Just gzipped | acceptsGzip req -> (gzipped, [("Content-Encoding", "gzip"), varyEncoding])
+  Just gzipped | acceptsGzip req -> (gzipped, [(hContentEncoding, "gzip"), varyEncoding])
   Just _ -> (assetBody asset, [varyEncoding])
   Nothing -> (assetBody asset, [])
   where
@@ -231,7 +241,7 @@ negotiate req asset = case assetGzip asset of
 
 -- | The client accepts gzip, by name or through @*@, with a nonzero quality.
 acceptsGzip :: Request -> Bool
-acceptsGzip req = isJust (matchAccept [gzip] =<< lookup "Accept-Encoding" (requestHeaders req))
+acceptsGzip req = isJust (matchAccept [gzip] =<< lookup hAcceptEncoding (requestHeaders req))
   where
     gzip = "gzip" :: Encoding
 
@@ -242,7 +252,7 @@ unsafeSegment segment =
 
 -- | A version that names the embedded build.
 currentBuild :: Caching -> Maybe Text -> Bool
-currentBuild Versioned (Just version) = BS8.pack (T.unpack version) == buildVersion
+currentBuild Versioned (Just version) = version == buildVersion
 currentBuild _ _ = False
 
 -- | Response caching mode. Embedded, versioned files are immutable while the
@@ -256,7 +266,7 @@ cacheHeaders True = [cacheControl ("public, max-age=" <> BS8.pack (show immutabl
 cacheHeaders False = [cacheControl "no-cache"]
 
 cacheControl :: ByteString -> (HeaderName, ByteString)
-cacheControl = (,) "Cache-Control"
+cacheControl = (,) hCacheControl
 
 -- | One-year cache duration for a versioned asset.
 immutableMaxAge :: Int

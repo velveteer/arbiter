@@ -6,16 +6,17 @@
 -- Handlers run in the application monad on Orville's own connection:
 --
 -- @
--- import Arbiter.Orville.MonadArbiter
+-- import Arbiter.Core qualified as Arb
+-- import Arbiter.Orville qualified as ArbO
 --
--- instance MonadArbiter MyApp where
+-- instance Arb.MonadArbiter MyApp where
 --   type RegistryOf MyApp = MyRegistry
 --   type Handler MyApp job result = job -> MyApp result
 --   getSchema                = asks appSchema
---   executeQuery             = orvilleExecuteQuery
---   executeStatement         = orvilleExecuteStatement
---   withDbTransaction        = orvilleWithDbTransaction
---   runHandlerWithConnection = orvilleRunHandlerWithConnection
+--   executeQuery             = ArbO.orvilleExecuteQuery
+--   executeStatement         = ArbO.orvilleExecuteStatement
+--   withDbTransaction        = ArbO.orvilleWithDbTransaction
+--   runHandlerWithConnection = ArbO.orvilleRunHandlerWithConnection
 --   getListener              = asks appListener
 -- @
 --
@@ -31,7 +32,8 @@ module Arbiter.Orville.MonadArbiter
   , orvilleRunHandlerWithConnection
   ) where
 
-import Arbiter.Core.Exceptions (throwInternal)
+import Arbiter.Core.Enum (showText)
+import Arbiter.Core.Exceptions (orThrowInternal)
 import Arbiter.Core.MonadArbiter
   ( Col (..)
   , NullCol (..)
@@ -73,7 +75,7 @@ orvilleExecuteQuery query = O.withConnection $ \conn -> do
   result <- runRaw conn query
   let marshaller = O.annotateSqlMarshallerEmptyAnnotation (runCodec orvilleCol (qDecode query))
   decoded <- liftIO $ O.marshallResultFromSql O.defaultErrorDetailLevel marshaller result
-  either (\err -> throwInternal $ "orville decode error: " <> T.pack (show err)) pure decoded
+  orThrowInternal (("orville decode error: " <>) . showText) decoded
 
 -- | Run a statement, returning rows affected.
 orvilleExecuteStatement
@@ -122,22 +124,25 @@ sqlValueToParam =
 
 -- | Encode the ordered params into the libpq values 'Conn.executeRaw' consumes.
 encodeParams :: (MonadIO m) => [SomeParam] -> m [Maybe PgTextFormatValue]
-encodeParams = traverse (either (throwInternal . ("param encoding error: " <>)) pure . (sqlValueToParam <=< someParamToSqlValue))
+encodeParams = traverse (orThrowInternal ("param encoding error: " <>) . (sqlValueToParam <=< someParamToSqlValue))
 
 orvilleCol :: NullCol a -> O.SqlMarshaller () a
 orvilleCol (NotNull name col) = O.marshallReadOnlyField (colFieldDef name col)
 orvilleCol (Nullable name col) = O.marshallReadOnlyField (O.nullableField (colFieldDef name col))
 
 colFieldDef :: Text -> Col a -> O.FieldDefinition O.NotNull a
-colFieldDef name CInt4 = O.integerField (T.unpack name)
-colFieldDef name CInt8 = O.bigIntegerField (T.unpack name)
-colFieldDef name CText = O.unboundedTextField (T.unpack name)
-colFieldDef name CBool = O.booleanField (T.unpack name)
-colFieldDef name CTimestamptz = O.utcTimestampField (T.unpack name)
-colFieldDef name CJsonb = O.fieldOfType jsonbValue (T.unpack name)
-colFieldDef name CStored = O.fieldOfType storedJsonb (T.unpack name)
-colFieldDef name CFloat8 = O.doubleField (T.unpack name)
-colFieldDef name CUuid = O.uuidField (T.unpack name)
+colFieldDef name col = colField col (T.unpack name)
+
+colField :: Col a -> String -> O.FieldDefinition O.NotNull a
+colField CInt4 = O.integerField
+colField CInt8 = O.bigIntegerField
+colField CText = O.unboundedTextField
+colField CBool = O.booleanField
+colField CTimestamptz = O.utcTimestampField
+colField CJsonb = O.fieldOfType jsonbValue
+colField CStored = O.fieldOfType storedJsonb
+colField CFloat8 = O.doubleField
+colField CUuid = O.uuidField
 
 jsonbValue :: O.SqlType Value
 jsonbValue =

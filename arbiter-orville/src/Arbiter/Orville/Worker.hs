@@ -1,11 +1,11 @@
 -- | Run a worker in 'OrvilleDb' with its handlers and hooks written in the base monad:
 --
 -- @
--- import Arbiter.Orville.Worker
--- import Arbiter.Worker
+-- import Arbiter.Orville.Worker qualified as ArbO
+-- import Arbiter.Worker qualified as Worker
 --
--- config <- manualWorkerConfig 5 (orvilleBatchedHandler processJob)
--- let config' = config {observabilityHooks = orvilleHooks appHooks}
+-- config <- Worker.manualWorkerConfig 5 (ArbO.orvilleBatchedHandler processJob)
+-- let config' = config {Worker.observabilityHooks = ArbO.orvilleHooks appHooks}
 -- @
 module Arbiter.Orville.Worker
   ( orvilleBatchedHandler

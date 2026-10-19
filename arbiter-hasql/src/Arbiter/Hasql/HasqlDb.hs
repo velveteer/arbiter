@@ -4,12 +4,12 @@
 -- | The hasql database monad with a built-in 'MonadArbiter' instance:
 --
 -- @
--- import Arbiter.Core
--- import Arbiter.Hasql
+-- import Arbiter.Core qualified as Arb
+-- import Arbiter.Hasql qualified as ArbH
 -- import Control.Monad (void)
 --
--- myFunction :: HasqlDb MyRegistry IO ()
--- myFunction = void $ insertJob (defaultJob myPayload)
+-- myFunction :: ArbH.HasqlDb MyRegistry IO ()
+-- myFunction = void $ Arb.insertJob (Arb.defaultJob myPayload)
 -- @
 module Arbiter.Hasql.HasqlDb
   ( -- * Database monad
@@ -152,9 +152,10 @@ runHasqlDb env = runDb env . unHasqlDb
 --
 -- @
 -- import Arbiter.Core qualified as Arb
+-- import Arbiter.Hasql qualified as ArbH
 --
 -- _ <- Hasql.use conn (Session.script \"BEGIN\")
--- inTransaction \@MyRegistry conn \"arbiter\" $ do
+-- ArbH.inTransaction \@MyRegistry conn \"arbiter\" $ do
 --   Arb.insertJob (Arb.defaultJob myPayload)
 -- _ <- Hasql.use conn (Session.script \"COMMIT\")
 -- @

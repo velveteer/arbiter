@@ -40,7 +40,7 @@ import Arbiter.Core.Job.Schema
   , jobQueueGroupsTable
   , jobQueueTable
   , maintenanceFunctionNames
-  , qualifiedTable
+  , qualifiedName
   )
 import Arbiter.Core.SqlLiterals (attemptsLeftSQL, dollarQuote, lockGroupKeyOnConflictSQL, quoteIdentifier)
 
@@ -123,7 +123,7 @@ migrateGroupsReadyRankingSQL schemaName tableName =
         , "    MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended) AS nd"
         , "  FROM " <> tbl <> " WHERE group_key IS NOT NULL GROUP BY group_key"
         , ") sub WHERE g.group_key = sub.group_key;"
-        , "DROP INDEX IF EXISTS " <> qualifiedTable schemaName ("idx_" <> tableName <> "_groups_ranking") <> ";"
+        , "DROP INDEX IF EXISTS " <> qualifiedName schemaName ("idx_" <> tableName <> "_groups_ranking") <> ";"
         , "CREATE INDEX IF NOT EXISTS "
             <> qidx "_groups_ranking"
             <> " ON "

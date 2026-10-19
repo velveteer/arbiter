@@ -63,11 +63,10 @@ withGaugeLoop
   -> (forall a. m a -> IO a)
   -> Text
   -> [(Text, [Text])]
-  -> NominalDiffTime
   -> (IO () -> IO b)
   -> IO b
-withGaugeLoop tel baseLog runDb schema queueKinds refreshInterval use =
-  bracket (prepareGauges tel baseLog runDb schema queueKinds refreshInterval) snd (use . fst)
+withGaugeLoop tel baseLog runDb schema queueKinds use =
+  bracket (prepareGauges tel baseLog runDb schema queueKinds (Tel.gaugeRefresh tel)) snd (use . fst)
 
 prepareGauges
   :: (MonadArbiter m)
@@ -123,8 +122,8 @@ refreshLoop logCfg refreshGate source refreshInterval cache advance = forever $ 
   where
     publish cached = atomically (publishSnapshot cache cached) >> advance cached
     stamp started now = \case
-      Ran snap -> Just (Cached started snap)
-      Published age snap -> Just (Cached (now - age) snap)
+      Ran snap -> Just Cached {takenAt = started, reading = snap}
+      Published age snap -> Just Cached {takenAt = now - age, reading = snap}
       Unreadable _ -> Nothing
 
 -- | Scan reachability. An abandoned scan returns 'Nothing'.

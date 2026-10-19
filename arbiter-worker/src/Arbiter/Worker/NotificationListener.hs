@@ -1,5 +1,3 @@
-{-# LANGUAGE LambdaCase #-}
-
 -- | Pause-aware consumer loop the dispatcher drives off the shared listener.
 module Arbiter.Worker.NotificationListener
   ( runNotificationConsumer

@@ -53,7 +53,11 @@ import Arbiter.Core.Selector (Selector, field, usePolicy)
 
 -- | The stored key text, @prefix:suffix@.
 prefixedKeyText :: Text -> Text -> Text
-prefixedKeyText prefix suffix = prefix <> ":" <> suffix
+prefixedKeyText prefix suffix = prefix <> keySeparator <> suffix
+
+-- | The text between a stored key's prefix and suffix.
+keySeparator :: Text
+keySeparator = ":"
 
 -- | JSON for a @prefix:suffix@ key.
 prefixedKeyToJSON :: Text -> Text -> Value
@@ -65,7 +69,7 @@ prefixedKeyParseJSON name mkKey = withObject name $ \obj -> mkKey <$> obj .: "pr
 
 -- | Recover the suffix of a stored @prefix:suffix@ key given its prefix.
 splitPrefixedSuffix :: Text -> Text -> Text
-splitPrefixedSuffix prefix key = T.drop (T.length prefix + 1) key
+splitPrefixedSuffix prefix key = T.drop (T.length (prefix <> keySeparator)) key
 
 -- ---------------------------------------------------------------------------
 -- Policies and selectors

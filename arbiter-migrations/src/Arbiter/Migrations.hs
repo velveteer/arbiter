@@ -53,6 +53,7 @@ import Arbiter.Core.CronSchedule
   , addTimezoneColumnSQL
   , createCronSchedulesTableSQL
   )
+import Arbiter.Core.Enum (showText)
 import Arbiter.Core.Exceptions (displayEx)
 import Arbiter.Core.Gates (addGateMetadataColumnSQL, createGatesTableSQL)
 import Arbiter.Core.Job.Schema
@@ -141,11 +142,12 @@ import Arbiter.Core.Worker
   , addClaimedByColumnSQL
   , createWorkersTableSQL
   )
-import Control.Exception (SomeAsyncException, SomeException, bracket, fromException, throwIO, try)
+import Control.Exception (bracket, catch, throwIO, try)
 import Control.Monad (unless, void, when)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Foldable (find, traverse_)
+import Data.Int (Int32)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, listToMaybe)
 import Data.Proxy (Proxy (..))
@@ -167,6 +169,7 @@ import Database.PostgreSQL.Simple.Migration
   , runMigrations
   )
 import Database.PostgreSQL.Simple.Types (PGArray (..), Query (..))
+import UnliftIO.Exception (tryAny)
 
 -- | Migration options and the desired state reconciled after a schema's tracked migrations run.
 data MigrationConfig = MigrationConfig
@@ -304,12 +307,12 @@ validateRegistryNames :: SchemaName -> [TableName] -> Either Text ()
 validateRegistryNames schemaName tables
   | T.null schemaName = Left "Arbiter schema name must not be empty"
   | byteLength schemaName > maxIdentifierBytes =
-      Left ("Arbiter schema name exceeds PostgreSQL's " <> T.pack (show maxIdentifierBytes) <> "-byte identifier limit")
+      Left ("Arbiter schema name exceeds PostgreSQL's " <> showText maxIdentifierBytes <> "-byte identifier limit")
   | any T.null tables = Left "Arbiter queue name must not be empty"
   | Just table <- find ((> maxQueueNameBytes) . byteLength) tables =
       Left
         ( "Arbiter queue name exceeds the "
-            <> T.pack (show maxQueueNameBytes)
+            <> showText maxQueueNameBytes
             <> "-byte generated-identifier limit: "
             <> table
         )
@@ -375,15 +378,17 @@ withMigrationLock conn schemaName timeout act = bracket acquire release run
       try (PG.withTransaction conn (setTimeouts >> lock)) >>= \case
         Right () -> pure True
         Left sqlError
-          | isJust timeout, PG.sqlState sqlError == "55P03" -> pure False
+          | isJust timeout, PG.sqlState sqlError == lockNotAvailable -> pure False
           | otherwise -> throwIO sqlError
     lock = void (query conn "SELECT pg_advisory_lock(hashtextextended(?, 0))::text" lockName :: IO [Only (Maybe Text)])
     -- Pinned for this transaction.
     setTimeouts = traverse_ setLocal [("lock_timeout", maybe "0" millis timeout), ("statement_timeout", "0")]
     setLocal (name, value) =
       void (query conn "SELECT set_config(?, ?, TRUE)" (name :: Text, value :: Text) :: IO [Only Text])
-    millis seconds = T.pack (show (max 1 (min maxLockTimeoutMillis (ceiling (seconds * 1000) :: Int))))
-    maxLockTimeoutMillis = 2147483647
+    millis seconds = showText (max 1 (min maxLockTimeoutMillis (ceiling (seconds * millisPerSecond) :: Int)))
+    maxLockTimeoutMillis = fromIntegral (maxBound :: Int32)
+    millisPerSecond = 1000
+    lockNotAvailable = "55P03"
     release locked =
       when locked $
         void (try unlock :: IO (Either PG.SqlError [Only Bool]))
@@ -405,23 +410,20 @@ migrateSchema conn schemaName tableAdmissions config seeds = do
   withConnection conn LibPQ.disableNoticeReporting
 
   -- A failed CREATE is fine when the schema exists.
-  result <- try $ executeSQL conn (createSchemaSQL schemaName)
-  case result of
-    Right _ -> pure ()
-    Left (createError :: PG.SqlError) -> do
-      present <- schemaExists conn schemaName
-      unless present $
-        ioError
-          ( userError $
-              "Failed to create schema "
-                <> T.unpack schemaName
-                <> " and it does not exist. Either grant CREATE privilege on the database"
-                <> " or create the schema manually: CREATE SCHEMA "
-                <> T.unpack schemaName
-                <> ";"
-                <> "\nOriginal error: "
-                <> show createError
-          )
+  executeSQL conn (createSchemaSQL schemaName) `catch` \(createError :: PG.SqlError) -> do
+    present <- schemaExists conn schemaName
+    unless present $
+      ioError
+        ( userError $
+            "Failed to create schema "
+              <> T.unpack schemaName
+              <> " and it does not exist. Either grant CREATE privilege on the database"
+              <> " or create the schema manually: CREATE SCHEMA "
+              <> T.unpack schemaName
+              <> ";"
+              <> "\nOriginal error: "
+              <> show createError
+        )
 
   withConnection conn LibPQ.enableNoticeReporting
 
@@ -435,23 +437,19 @@ migrateSchema conn schemaName tableAdmissions config seeds = do
           , optTableName = migrationTableName
           }
 
-  _ <- runMigrations conn options [MigrationInitialization]
+  void (runMigrations conn options [MigrationInitialization])
   migrationResult <- runMigrations conn options migrations
   case migrationResult of
-    MigrationSuccess -> do
-      reconciled <-
-        try $ do
-          reconcileRateLimitPolicies conn schemaName (seedRateLimitPolicies seeds)
-          reconcileConcurrencyPolicies conn schemaName (seedConcurrencyPolicies seeds)
-          reconcileRateLimitDurability conn schemaName (rateLimitDurability config)
-          reconcileOptionalTriggers conn schemaName (map fst tableAdmissions) config
-      case reconciled of
-        Right () -> pure MigrationSuccess
-        -- A reconcile throws on a conflicting prefix or a failed ALTER. Async exceptions propagate.
-        Left (exception :: SomeException)
-          | Just (_ :: SomeAsyncException) <- fromException exception -> throwIO exception
-          | otherwise -> pure (MigrationError (T.unpack (displayEx exception)))
+    -- A reconcile throws on a conflicting prefix or a failed ALTER. Async exceptions propagate.
+    MigrationSuccess ->
+      either (MigrationError . T.unpack . displayEx) (const MigrationSuccess) <$> tryAny reconcile
     other -> pure other
+  where
+    reconcile = do
+      reconcileRateLimitPolicies conn schemaName (seedRateLimitPolicies seeds)
+      reconcileConcurrencyPolicies conn schemaName (seedConcurrencyPolicies seeds)
+      reconcileRateLimitDurability conn schemaName (rateLimitDurability config)
+      reconcileOptionalTriggers conn schemaName (map fst tableAdmissions) config
 
 -- | Upsert each policy's @default_*@ params into the policies table. Operator
 -- @override_*@ values stay intact. Idempotent. Overrides and removed prefixes survive
@@ -693,9 +691,7 @@ commentFunctionSelect = "SELECT format('COMMENT ON FUNCTION %I.%I() IS %L;', nam
 
 -- | Whether a single-row boolean probe returns true.
 exists :: (PG.ToRow params) => PG.Connection -> Query -> params -> IO Bool
-exists conn sql params = do
-  rows <- query conn sql params
-  pure (maybe False fromOnly (listToMaybe rows))
+exists conn sql params = maybe False fromOnly . listToMaybe <$> query conn sql params
 
 -- | A @DROP TRIGGER@ statement per matched row.
 dropTriggerSelect :: Query

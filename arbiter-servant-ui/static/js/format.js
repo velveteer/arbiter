@@ -47,7 +47,7 @@ export const jsonText = memoByObject((v) => JSON.stringify(v));
 export function truncate(v, len = TRUNCATE_CHARS) {
   if (v == null) return '';
   const s = typeof v === 'string' ? v : jsonText(v);
-  return s.length > len ? s.slice(0, len) + '...' : s;
+  return s.length > len ? s.slice(0, len) + '…' : s;
 }
 
 // A payload cell. A JSON null payload reads null.

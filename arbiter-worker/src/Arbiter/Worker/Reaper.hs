@@ -13,6 +13,7 @@ module Arbiter.Worker.Reaper
   ) where
 
 import Arbiter.Core.Concurrency.Spec (registryConcurrencyPolicies)
+import Arbiter.Core.Enum (showText)
 import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf)
@@ -27,7 +28,6 @@ import Data.Maybe (catMaybes)
 import Data.Proxy (Proxy (..))
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
 import UnliftIO (MonadUnliftIO, SomeException, tryAny)
 import UnliftIO.Concurrent (threadDelay)
@@ -91,18 +91,17 @@ runMaintenancePass logCfg report pace stmtTimeout = do
       hasConcurrency = not (Set.null (registryConcurrencyPolicies @(RegistryOf m)))
       hasRateLimit = not (Set.null (registryRateLimitPolicies @(RegistryOf m)))
   schema <- Arb.getSchema
-  let gatedCount operation every work =
-        tryReaperOp logCfg schema stmtTimeout (maintenanceOpName operation) every work
-          >>= failedOp operation (traverse_ (reaped operation))
+  let gated :: MaintenanceOp -> (Maybe a -> m ()) -> NominalDiffTime -> m a -> m (Maybe MaintenanceOp)
+      gated operation emit every work =
+        tryReaperOp logCfg schema stmtTimeout (maintenanceOpName operation) every work >>= failedOp operation emit
+      gatedCount operation = gated operation (traverse_ (reaped operation))
       logSwept level verb noun count =
-        tryLog logCfg level $ "Reaper " <> verb <> " " <> T.pack (show count) <> " " <> noun
+        tryLog logCfg level $ "Reaper " <> verb <> " " <> showText count <> " " <> noun
       reportFailed operation =
         traverse_ (\queue -> tryLog logCfg Warning $ maintenanceOpName operation <> " failed for queue: " <> queue)
       reportSwept operation done =
         traverse_ (\(count, failed) -> reaped operation count >> reportFailed operation failed >> when (count > 0) (done count))
-      sweep operation every done work =
-        tryReaperOp logCfg schema stmtTimeout (maintenanceOpName operation) every work
-          >>= failedOp operation (reportSwept operation done)
+      sweep operation every done = gated operation (reportSwept operation done) every
       refreshGroups =
         let task = maintenanceOpName RefreshGroups
          in reaperGate

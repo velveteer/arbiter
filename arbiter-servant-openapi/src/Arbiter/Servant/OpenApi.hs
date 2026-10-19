@@ -223,7 +223,7 @@ streamOperation =
           "Streams an event per insert, update, delete and dead-letter, as they happen. A lease extend sends no event. \
           \Each event names its queue and the job id. A dead-letter event carries the id the \
           \job had in its queue and sets dlq. The stream starts with one \"connected\" event. \
-          \Sends a keepalive comment after 15 seconds with no event. A server with streaming off, \
+          \Sends a periodic keepalive comment while no event arrives. A server with streaming off, \
           \or with no listener, answers one \"disabled\" event and closes."
     , _operationResponses =
         mempty

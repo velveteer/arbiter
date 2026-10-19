@@ -3,14 +3,14 @@
 -- | A 'MonadArbiter' transformer over the application's Orville monad:
 --
 -- @
--- import Arbiter.Core
--- import Arbiter.Orville
+-- import Arbiter.Core qualified as Arb
+-- import Arbiter.Orville qualified as ArbO
 -- import Orville.PostgreSQL qualified as O
 --
 -- O.withTransaction $ do
 --   O.insertEntity ordersTable order
---   runOrvilleDb \@MyRegistry OrvilleEnv {schema = "arbiter", listener = Nothing} $
---     insertJob (defaultJob (ProcessOrder orderId))
+--   ArbO.runOrvilleDb \@MyRegistry ArbO.OrvilleEnv {ArbO.schema = "arbiter", ArbO.listener = Nothing} $
+--     Arb.insertJob (Arb.defaultJob (ProcessOrder orderId))
 -- @
 --
 -- Queries run on the base monad's connection and join its open transaction.

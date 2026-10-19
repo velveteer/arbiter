@@ -35,7 +35,7 @@ module Arbiter.Core.Sql.Jobs
   , requeuedValsEditing
   , enqueuedAgainCols
   , enqueuedAgainValsEditing
-  , jobColumns
+  , jobReadColumns
   , insertJobSQL
   , insertJobReplaceSQL
   , insertJobsBatchSQL
@@ -67,7 +67,7 @@ import Arbiter.Core.Sql.Groups (settleGroupLocksCte)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen, rows)
 import Arbiter.Core.Sql.Tree (wakeParentCte)
-import Arbiter.Core.SqlLiterals (attemptsLeftSQL, defaultMaxAttemptsSQL, minMaxAttemptsSQL)
+import Arbiter.Core.SqlLiterals (attemptsLeftSQL, attemptsSpentSQL, defaultMaxAttemptsSQL, minMaxAttemptsSQL)
 
 -- | A narrowing predicate on a job listing. Filters combine with AND.
 data JobFilter
@@ -246,10 +246,12 @@ jobStatusCaseSQL =
            AND not_visible_until IS NOT NULL AND not_visible_until > NOW() THEN 'backoff'
       WHEN attempts > 0 AND not_visible_until IS NOT NULL AND not_visible_until > NOW() THEN 'in_flight'
       WHEN not_visible_until IS NOT NULL AND not_visible_until > NOW() THEN 'scheduled'
-      WHEN attempts >= COALESCE(max_attempts, ${defaultMaxAttemptsSQL}) THEN 'exhausted'
+      WHEN ${spent} THEN 'exhausted'
       ELSE 'ready'
     END
   |]
+  where
+    spent = attemptsSpentSQL ""
 
 -- | The rows a claim considers, over a row alias: unsuspended, uncancelled, visible,
 -- and within the attempt budget.
@@ -267,7 +269,7 @@ claimablePred alias =
 jobsWithStatusSubquery :: SchemaName -> TableName -> Text
 jobsWithStatusSubquery schemaName tableName =
   let tbl = jobQueueTable schemaName tableName
-   in [text|(SELECT ${jobColumns}, ${jobStatusCaseSQL} AS status FROM ${tbl}) job|]
+   in [text|(SELECT ${jobReadColumns}, ${jobStatusCaseSQL} AS status FROM ${tbl}) job|]
 
 -- | List filtered jobs without the derived status.
 listJobsFilteredSQL :: SchemaName -> TableName -> Query () -> Text -> Int64 -> Int64 -> Query (JobRead (Stored payload))
@@ -276,7 +278,7 @@ listJobsFilteredSQL schemaName tableName whereFrag orderBy limit offset =
    in rows
         (jobRowCodec tableName)
         [sql|
-          SELECT ${jobColumns}
+          SELECT ${jobReadColumns}
           FROM ${tbl}
           ${whereFrag}
           ORDER BY ${orderBy} LIMIT #{limit :: CInt8} OFFSET #{offset :: CInt8}
@@ -407,8 +409,8 @@ countDLQFilteredSQL schemaName tableName whereFrag =
    in countWhereSQL dlqTbl whereFrag
 
 -- | The job read columns, in codec order, for SELECT and RETURNING.
-jobColumns :: Text
-jobColumns = joinColumns jobReadColumnNames
+jobReadColumns :: Text
+jobReadColumns = joinColumns jobReadColumnNames
 
 -- | The job read column names, in codec order.
 jobReadColumnNames :: [Text]
@@ -525,7 +527,7 @@ insertJobSQL schemaName tableName valuesFrag =
         [sql|
           INSERT INTO ${tbl} ${valuesFrag}
           ON CONFLICT (dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING
-          RETURNING ${jobColumns}
+          RETURNING ${jobReadColumns}
         |]
 
 -- | Insert under the replace dedup strategy. Replaces an existing job that is idle
@@ -544,7 +546,7 @@ insertJobReplaceSQL schemaName tableName valuesFrag =
           ON CONFLICT (dedup_key) WHERE dedup_key IS NOT NULL DO UPDATE SET
             ${dedupSet}
           WHERE ${guard}
-          RETURNING ${jobColumns}
+          RETURNING ${jobReadColumns}
         |]
 
 -- | Batch insert over @unnest@ed parallel arrays. An ignore-dedup job is skipped on
@@ -552,7 +554,7 @@ insertJobReplaceSQL schemaName tableName valuesFrag =
 -- is absent is skipped.
 insertJobsBatchSQL :: SchemaName -> TableName -> Query () -> Query (JobRead (Stored payload))
 insertJobsBatchSQL schemaName tableName batchSrc =
-  rows (jobRowCodec tableName) (insertJobsBatchBase schemaName tableName batchSrc [text|RETURNING ${jobColumns}|])
+  rows (jobRowCodec tableName) (insertJobsBatchBase schemaName tableName batchSrc [text|RETURNING ${jobReadColumns}|])
 
 -- | 'insertJobsBatchSQL' with no @RETURNING@.
 insertJobsBatchSQL_ :: SchemaName -> TableName -> Query () -> Query ()
@@ -588,7 +590,7 @@ getJobByIdSQL schemaName tableName jobId =
    in rows
         (jobRowCodec tableName)
         [sql|
-          SELECT ${jobColumns}
+          SELECT ${jobReadColumns}
           FROM ${tbl}
           WHERE id = #{jobId :: CInt8}
         |]
@@ -600,7 +602,7 @@ getJobByDedupKeySQL schemaName tableName key =
    in rows
         (jobRowCodec tableName)
         [sql|
-          SELECT ${jobColumns}
+          SELECT ${jobReadColumns}
           FROM ${tbl}
           WHERE dedup_key = #{key :: CText}
         |]

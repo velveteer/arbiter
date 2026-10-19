@@ -50,6 +50,7 @@ module Arbiter.Worker.Config
 
 import Arbiter.Core.Job.Types (JobRead, JobWrite, ObservabilityHooks, andThen, defaultObservabilityHooks)
 import Arbiter.Core.MonadArbiter (JobHandler, MonadArbiter, ResultOf)
+import Arbiter.Core.Operations (singleJobBatchSize)
 import Control.Exception (Exception)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -71,7 +72,7 @@ import UnliftIO.STM (TMVar, TVar, newEmptyTMVarIO, newTVarIO)
 import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.BackoffStrategy (BackoffStrategy, Jitter (..), exponentialBackoff)
-import Arbiter.Worker.Cron (CronJob)
+import Arbiter.Worker.Cron.Types (CronJob)
 import Arbiter.Worker.Logger (LogConfig, defaultLogConfig, withIdentity)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
@@ -282,7 +283,7 @@ data HandlerMode m payload
 -- | The maximum jobs in a batch. A batch is one group, or ungrouped jobs.
 handlerBatchSize :: WorkerConfig m payload -> Int
 handlerBatchSize config = case handlerMode config of
-  SingleJobMode _ -> 1
+  SingleJobMode _ -> singleJobBatchSize
   BatchedJobsMode batchSize _ -> batchSize
 
 -- | Validate all invariants required for safe worker execution. Return all
@@ -393,7 +394,7 @@ manualWorkerConfig
   -- ^ Job handler
   -> m (WorkerConfig n payload)
 manualWorkerConfig workerCnt handler =
-  batchedWorkerConfig workerCnt 1 (\(job :| _) -> handler job)
+  batchedWorkerConfig workerCnt singleJobBatchSize (\(job :| _) -> handler job)
 
 -- | Transform a pool's observability hooks.
 withHooks
@@ -539,15 +540,15 @@ listenerReadyVar = runtimeListenerReadyVar . workerRuntime
 -- Stops claiming new jobs. In-flight jobs get up to 'gracefulShutdownTimeout' to
 -- finish. Then the pool exits.
 shutdownWorkerPool :: (MonadIO m) => WorkerConfig n payload -> m ()
-shutdownWorkerPool config = liftIO . STM.atomically $ STM.writeTVar (workerStateVar config) ShuttingDown
+shutdownWorkerPool config = STM.atomically $ STM.writeTVar (workerStateVar config) ShuttingDown
 
 -- | The pool's state, with a pause reported as paused.
 getWorkerState :: (MonadIO m) => WorkerConfig n payload -> m WorkerState
-getWorkerState config = liftIO . STM.atomically $ readEffectiveState config
+getWorkerState config = STM.atomically $ readEffectiveState config
 
 -- | Whether this pool's LISTEN channels are subscribed (or there is no listener).
 getListenerReady :: (MonadIO m) => WorkerConfig n payload -> m Bool
-getListenerReady config = liftIO . STM.atomically $ STM.readTVar (listenerReadyVar config)
+getListenerReady config = STM.readTVarIO (listenerReadyVar config)
 
 -- | Set the pause flag, superseding any reading a caller has in flight.
 writePause :: WorkerConfig n payload -> Bool -> STM.STM ()

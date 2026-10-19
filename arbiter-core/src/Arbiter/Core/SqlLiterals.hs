@@ -11,6 +11,7 @@ module Arbiter.Core.SqlLiterals
   , intLiteral
   , defaultMaxAttemptsSQL
   , attemptsLeftSQL
+  , attemptsSpentSQL
   , minMaxAttemptsSQL
   , maxIdentifierBytes
   , sharedTable
@@ -49,6 +50,10 @@ defaultMaxAttemptsSQL = intLiteral defaultMaxAttempts
 -- | Whether a row has attempts left. @col@ prefixes each column.
 attemptsLeftSQL :: Text -> Text
 attemptsLeftSQL col = col <> "attempts < COALESCE(" <> col <> "max_attempts, " <> defaultMaxAttemptsSQL <> ")"
+
+-- | Whether a row has spent its attempts. @col@ prefixes each column.
+attemptsSpentSQL :: Text -> Text
+attemptsSpentSQL col = col <> "attempts >= COALESCE(" <> col <> "max_attempts, " <> defaultMaxAttemptsSQL <> ")"
 
 -- | 'minMaxAttempts' as a SQL literal.
 minMaxAttemptsSQL :: Text

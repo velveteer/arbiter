@@ -150,7 +150,7 @@ data JobsAPI payload result mode = JobsAPI
           :> QueryParam "sort_by" JobSortColumn
           :> QueryParam "sort_dir" SortDir
           :> Get '[JSON] (JobsResponse payload)
-  -- ^ @GET \/queues\/:queue\/jobs?limit=N&offset=N&group_key=X&parent_id=N&job_id=N&roots_only&status=S&claimed_by=UUID&kind=X&payload=text&rate_limit_prefix=X&concurrency_prefix=X&sort_by=...&sort_dir=...@
+  -- ^ @GET \/queues\/:queue\/jobs@
   , insertJob
       :: mode
         :- Summary "Enqueue a job"
@@ -308,7 +308,7 @@ data DLQAPI payload mode = DLQAPI
           :> QueryParam "sort_by" DLQSortColumn
           :> QueryParam "sort_dir" SortDir
           :> Get '[JSON] (DLQResponse payload)
-  -- ^ @GET \/queues\/:queue\/dlq?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&kind=X&payload=text&error=text&sort_by=...&sort_dir=...@
+  -- ^ @GET \/queues\/:queue\/dlq@
   , retryFromDLQ
       :: mode
         :- Summary "Retry a dead-lettered job"
@@ -355,7 +355,7 @@ data ArchiveAPI payload mode = ArchiveAPI
           :> QueryParam "sort_by" ArchiveSortColumn
           :> QueryParam "sort_dir" SortDir
           :> Get '[JSON] (ArchiveResponse payload)
-  -- ^ @GET \/queues\/:queue\/archive?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&kind=X&payload=text&completed_after=T&completed_before=T&sort_by=...&sort_dir=...@
+  -- ^ @GET \/queues\/:queue\/archive@
   , reEnqueueArchive
       :: mode
         :- Summary "Run an archived job again"
@@ -438,7 +438,7 @@ data TableAPI payload result mode = TableAPI
           :> QueryParam "offset" Int
           :> QueryParam "group_key" Text
           :> Get '[JSON] GroupsResponse
-  -- ^ @GET \/queues\/:queue\/groups?limit=N&offset=N&group_key=X@
+  -- ^ @GET \/queues\/:queue\/groups@
   , getDetails
       :: mode
         :- Summary "Show the pause state of a queue"
@@ -562,7 +562,7 @@ data RateLimitsAPI mode = RateLimitsAPI
           :> QueryParam "limit" KeyPageLimit
           :> QueryParam "offset" Int
           :> Get '[JSON] RateLimitBucketsResponse
-  -- ^ @GET \/rate-limits\/:prefix\/buckets?limit=N&offset=N@
+  -- ^ @GET \/rate-limits\/:prefix\/buckets@
   , updateRateLimitPolicy
       :: mode
         :- Summary "Override a rate-limit policy"
@@ -601,9 +601,9 @@ data RateLimitsAPI mode = RateLimitsAPI
           :> "prune"
           :> QueryParam "idle" Double
           :> Post '[JSON] PruneResponse
-  -- ^ @POST \/rate-limits\/prune?idle=seconds@
+  -- ^ @POST \/rate-limits\/prune@
   --
-  -- The default idle is the server's maintenance bucket idle age.
+  -- The @idle@ value is in seconds. The default is the server's maintenance bucket idle age.
   }
   deriving stock (Generic)
 
@@ -622,7 +622,7 @@ data ConcurrencyAPI mode = ConcurrencyAPI
           :> QueryParam "limit" KeyPageLimit
           :> QueryParam "offset" Int
           :> Get '[JSON] ConcurrencyKeysResponse
-  -- ^ @GET \/concurrency\/:prefix\/keys?limit=N&offset=N@
+  -- ^ @GET \/concurrency\/:prefix\/keys@
   , updateConcurrencyPolicy
       :: mode
         :- Summary "Override a concurrency limit"

@@ -41,35 +41,35 @@ registerWorker
   -> Maybe Value
   -- ^ Free-form metadata
   -> m (Maybe Bool)
-registerWorker schema workerId queue host threads staleThreshold metadata =
+registerWorker schemaName workerId queue host threads staleThreshold metadata =
   MA.queryMaybe
-    (Sql.upsertWorkerSQL schema workerId queue host threads (realToFrac staleThreshold) metadata)
+    (Sql.upsertWorkerSQL schemaName workerId queue host threads (realToFrac staleThreshold) metadata)
 
 -- | Record a heartbeat and return the worker's effective pause state (worker or queue).
 -- 'Nothing' when the worker has no registry row.
 heartbeatWorker :: (MonadArbiter m) => SchemaName -> UUID -> m (Maybe Bool)
-heartbeatWorker schema workerId =
-  MA.queryMaybe (Sql.heartbeatWorkerSQL schema workerId)
+heartbeatWorker schemaName workerId =
+  MA.queryMaybe (Sql.heartbeatWorkerSQL schemaName workerId)
 
 -- | Set a worker's pause flag and notify the worker.
 setWorkerPaused :: (MonadArbiter m) => SchemaName -> UUID -> Bool -> m Int64
-setWorkerPaused schema workerId paused =
-  countOr0 (Sql.setWorkerPausedSQL schema paused workerId)
+setWorkerPaused schemaName workerId paused =
+  countOr0 (Sql.setWorkerPausedSQL schemaName paused workerId)
 
 -- | Mark a worker as gracefully draining.
 markWorkerShuttingDown :: (MonadArbiter m) => SchemaName -> UUID -> m Int64
-markWorkerShuttingDown schema workerId =
-  MA.executeStatement (Sql.markWorkerShuttingDownSQL schema workerId)
+markWorkerShuttingDown schemaName workerId =
+  MA.executeStatement (Sql.markWorkerShuttingDownSQL schemaName workerId)
 
 -- | Remove a worker registry row.
 deregisterWorker :: (MonadArbiter m) => SchemaName -> UUID -> m Int64
-deregisterWorker schema workerId =
-  MA.executeStatement (Sql.deleteWorkerSQL schema workerId)
+deregisterWorker schemaName workerId =
+  MA.executeStatement (Sql.deleteWorkerSQL schemaName workerId)
 
 -- | Whether the worker registry holds this identity.
 workerRegistered :: (MonadArbiter m) => SchemaName -> UUID -> m Bool
-workerRegistered schema workerId =
-  MA.queryAny (Sql.workerRegisteredSQL schema workerId)
+workerRegistered schemaName workerId =
+  MA.queryAny (Sql.workerRegisteredSQL schemaName workerId)
 
 -- | List workers, optionally filtered by queue and heartbeat age.
 listWorkers
@@ -78,8 +78,8 @@ listWorkers
   -> Maybe Text
   -> Maybe NominalDiffTime
   -> m [WorkerRow]
-listWorkers schema queue liveSecs = do
-  rows <- MA.executeQuery (Sql.listWorkersSQL schema queue (realToFrac <$> liveSecs))
+listWorkers schemaName queue liveSecs = do
+  rows <- MA.executeQuery (Sql.listWorkersSQL schemaName queue (realToFrac <$> liveSecs))
   traverse decodeHealth rows
   where
     decodeHealth (worker, rawHealth) = do
@@ -88,4 +88,4 @@ listWorkers schema queue liveSecs = do
 
 -- | Delete workers whose last heartbeat is older than their stale threshold.
 sweepStaleWorkers :: (MonadArbiter m) => SchemaName -> m Int64
-sweepStaleWorkers schema = MA.executeStatement (Sql.deleteStaleWorkersSQL schema)
+sweepStaleWorkers schemaName = MA.executeStatement (Sql.deleteStaleWorkersSQL schemaName)

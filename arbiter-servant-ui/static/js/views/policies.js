@@ -13,7 +13,7 @@ const ITEM_LIMIT = 100;
 // The shared lifecycle. It polls the policies and keeps the key list of an open
 // drawer fresh without a spinner. It closes a drawer whose policy vanished. It
 // copies the open prefix into ?prefix=, so the drawer is a link.
-function usePolicies({ noun, key, summaryKey, fetch, fetchItems, countField, sortKeys }) {
+function usePolicies({ noun, key, summaryKey, fetch, fetchItems, countField, sortKeys, fields, update }) {
   const policies = shallowRef(/** @type {any[]} */ ([]));
   const items = shallowRef(/** @type {any[]} */ ([]));
   const itemsLoading = ref(false);
@@ -125,18 +125,32 @@ function usePolicies({ noun, key, summaryKey, fetch, fetchItems, countField, sor
         },
         `Failed to ${what}`,
       ),
-    save: (apiFn, body) =>
-      submitForm(ctx.edit, async () => {
-        await apiFn(ctx.edit.prefix, body);
-        editing.value = false;
-        await view.reload();
-      }),
+    fields,
     edit: /** @type {{ saving: boolean, error: string, [k: string]: any }} */ ({ saving: false, error: '' }),
     // The drawer is the editor's home, so open it on this policy first.
-    openEdit(p, values) {
+    openEdit(p) {
       if (!d.view(p)) return;
-      ctx.edit = { prefix: p.prefix, row: p, saving: false, error: '', ...values };
+      const values = fields.flatMap(({ key: k, override: o, def }) => [
+        [k + 'On', p[o] != null],
+        [k, p[o] ?? ''],
+        [k + 'Default', p[def]],
+      ]);
+      ctx.edit = { prefix: p.prefix, row: p, saving: false, error: '', ...Object.fromEntries(values) };
       editing.value = true;
+    },
+    saveEdit() {
+      const e = ctx.edit;
+      const next = {};
+      for (const { key: k, override, ok, error } of fields) {
+        const r = parseOverride(e[k + 'On'], e[k], (n) => Number.isFinite(n) && ok(n));
+        if (r.error) return (e.error = error);
+        next[override] = r.value;
+      }
+      submitForm(e, async () => {
+        await update(e.prefix, changedOverrides(next, e.row));
+        editing.value = false;
+        await view.reload();
+      });
     },
   });
   return ctx;
@@ -158,6 +172,24 @@ const KeyList = {
         </table>
       </div>
     </kv>`,
+};
+
+// The drawer's override editor. A field that is off reverts to its default.
+const OverrideEditor = {
+  props: { ctx: Object, idPrefix: String, step: String, note: String },
+  template: /* html */ `
+    <div class="offcanvas-body drawer-edit arb-edit" tabindex="0">
+      <div v-for="{ key: k, label } in ctx.fields" :key="k" class="edit-field">
+        <div class="form-check form-switch">
+          <input class="form-check-input" type="checkbox" :id="idPrefix + k" v-model="ctx.edit[k + 'On']">
+          <label class="form-check-label" :for="idPrefix + k">{{ label }}</label>
+        </div>
+        <input type="number" min="0" :step="step" class="form-control form-control-sm" v-model="ctx.edit[k]" :disabled="!ctx.edit[k + 'On']"
+          @keydown.enter.prevent="ctx.saveEdit()" :placeholder="'default ' + ctx.edit[k + 'Default']">
+      </div>
+      <p class="edit-note">{{ note }}</p>
+      <edit-actions :form="ctx.edit" @cancel="ctx.editing = false" @save="ctx.saveEdit()"/>
+    </div>`,
 };
 
 // ---- Rate limits ----
@@ -195,7 +227,9 @@ const RL_KEY_COLS = [
   { key: 'actions', label: 'Actions', weight: 10 },
 ];
 
-/** @type {{ key: string, label: string, override: string, def: string, ok: (n: number) => boolean, error: string }[]} */
+/** @typedef {{ key: string, label: string, override: string, def: string, ok: (n: number) => boolean, error: string }} OverrideField */
+
+/** @type {OverrideField[]} */
 const RL_FIELDS = [
   {
     key: 'max',
@@ -234,7 +268,7 @@ const RlMenu = {
   props: { p: Object, close: Function },
   setup: () => inject('policies'),
   template: /* html */ `
-    <button v-if="!P.editing" type="button" class="dropdown-item" @click="openRlEdit(p); close()">Edit</button>
+    <button v-if="!P.editing" type="button" class="dropdown-item" @click="P.openEdit(p); close()">Edit</button>
     <arm-button :arm="P.arm" :k="'reset:' + p.prefix" cls="dropdown-item" on="fw-semibold" label="Reset" confirm="Confirm reset" @fire="reset(p); close()"/>`,
 };
 
@@ -258,7 +292,7 @@ const RlFill = {
 };
 
 export const RateLimitsView = {
-  components: { RlMenu, RlThrottled, RlFill, KeyList },
+  components: { RlMenu, RlThrottled, RlFill, KeyList, OverrideEditor },
   setup() {
     const P = usePolicies({
       noun: 'rate limits',
@@ -268,6 +302,8 @@ export const RateLimitsView = {
       fetchItems: api.buckets,
       countField: 'bucketCount',
       sortKeys: RL_SORT_KEYS,
+      fields: RL_FIELDS,
+      update: api.updateRateLimit,
     });
     const grant = reactive({ key: null, tokens: '' });
     const cancelGrant = () => Object.assign(grant, { key: null, tokens: '' });
@@ -316,7 +352,6 @@ export const RateLimitsView = {
       summary,
       RL_COLS,
       RL_KEY_COLS,
-      RL_FIELDS,
       effMax,
       fmtNum,
       avgFill,
@@ -328,27 +363,6 @@ export const RateLimitsView = {
       fillTitle: (p) => `min ${fmtNum(p.minTokens)}, avg ${fmtNum(p.avgTokens)} of ${fmtNum(effMax(p))} tokens`,
       // The grant form opens with what refills the bucket to its burst.
       openGrant: (b) => Object.assign(grant, { key: b.key, tokens: String(Math.ceil(Math.max(0, (b.maxTokens ?? 0) - (b.tokens ?? 0))) || 1) }),
-      openRlEdit: (p) =>
-        P.openEdit(
-          p,
-          Object.fromEntries(
-            RL_FIELDS.flatMap(({ key: k, override: o, def }) => [
-              [k + 'On', p[o] != null],
-              [k, p[o] ?? ''],
-              [k + 'Default', p[def]],
-            ]),
-          ),
-        ),
-      saveRl() {
-        const e = P.edit;
-        const next = {};
-        for (const { key: k, override, ok, error } of RL_FIELDS) {
-          const r = parseOverride(e[k + 'On'], e[k], (n) => Number.isFinite(n) && ok(n));
-          if (r.error) return (e.error = error);
-          next[override] = r.value;
-        }
-        P.save(api.updateRateLimit, changedOverrides(next, e.row));
-      },
       prune: () => P.maintain('prune', api.pruneBuckets, (r) => `Pruned ${r.pruned} idle ${pluralize(r.pruned, 'bucket')}`),
       reset: (p) =>
         P.maintain(
@@ -398,18 +412,8 @@ export const RateLimitsView = {
       <template #actions>
         <action-menu v-if="P.d.cur" v-slot="{ close }"><rl-menu :p="P.d.cur" :close="close"/></action-menu>
       </template>
-      <div v-if="P.editing" class="offcanvas-body drawer-edit arb-edit" tabindex="0">
-        <div v-for="{ key: k, label } in RL_FIELDS" :key="k" class="edit-field">
-          <div class="form-check form-switch">
-            <input class="form-check-input" type="checkbox" :id="'rl-' + k" v-model="P.edit[k + 'On']">
-            <label class="form-check-label" :for="'rl-' + k">{{ label }}</label>
-          </div>
-          <input type="number" min="0" step="any" class="form-control form-control-sm" v-model="P.edit[k]" :disabled="!P.edit[k + 'On']"
-            @keydown.enter.prevent="saveRl" :placeholder="'default ' + P.edit[k + 'Default']">
-        </div>
-        <p class="edit-note">Overrides take effect on the next consume. Uncheck a field to revert it to the declared default.</p>
-        <edit-actions :form="P.edit" @cancel="P.editing = false" @save="saveRl"/>
-      </div>
+      <override-editor v-if="P.editing" :ctx="P" id-prefix="rl-" step="any"
+        note="Overrides take effect on the next consume. Uncheck a field to revert it to the declared default."/>
       <div v-else-if="P.d.cur" class="offcanvas-body" tabindex="0">
         <dl class="row">
           <kv l="Rate">{{ rate(P.d.cur) }}</kv>
@@ -453,6 +457,18 @@ const busiestRatio = (p) => {
 const busiest = (p) => pct(busiestRatio(p));
 const saturated = (p) => p.keyCount > 0 && busiest(p) >= PERCENT;
 
+/** @type {OverrideField[]} */
+const CC_FIELDS = [
+  {
+    key: 'limit',
+    label: 'Concurrent limit per key',
+    override: 'overrideLimit',
+    def: 'defaultLimit',
+    ok: (n) => Number.isInteger(n) && n >= 0,
+    error: 'Limit must be a whole number >= 0',
+  },
+];
+
 const CC_SORT_KEYS = {
   prefix: (p) => p.prefix,
   limit: effLimit,
@@ -487,7 +503,7 @@ const Busiest = {
 };
 
 export const ConcurrencyView = {
-  components: { Busiest, KeyList },
+  components: { Busiest, KeyList, OverrideEditor },
   setup() {
     const P = usePolicies({
       noun: 'concurrency policies',
@@ -497,6 +513,8 @@ export const ConcurrencyView = {
       fetchItems: api.concurrencyKeys,
       countField: 'keyCount',
       sortKeys: CC_SORT_KEYS,
+      fields: CC_FIELDS,
+      update: api.updateConcurrency,
     });
     const summary = computed(() =>
       P.policies.reduce(
@@ -516,12 +534,6 @@ export const ConcurrencyView = {
       CC_KEY_COLS,
       effLimit,
       saturated,
-      openEdit: (p) => P.openEdit(p, { limitOn: p.overrideLimit != null, limit: p.overrideLimit ?? '', defaultLimit: p.defaultLimit }),
-      saveEdit() {
-        const limit = parseOverride(P.edit.limitOn, P.edit.limit, (n) => Number.isInteger(n) && n >= 0);
-        if (limit.error) return (P.edit.error = 'Limit must be a whole number >= 0');
-        P.save(api.updateConcurrency, changedOverrides({ overrideLimit: limit.value }, P.edit.row));
-      },
       reconcile: () => P.maintain('reconcile', api.reconcileConcurrency, (r) => `Reconciled ${r.reconciled} key ${pluralize(r.reconciled, 'count')}`),
       prune: () => P.maintain('prune', api.pruneConcurrencyKeys, (r) => `Pruned ${r.pruned} ${pluralize(r.pruned, 'key')}`),
     };
@@ -562,21 +574,11 @@ export const ConcurrencyView = {
       :status-class="tone('danger')" :sticky="P.editing">
       <template #actions>
         <action-menu v-if="P.d.cur && !P.editing" v-slot="{ close }">
-          <button type="button" class="dropdown-item" @click="openEdit(P.d.cur); close()">Edit</button>
+          <button type="button" class="dropdown-item" @click="P.openEdit(P.d.cur); close()">Edit</button>
         </action-menu>
       </template>
-      <div v-if="P.editing" class="offcanvas-body drawer-edit arb-edit" tabindex="0">
-        <div class="edit-field">
-          <div class="form-check form-switch">
-            <input class="form-check-input" type="checkbox" id="ccLimitOn" v-model="P.edit.limitOn">
-            <label class="form-check-label" for="ccLimitOn">Concurrent limit per key</label>
-          </div>
-          <input type="number" min="0" step="1" class="form-control form-control-sm" v-model="P.edit.limit" :disabled="!P.edit.limitOn"
-            @keydown.enter.prevent="saveEdit" :placeholder="'default ' + P.edit.defaultLimit">
-        </div>
-        <p class="edit-note">A lower limit does not preempt in-flight jobs. It applies as they drain. Uncheck to revert to the declared default.</p>
-        <edit-actions :form="P.edit" @cancel="P.editing = false" @save="saveEdit"/>
-      </div>
+      <override-editor v-if="P.editing" :ctx="P" id-prefix="cc-" step="1"
+        note="A lower limit does not preempt in-flight jobs. It applies as they drain. Uncheck to revert to the declared default."/>
       <div v-else-if="P.d.cur" class="offcanvas-body" tabindex="0">
         <dl class="row">
           <kv l="Limit per key">{{ effLimit(P.d.cur) }}</kv>

@@ -7,6 +7,7 @@ module Arbiter.Worker.Pool
   , throwIfInvalid
   ) where
 
+import Arbiter.Core.Enum (showText)
 import Arbiter.Core.Exceptions (displayEx)
 import Arbiter.Core.HighLevel (QueueOperation)
 import Arbiter.Core.HighLevel qualified as Arb
@@ -26,7 +27,6 @@ import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Foldable (traverse_)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time (NominalDiffTime)
 import System.Directory (removeFile)
@@ -260,9 +260,9 @@ drainPool logCfg mTimeout workQueue claimsStopped = do
           (busy, qLen) <- atomically ((,) <$> busyCount workQueue <*> queuedCount workQueue)
           tryLog logCfg Info $
             "Graceful shutdown: waiting for "
-              <> T.pack (show busy)
+              <> showText busy
               <> " busy worker(s), "
-              <> T.pack (show qLen)
+              <> showText qLen
               <> " job(s) in queue..."
           drainLoop
 

@@ -1,4 +1,4 @@
-// Worker pools with pause and resume. A queue's Workers tab, or every pool on
+// Workers with pause and resume. A queue's Workers tab, or every worker on
 // the global view when no queue is given.
 import { shallowRef, reactive, computed, provide, inject } from '../../vendor/vue.esm-browser.prod.js';
 import { api } from '../api.js';
@@ -19,10 +19,10 @@ function healthRank(w) {
 
 const SORT_KEYS = {
   workerId: (w) => String(w.workerId),
-  queue: (w) => w.queueName || '',
+  queue: (w) => w.queueName,
   host: (w) => w.hostName || '',
   threads: (w) => w.workerCount ?? 0,
-  heartbeat: (w) => Date.parse(w.lastHeartbeat || '') || -1,
+  heartbeat: (w) => Date.parse(w.lastHeartbeat) || -1,
   status: healthRank,
 };
 
@@ -44,7 +44,7 @@ const HEALTH = {
   stale: ['badge ' + tone('danger'), 'No heartbeat inside the stale threshold'],
   draining: ['badge draining-badge', 'Stops claiming, finishes its in-flight jobs, then stops'],
 };
-const healthClass = (w) => HEALTH[w.health]?.[0] || 'badge ' + tone('secondary');
+const healthClass = (w) => HEALTH[w.health][0];
 
 const WorkerMenu = {
   props: { w: Object, close: Function },
@@ -93,7 +93,7 @@ export const WorkersView = {
     const counts = computed(() =>
       workers.value.reduce(
         (acc, w) => {
-          acc[w.health] = (acc[w.health] || 0) + 1;
+          acc[w.health] += 1;
           acc.paused += w.paused ? 1 : 0;
           acc.threads += w.workerCount || 0;
           return acc;
@@ -129,7 +129,7 @@ export const WorkersView = {
       CONFIRM_CHARS,
       healthClass,
       setPaused,
-      healthTitle: (w) => HEALTH[w.health]?.[1] || '',
+      healthTitle: (w) => HEALTH[w.health][1],
       askPause: (w) => Object.assign(pausing, { open: true, worker: w }),
     };
     provide('workers', ctx);
@@ -165,7 +165,7 @@ export const WorkersView = {
             <td><span :title="formatTime(w.lastHeartbeat)">{{ formatAge(w.lastHeartbeat) }}</span></td>
             <td v-if="anyMetadata" class="text-truncate small font-monospace" :title="w.metadata ? jsonText(w.metadata) : ''">{{ w.metadata ? jsonText(w.metadata) : EMPTY }}</td>
             <td>
-              <span :class="healthClass(w)" :title="healthTitle(w)">{{ w.health || 'live' }}</span>
+              <span :class="healthClass(w)" :title="healthTitle(w)">{{ w.health }}</span>
               <span v-if="w.paused" class="badge paused-badge ms-1">paused</span>
             </td>
             <td class="cell-actions">
@@ -177,7 +177,7 @@ export const WorkersView = {
       </table>
     </div>
 
-    <drawer :d="d" :title="d.cur ? 'Worker ' + shortId(d.cur.workerId) : 'Worker'" :status="d.cur ? d.cur.health || 'live' : ''" :status-class="d.cur ? healthClass(d.cur) : ''">
+    <drawer :d="d" :title="d.cur ? 'Worker ' + shortId(d.cur.workerId) : 'Worker'" :status="d.cur ? d.cur.health : ''" :status-class="d.cur ? healthClass(d.cur) : ''">
       <template #actions>
         <action-menu v-if="d.cur" :disabled="busy.has(d.cur.workerId)" v-slot="{ close }"><worker-menu :w="d.cur" :close="close"/></action-menu>
       </template>
@@ -190,7 +190,7 @@ export const WorkersView = {
           <kv l="Started At">{{ formatTime(d.cur.startedAt, EMPTY) }}</kv>
           <kv l="Last Heartbeat">{{ formatTime(d.cur.lastHeartbeat, EMPTY) }} <span class="text-muted ms-2">({{ formatAge(d.cur.lastHeartbeat) }})</span></kv>
           <kv l="Stale Threshold">{{ d.cur.staleThresholdSecs }}s</kv>
-          <kv l="Health"><span :class="healthClass(d.cur)">{{ d.cur.health || 'live' }}</span></kv>
+          <kv l="Health"><span :class="healthClass(d.cur)">{{ d.cur.health }}</span></kv>
           <kv l="Paused">{{ d.cur.paused ? 'Yes' : 'No' }}</kv>
           <kv l="Metadata" wide><copy-block :text="formatJson(d.cur.metadata)"/></kv>
         </dl>
@@ -200,6 +200,6 @@ export const WorkersView = {
     <confirm-modal v-model:open="pausing.open" title="Pause worker" :subject="pausing.worker?.workerId"
       :target="String(pausing.worker?.workerId ?? '').slice(-CONFIRM_CHARS)" action="Pause worker" :busy="busy.has(pausing.worker?.workerId)"
       :prompt="'Type the last ' + CONFIRM_CHARS + ' characters to confirm:'"
-      note="Pausing stops this worker pool from claiming new jobs until it is resumed. In-flight jobs finish, new ones wait."
+      note="Pausing stops this worker from claiming new jobs until it is resumed. In-flight jobs finish, new ones wait."
       @confirm="setPaused(pausing.worker, true)"/>`,
 };

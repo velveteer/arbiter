@@ -210,12 +210,13 @@ function snapshotTab(cfg) {
         Object.assign(edit, blankEdit(), { id: id(row), text: formatJson(row.jobSnapshot?.payload) });
       }
 
-      const editInvalid = computed(() => !edit.text.trim() || !!parsePayload(edit.text.trim()).error);
+      const editParsed = computed(() => parsePayload(edit.text.trim()));
+      const editInvalid = computed(() => !edit.text.trim() || !!editParsed.value.error);
 
       function submitEdit() {
         const done = edit.id;
         if (done == null || edit.saving || busy.has(done)) return;
-        const parsed = parsePayload(edit.text.trim());
+        const parsed = editParsed.value;
         if (parsed.error) edit.error = 'Invalid JSON: ' + parsed.error;
         if (editInvalid.value) return;
         // A 400 means the queue refuses the payload. Its body says why.

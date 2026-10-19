@@ -198,7 +198,7 @@ export const QueueList = {
       </div>
       <div class="queue-toolbar-end">
         <arm-button :arm="arm" k="maintenance" on="btn-warning" off="btn-outline-secondary" :disabled="busy.has('maintain')" @fire="maintain"
-          title="Sweep exhausted jobs to the DLQ, clear cancelled ones, retire stale workers and refresh group counts, across every queue. A worker pool's reaper does this on its own."
+          title="Run one reaper maintenance pass across every queue. A worker pool's reaper does this on its own."
           :label="busy.has('maintain') ? ' Running…' : 'Run maintenance'" confirm="Confirm run"><span v-if="busy.has('maintain')" class="spin" aria-hidden="true">&#x21bb;</span></arm-button>
         <div class="queue-sort" v-if="mode === 'cards'">
           <label class="queue-sort-label" for="queue-sort-select">Sort</label>

@@ -8,7 +8,6 @@ module Arbiter.Worker.Processing
 
 import Arbiter.Core.Exceptions (JobForceCancelled (..), displayEx)
 import Arbiter.Core.Job.Types qualified as Job
-import Control.Exception (fromException)
 import Control.Exception qualified as E
 import Control.Monad (forever)
 import Control.Monad.IO.Class (liftIO)
@@ -49,17 +48,15 @@ workerLoop config guard mode effectsFor workQueue =
     -- to busy) and entering the finally block that frees the busy slot.
     jobBatch <- popWork workQueue
 
-    flip
-      finally
-      (atomically (finishWork workQueue))
-      $ do
-        handoff <- liftIO (newHandoff guard)
-        result <- restore (liftIO (E.try (runBatch (effectsFor jobBatch) guard mode handoff jobBatch)))
-        case result of
-          Right () -> pure ()
-          Left exception
-            | Just JobForceCancelled {} <- fromException exception -> pure ()
-            | isAsyncException exception -> liftIO (E.throwIO exception)
-            | otherwise -> do
-                tryLog (batchLog config jobBatch) Error $ "Worker exception: " <> displayEx exception
-                threadDelay exceptionPauseMicros
+    let process = do
+          handoff <- liftIO (newHandoff guard)
+          result <- restore (liftIO (E.try (runBatch (effectsFor jobBatch) guard mode handoff jobBatch)))
+          case result of
+            Right () -> pure ()
+            Left exception
+              | Just JobForceCancelled {} <- E.fromException exception -> pure ()
+              | isAsyncException exception -> liftIO (E.throwIO exception)
+              | otherwise -> do
+                  tryLog (batchLog config jobBatch) Error $ "Worker exception: " <> displayEx exception
+                  threadDelay exceptionPauseMicros
+    process `finally` atomically (finishWork workQueue)

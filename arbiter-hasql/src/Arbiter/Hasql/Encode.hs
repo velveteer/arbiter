@@ -9,7 +9,7 @@ import Hasql.Encoders qualified as E
 
 -- | A parameter list as one positional encoder.
 buildEncoder :: Params -> E.Params ()
-buildEncoder = mconcat . map encodeSomeParam
+buildEncoder = foldMap encodeSomeParam
 
 -- | Encode one parameter at its declared nullability.
 encodeSomeParam :: SomeParam -> E.Params ()

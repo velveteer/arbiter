@@ -88,12 +88,12 @@ runWorkerPools
   -> m ()
 runWorkerPools pools = do
   requested <- liftIO $ requestedQueues (Proxy @(RegistryOf m))
-  runSelectedWorkerPools (fromMaybe [name | NamedWorkerPool name _ <- pools] requested) pools
+  runSelectedWorkerPools (fromMaybe (map workerPoolName pools) requested) pools
 
 -- | Signal graceful shutdown to every pool atomically.
 shutdownWorkerPools :: (MonadIO m) => [NamedWorkerPool m'] -> m ()
 shutdownWorkerPools pools =
-  liftIO . STM.atomically $
+  STM.atomically $
     traverse_ (`STM.writeTVar` ShuttingDown) [workerStateVar cfg | NamedWorkerPool _ cfg <- pools]
 
 -- | Run only named pools. A pool that exits winds down its peers. After every peer has
@@ -106,12 +106,12 @@ runSelectedWorkerPools
   -> [NamedWorkerPool m]
   -> m ()
 runSelectedWorkerPools enabled pools = do
-  let available = Set.fromList [name | NamedWorkerPool name _ <- pools]
+  let available = Set.fromList (map workerPoolName pools)
       missing = Set.toList (Set.fromList enabled `Set.difference` available)
   unless (null missing)
     $ liftIO . E.throwIO . WorkerPoolSelectionException
     $ "No worker pool configured for: " <> T.intercalate ", " missing
-  case filter (\(NamedWorkerPool name _) -> name `elem` enabled) pools of
+  case selectPools enabled pools of
     [] -> liftIO $ E.throwIO (WorkerPoolSelectionException "No worker pools selected")
     selected -> evalContT $ do
       asyncs <- traverse withPoolAsync selected
@@ -150,12 +150,12 @@ poolConfigForWorkers
   -> IO PoolConfig
 poolConfigForWorkers pools = do
   enabled <- getEnabledQueues (Proxy @(RegistryOf m))
-  traverse_ (validateSelected enabled) pools
-  let enabledWorkers = sum [workerCount cfg | NamedWorkerPool name cfg <- pools, name `elem` enabled]
+  let selected = selectPools enabled pools
+      enabledWorkers = sum [workerCount cfg | NamedWorkerPool _ cfg <- selected]
+  traverse_ (\(NamedWorkerPool _ cfg) -> throwIfInvalid cfg) selected
   pure
     defaultPoolConfig {poolSize = max minWorkerConnections (connectionsPerWorker * enabledWorkers) + listenerConnections}
-  where
-    validateSelected :: [Text] -> NamedWorkerPool m -> IO ()
-    validateSelected enabled (NamedWorkerPool name cfg)
-      | name `notElem` enabled = pure ()
-      | otherwise = throwIfInvalid cfg
+
+-- | The pools whose name is in the list, in pool order.
+selectPools :: [Text] -> [NamedWorkerPool m] -> [NamedWorkerPool m]
+selectPools enabled = filter ((`elem` enabled) . workerPoolName)

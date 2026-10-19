@@ -6,6 +6,7 @@ module Arbiter.Otel.Logs
   , otelLogs
   ) where
 
+import Arbiter.Core.Trace (instrumentationScope)
 import Arbiter.Worker.Logger (LogConfig (..), LogDestination (..), LogLevel (..), Pair)
 import Control.Monad (void)
 import Data.Aeson (Value (..))
@@ -28,7 +29,7 @@ otelLogs dest cfg = maybe cfg (\destination -> cfg {logDestination = teed destin
 
 -- | Route Arbiter's logs to @provider@ as OTel log records.
 loggerDestination :: Log.LoggerProvider -> LogDestination
-loggerDestination provider = LogCallback (otelLogCallback (Log.makeLogger provider "arbiter"))
+loggerDestination provider = LogCallback (otelLogCallback (Log.makeLogger provider instrumentationScope))
 
 -- | One Arbiter log line as an OTel log record, with its structured context as attributes.
 otelLogCallback :: Log.Logger -> LogLevel -> Text -> [Pair] -> IO ()

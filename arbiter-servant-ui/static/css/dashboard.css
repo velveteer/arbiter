@@ -1,5 +1,5 @@
 /* ======================================================
-   Arbiter Admin Dashboard — theme
+   Arbiter Admin Dashboard theme
 
    Both light and dark modes use the same design
    language with shared accent colors (teal, purple, gold).
@@ -366,7 +366,7 @@ label.queue-sort-label,
 }
 
 /* ======================================================
-   Component styles — shared structure, mode via variables
+   Component styles. Shared structure, mode via variables
    ====================================================== */
 
 /* ---- Navbar ---- */
@@ -525,7 +525,7 @@ label.queue-sort-label,
 }
 
 /* Jobs and DLQ carry many columns. Give them a floor width so headers never
-   compress and overlap; below it the table scrolls (as it already does on
+   compress and overlap. Below it the table scrolls (as it already does on
    mobile) rather than squeezing columns narrower than their headers. */
 #tab-jobs table {
   min-width: 1150px;

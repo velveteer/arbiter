@@ -238,8 +238,8 @@ instance (FromJSON payload) => FromJSON (JobRead payload) where
       <*> (PayloadKeys <$> obj .:? "kind" <*> obj .:? "rateLimit" <*> obj .:? "concurrency")
 
 instance (ToJSON payload) => ToJSON (JobRead payload) where
-  toJSON = object . jobReadPairs
-  toEncoding = pairs . jobReadSeries
+  toJSON = object . jobReadFields
+  toEncoding = pairs . mconcat . jobReadFields
 
 -- | A job's JSON fields as key-value pairs.
 jobReadPairs :: (ToJSON payload) => JobRead payload -> [Pair]

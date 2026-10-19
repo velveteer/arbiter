@@ -33,7 +33,7 @@ import Arbiter.Core.MonadArbiter qualified as MA
 import Arbiter.Core.Sql.Gates qualified as Sql
 import Arbiter.Core.Sql.QQ qualified as QQ
 import Arbiter.Core.SqlLiterals (intLiteral)
-import Arbiter.Core.Threads (microsPerSecond)
+import Arbiter.Core.Threads (micros, millisPerSecond)
 
 -- ---------------------------------------------------------------------------
 -- Global Gate Operations
@@ -43,7 +43,7 @@ import Arbiter.Core.Threads (microsPerSecond)
 -- database aborts a statement that exceeds the limit.
 setLocalStatementTimeout :: (MonadArbiter m) => NominalDiffTime -> m ()
 setLocalStatementTimeout limit =
-  let millis = ceiling (realToFrac limit * millisPerSecond) :: Int
+  let millis = ceiling (realToFrac limit * millisPerSecond :: Double) :: Int
       millisText = intLiteral millis
    in void $
         MA.executeQuery
@@ -176,11 +176,3 @@ runGatedShared schemaName task interval maxAge work =
       void
         (tryAny (UIO.timeout (micros interval) (MA.executeStatement (Sql.releaseGateSQL schemaName task claimedAt previous))))
     decoded value age = either (Unreadable . (\err -> task <> " gate payload: " <> T.pack err)) (Published age) (parseEither parseJSON value)
-
--- | An interval in microseconds, for the timeout and delay primitives.
-micros :: NominalDiffTime -> Int
-micros seconds = round (realToFrac seconds * microsPerSecond :: Double)
-
--- | Milliseconds in one second.
-millisPerSecond :: Double
-millisPerSecond = 1000

@@ -1,16 +1,16 @@
 -- | Convenience re-exports for the @postgresql-simple@ backend.
 --
 -- @
--- import Arbiter.Core
--- import Arbiter.Simple
+-- import Arbiter.Core qualified as Arb
+-- import Arbiter.Simple qualified as ArbS
 -- import Control.Monad (void)
 -- import Data.Proxy (Proxy (..))
 --
 -- main :: IO ()
 -- main = do
---   env <- createSimpleEnv (Proxy \@MyRegistry) connStr "arbiter"
---   runSimpleDb env $ do
---     void $ insertJob (defaultJob myPayload)
+--   env <- ArbS.createSimpleEnv (Proxy \@MyRegistry) connStr "arbiter"
+--   ArbS.runSimpleDb env $ do
+--     void $ Arb.insertJob (Arb.defaultJob myPayload)
 -- @
 --
 -- "Arbiter.Simple.MonadArbiter" has the primitives for an application's own instance.

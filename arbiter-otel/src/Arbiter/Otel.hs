@@ -7,10 +7,12 @@
 -- take a handle the caller installed itself.
 --
 -- @
+-- import Arbiter.Hasql qualified as ArbH
 -- import Arbiter.Otel qualified as Otel
+-- import Arbiter.Worker qualified as Worker
 --
--- env <- createHasqlEnv ...
--- runHasqlDb env $ Otel.runWorkerPools [namedWorkerPool emailCfg]
+-- env <- ArbH.createHasqlEnv ...
+-- ArbH.runHasqlDb env $ Otel.runWorkerPools [Worker.namedWorkerPool emailCfg]
 -- @
 module Arbiter.Otel
   ( -- * Setup
@@ -74,7 +76,7 @@ import Arbiter.Otel.Telemetry
 -- The pool's registry queue name labels its metrics. Apply it once per pool.
 instrumentPool :: (MonadUnliftIO m) => Telemetry -> NamedWorkerPool m -> NamedWorkerPool m
 instrumentPool tel (NamedWorkerPool queue cfg) =
-  NamedWorkerPool queue (labelledConfig tel queue cfg)
+  NamedWorkerPool {workerPoolName = queue, workerPoolConfig = labelledConfig tel queue cfg}
 
 -- | 'instrumentPool' over a pool list.
 instrumentPools :: (MonadUnliftIO m) => Telemetry -> [NamedWorkerPool m] -> [NamedWorkerPool m]
@@ -92,7 +94,7 @@ withGauges
 withGauges tel baseLog action = do
   schema <- getSchema
   withRunInIO $ \runDb ->
-    withGaugeLoop tel baseLog runDb schema (registryQueueKinds (Proxy @(RegistryOf m))) (gaugeRefresh tel) $
+    withGaugeLoop tel baseLog runDb schema (registryQueueKinds (Proxy @(RegistryOf m))) $
       \loop -> withAsync (labelArbiterThread "gauges" Nothing >> loop) (const (runDb action))
 
 -- | 'Arbiter.Worker.runWorkerPools' with the SDK installed from the environment, the

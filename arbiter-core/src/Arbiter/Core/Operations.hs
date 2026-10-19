@@ -33,6 +33,8 @@ module Arbiter.Core.Operations
   , claimNextVisibleJobsBatched
   , JobStatements
   , mkJobStatements
+  , singleJobBatchSize
+  , noStagedCapacities
   , claimJobsCached
   , claimJobsBatchedCached
   , RejectedRow
@@ -301,11 +303,11 @@ import Arbiter.Core.Exceptions
   )
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
+import Arbiter.Core.Job.Dedup (isReplaceDuplicate)
 import Arbiter.Core.Job.Kind (HasKind, kindOf)
 import Arbiter.Core.Job.Schema (SchemaName, TableName)
 import Arbiter.Core.Job.Types
   ( ClaimSeq
-  , DedupKey (ReplaceDuplicate)
   , JobId
   , JobPayload
   , JobRead
@@ -483,12 +485,12 @@ likeEscape = T.concatMap escape
 likeMeta :: String
 likeMeta = "\\%_"
 
--- | Run a single-row count @Query@, throwing a parse error on unexpected results.
-countStrict :: (MonadArbiter m) => Text -> Q.Query Int64 -> m Int64
-countStrict label query = do
+-- | Run a single-row @Query@, throwing a parse error on any other result.
+queryOne :: (MonadArbiter m) => Text -> Q.Query a -> m a
+queryOne label query = do
   rows <- MA.executeQuery query
   case rows of
-    [count] -> pure count
+    [row] -> pure row
     _ -> throwParsing $ label <> ": unexpected result"
 
 -- | Take the transaction-scoped advisory locks keyed by a @schema.table@ string and
@@ -572,9 +574,9 @@ insertJobSource
   -> m (Maybe (JobRead payload))
 insertJobSource schemaName tableName job source = do
   let valuesFrag = insertFrag (jobCodec tableName) source
-      query = case JT.dedupKey job of
-        Just (ReplaceDuplicate _) -> Tmpl.insertJobReplaceSQL schemaName tableName valuesFrag
-        _ -> Tmpl.insertJobSQL schemaName tableName valuesFrag
+      query
+        | isReplaceDuplicate (JT.dedupKey job) = Tmpl.insertJobReplaceSQL schemaName tableName valuesFrag
+        | otherwise = Tmpl.insertJobSQL schemaName tableName valuesFrag
 
   withDbTransaction $ do
     rawJobs <- MA.executeQuery query
@@ -673,8 +675,8 @@ spawnChildren schemaName tableName job children = withDbTransaction $ do
 
     refuseSpawn :: m ()
     refuseSpawn = do
-      alreadySpawned <- MA.executeQuery (Tmpl.spawnedAlreadySQL schemaName tableName jobId (claimSeq job))
-      if or alreadySpawned && isJust (claimedBy job)
+      alreadySpawned <- MA.queryAny (Tmpl.spawnedAlreadySQL schemaName tableName jobId (claimSeq job))
+      if alreadySpawned && isJust (claimedBy job)
         then
           scopedRetry $
             "spawnChildren: job " <> showText jobId <> " already spawned children in this round"
@@ -705,14 +707,14 @@ resetRateLimitBuckets schemaName prefix =
 wakeThrottledJobs :: (MonadArbiter m) => SchemaName -> [TableName] -> Text -> m Int64
 wakeThrottledJobs _ [] _ = pure 0
 wakeThrottledJobs schemaName tableNames prefix =
-  countStrict "wakeThrottledJobs" (Tmpl.wakeThrottledJobsSQL schemaName tableNames prefix)
+  queryOne "wakeThrottledJobs" (Tmpl.wakeThrottledJobsSQL schemaName tableNames prefix)
 
 -- | Wake one key's throttled jobs across the given tables, in one statement.
 -- Returns the number woken.
 wakeThrottledJobsForKey :: (MonadArbiter m) => SchemaName -> [TableName] -> RateLimitKey -> m Int64
 wakeThrottledJobsForKey _ [] _ = pure 0
 wakeThrottledJobsForKey schemaName tableNames key =
-  countStrict
+  queryOne
     "wakeThrottledJobsForKey"
     (Tmpl.wakeThrottledJobsForKeySQL schemaName tableNames (rlkPrefix key) (rateLimitKeyText key))
 
@@ -803,15 +805,15 @@ reconcileConcurrencyCounts schemaName tableNames = withDbTransaction $ do
 reconcileConcurrencyCountsIfStale :: (MonadArbiter m) => SchemaName -> [TableName] -> m Int64
 reconcileConcurrencyCountsIfStale _ [] = pure 0
 reconcileConcurrencyCountsIfStale schemaName tableNames = do
-  stale <- MA.executeQuery (Tmpl.concurrencyCountsStaleSQL schemaName tableNames)
-  if or stale then reconcileConcurrencyCounts schemaName tableNames else pure 0
+  stale <- MA.queryAny (Tmpl.concurrencyCountsStaleSQL schemaName tableNames)
+  if stale then reconcileConcurrencyCounts schemaName tableNames else pure 0
 
 -- | Reconcile then prune, skipped when no concurrency key exists. Returns
 -- the rows repaired and pruned.
 reconcileAndPruneConcurrency :: (MonadArbiter m) => SchemaName -> [TableName] -> m Int64
 reconcileAndPruneConcurrency schemaName tableNames = do
-  hasKeys <- MA.executeQuery (Tmpl.concurrencyHasAnyKeySQL schemaName)
-  if not (or hasKeys)
+  hasKeys <- MA.queryAny (Tmpl.concurrencyHasAnyKeySQL schemaName)
+  if not hasKeys
     then pure 0
     else
       (+)
@@ -950,12 +952,8 @@ dedupBatch = toList . snd . foldl' step (Map.empty, Seq.empty)
       Just key -> case Map.lookup key seen of
         Nothing -> (Map.insert key (Seq.length rows) seen, rows |> job)
         Just idx
-          | isReplace job -> (seen, Seq.update idx job rows)
+          | isReplaceDuplicate (JT.dedupKey job) -> (seen, Seq.update idx job rows)
           | otherwise -> (seen, rows)
-
-    isReplace job = case JT.dedupKey job of
-      Just (ReplaceDuplicate _) -> True
-      _ -> False
 
 -- | The 'Claim.ClaimAdmission' for this payload type.
 claimAdmissionFor :: forall payload. (HasConcurrency payload, HasRateLimit payload) => Claim.ClaimAdmission
@@ -992,8 +990,10 @@ claimNextVisibleJobsAs
   -> UUID
   -> m [JobRead payload]
 claimNextVisibleJobsAs schemaName tableName maxJobs timeout workerId =
-  -- Batch size 1 is the single-job claim.
-  claimJobsCached (mkJobStatements @payload schemaName tableName 1 0 timeout workerId) maxJobs >>= deadLetterRest
+  claimJobsCached
+    (mkJobStatements @payload schemaName tableName singleJobBatchSize noStagedCapacities timeout workerId)
+    maxJobs
+    >>= deadLetterRest
 
 -- | 'claimNextVisibleJobsAs' over a pool's staged statements. Returns the rejected rows
 -- for 'deadLetterRejected'.
@@ -1023,7 +1023,9 @@ claimNextVisibleJobsBatched
   -> NominalDiffTime
   -> m [NonEmpty (JobRead payload)]
 claimNextVisibleJobsBatched schemaName tableName batchSize maxBatches timeout =
-  claimJobsBatchedCached (mkJobStatements @payload schemaName tableName batchSize 0 timeout anonymousClaimant) maxBatches
+  claimJobsBatchedCached
+    (mkJobStatements @payload schemaName tableName batchSize noStagedCapacities timeout anonymousClaimant)
+    maxBatches
     >>= deadLetterRest
 
 -- | 'claimNextVisibleJobsBatched' over a pool's staged statements.
@@ -1128,6 +1130,14 @@ mkJobStatements schemaName tableName batchSize poolSize timeout workerId =
       Q.rows codec (Claim.claimJobsBatchedSQL schemaName tableName admission batchSize capacity timeout workerId)
     claims = IntMap.fromList [(capacity, renderClaim capacity) | capacity <- [1 .. poolSize]]
 
+-- | The 'mkJobStatements' batch size of a claim that takes one job per batch.
+singleJobBatchSize :: Int
+singleJobBatchSize = 1
+
+-- | The 'mkJobStatements' pool size that stages no claim statement. Each claim renders its own.
+noStagedCapacities :: Int
+noStagedCapacities = 0
+
 -- | 'ackJob' inside the caller's transaction, over staged statements.
 ackJobWith :: (MonadArbiter m) => AckStatements -> JobRead payload -> m Int64
 ackJobWith statements job = do
@@ -1179,6 +1189,12 @@ data TreesLocked = TreesLocked
 lockJobTrees :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m TreesLocked
 lockJobTrees _ _ [] = pure TreesLocked
 lockJobTrees schemaName tableName ids = TreesLocked <$ countOr0 (Tmpl.lockJobTreesSQL schemaName tableName ids)
+
+-- | Take the parents' advisory locks, then 'lockJobTrees' over the jobs named.
+lockParentsAndTrees :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m TreesLocked
+lockParentsAndTrees schemaName tableName ids = do
+  lockJobParents schemaName tableName =<< MA.executeQuery (Tmpl.getParentIdsSQL schemaName tableName ids)
+  lockJobTrees schemaName tableName ids
 
 -- | Apply 'lockJobTrees' to the complete tree of each named job. Use these locks
 -- before tree cancellation.
@@ -1338,6 +1354,11 @@ data TreeLocks
   | -- | The caller holds the locks already.
     LocksHeld TreesLocked
 
+-- | The held tree locks, or the locks that @takeLocks@ takes.
+holdTreeLocks :: (Applicative m) => TreeLocks -> m TreesLocked -> m TreesLocked
+holdTreeLocks (LocksHeld held) _ = pure held
+holdTreeLocks TakeLocks takeLocks = takeLocks
+
 -- | Move a job to the DLQ, cascading a rollup parent's descendants with it and waking
 -- the parent of a child. A held job is moved too. Returns 0 when the job's claim token changed
 -- or the job was deleted after the read.
@@ -1354,11 +1375,9 @@ moveToDLQ
   -> JobRead payload
   -> m Int64
 moveToDLQ locks schemaName tableName errorMsg job = withDbTransaction $ do
-  held <- case locks of
-    LocksHeld held -> pure held
-    TakeLocks -> do
-      lockJobsAndParents schemaName tableName [(jobId, parentId job)]
-      lockJobTrees schemaName tableName [jobId]
+  held <- holdTreeLocks locks $ do
+    lockJobsAndParents schemaName tableName [(jobId, parentId job)]
+    lockJobTrees schemaName tableName [jobId]
   rollup <- not . null <$> rollupIdsNow schemaName tableName [jobId]
   moveToDLQFieldsInner
     (LocksHeld held)
@@ -1412,9 +1431,8 @@ moveToDLQFieldsInner
   -> Bool
   -> m Int64
 moveToDLQFieldsInner locks move schemaName tableName errorMsg jobId cseq mParentId rollup = do
-  held <- case locks of
-    LocksHeld held -> pure held
-    TakeLocks -> lockJobParents schemaName tableName [mParentId] *> lockJobTrees schemaName tableName [jobId]
+  held <-
+    holdTreeLocks locks (lockJobParents schemaName tableName [mParentId] *> lockJobTrees schemaName tableName [jobId])
   when rollup $ snapshotTreeRollups schemaName tableName jobId
   rows <- countOr0 (Tmpl.moveToDLQSQL move schemaName tableName jobId cseq errorMsg)
   when (rows > 0) $ do
@@ -1441,7 +1459,7 @@ cascadeChildrenToDLQ
   -- ^ Error message for cascaded children
   -> m Int64
 cascadeChildrenToDLQ schemaName tableName parentJobId errorMsg =
-  countStrict
+  queryOne
     "cascadeChildrenToDLQ"
     (Tmpl.cascadeChildrenToDLQSQL schemaName tableName parentJobId errorMsg)
 
@@ -1666,7 +1684,7 @@ countJobsFiltered
   -- ^ Composable filters
   -> m Int64
 countJobsFiltered schemaName tableName filters =
-  countStrict
+  queryOne
     "countJobsFiltered"
     (Tmpl.countJobsFilteredSQL schemaName tableName (buildWhereClause Tmpl.MainTable filters))
 
@@ -1732,7 +1750,7 @@ countDLQFiltered
   -- ^ Composable filters
   -> m Int64
 countDLQFiltered schemaName tableName filters =
-  countStrict "countDLQFiltered" (Tmpl.countDLQFilteredSQL schemaName tableName (buildWhereClause Tmpl.DLQTable filters))
+  queryOne "countDLQFiltered" (Tmpl.countDLQFilteredSQL schemaName tableName (buildWhereClause Tmpl.DLQTable filters))
 
 toDLQRow :: (Int64, UTCTime, JobRead (Stored payload)) -> DLQ.DLQJob (Stored payload)
 toDLQRow (dlqId, dlqFailedAt, jobSnapshot) =
@@ -1864,7 +1882,7 @@ countArchiveFiltered
   -> [Tmpl.JobFilter]
   -> m Int64
 countArchiveFiltered schemaName tableName filters =
-  countStrict
+  queryOne
     "countArchiveFiltered"
     (Tmpl.countArchiveFilteredSQL schemaName tableName (buildWhereClause Tmpl.ArchiveTable filters))
 
@@ -1884,7 +1902,11 @@ purgeArchives
   => SchemaName -> [TableName] -> m (Int64, [Text])
 purgeArchives =
   sweepQueues $ \schemaName queue ->
-    withDbTransaction (MA.executeStatement (Q.raw (Tmpl.purgeArchiveSQL schemaName queue)))
+    withDbTransaction (MA.executeStatement (Tmpl.purgeArchiveSQL schemaName queue archivePurgeBatch))
+
+-- | Per-queue cap on archived jobs purged in one reaper pass.
+archivePurgeBatch :: Int
+archivePurgeBatch = 10000
 
 -- | List DLQ jobs, most recently failed first.
 listDLQJobs
@@ -1990,8 +2012,7 @@ deleteCancelledJobs
 deleteCancelledJobs schemaName tableName scope
   | null jobIds = pure []
   | otherwise = withDbTransaction $ do
-      lockJobParents schemaName tableName =<< MA.executeQuery (Tmpl.getParentIdsSQL schemaName tableName jobIds)
-      held <- lockJobTrees schemaName tableName jobIds
+      held <- lockParentsAndTrees schemaName tableName jobIds
       deleteJobsResumingParents held schemaName tableName deleteSql
   where
     (jobIds, deleteSql) = case scope of
@@ -2108,9 +2129,7 @@ cancelJobsBatch _ _ [] = pure 0
 cancelJobsBatch schemaName tableName jobIds =
   withDbTransaction $ do
     let ids = Set.toList (Set.fromList jobIds)
-    parents <- MA.executeQuery (Tmpl.getParentIdsSQL schemaName tableName ids)
-    lockJobParents schemaName tableName parents
-    void $ lockJobTrees schemaName tableName ids
+    void $ lockParentsAndTrees schemaName tableName ids
     sum <$> traverse (countOr0 . Tmpl.cancelJobSQL schemaName tableName) ids
 
 -- | Make a delayed or retrying job immediately visible. Refuses an in-flight or suspended job.
@@ -2445,7 +2464,7 @@ listGroups schemaName tableName key limit offset = do
 -- | The number of open groups 'listGroups' pages through.
 countGroups :: (MonadArbiter m) => SchemaName -> TableName -> Maybe Text -> m Int64
 countGroups schemaName tableName key =
-  countStrict "countGroups" (Tmpl.countGroupsSQL schemaName tableName key)
+  queryOne "countGroups" (Tmpl.countGroupsSQL schemaName tableName key)
 
 -- ---------------------------------------------------------------------------
 -- Count Operations
@@ -2572,7 +2591,7 @@ cancelJobCascade =
 
 -- | Transactional wrapper for cascade-delete SQL. Reads the root's parent, runs the
 -- supplied delete, and wakes the parent for a completion round when the delete changed
--- anything. 'cancelJobCascade' and 'forceCancelJob' share this shell.
+-- anything.
 cascadeDeleteJob
   :: (MonadArbiter m)
   => (a -> Bool)
@@ -2997,12 +3016,9 @@ requestCronRun
   -- ^ Schedule name
   -> m RunRequestOutcome
 requestCronRun schemaName scheduleName = do
-  rows <- MA.executeQuery (Tmpl.requestCronRunSQL schemaName scheduleName)
-  case rows of
-    [status] ->
-      orThrowParsing . first ("requestCronRun: " <>) $
-        enumFromText "run request outcome" runRequestOutcomeToText status
-    _ -> throwParsing "requestCronRun: unexpected result"
+  status <- queryOne "requestCronRun" (Tmpl.requestCronRunSQL schemaName scheduleName)
+  orThrowParsing . first ("requestCronRun: " <>) $
+    enumFromText "run request outcome" runRequestOutcomeToText status
 
 -- | Claim a pending run request, returning the claimed row. 'Nothing' when no enabled
 -- schedule of that name has a pending request.

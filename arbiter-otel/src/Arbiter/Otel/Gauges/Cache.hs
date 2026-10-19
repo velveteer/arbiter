@@ -131,4 +131,4 @@ riseSince key scannedAt total seen = case HM.lookup key seen of
   Just base -> (counted, if total < countedTotal base then total else total - countedTotal base)
   Nothing -> (counted, 0)
   where
-    counted = HM.insert key (Baseline scannedAt total) seen
+    counted = HM.insert key Baseline {countedFrom = scannedAt, countedTotal = total} seen
