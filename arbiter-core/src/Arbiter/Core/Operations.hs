@@ -101,6 +101,9 @@ module Arbiter.Core.Operations
   , listDLQJobs
   , deleteDLQJob
   , deleteDLQJobsBatch
+  , purgeDLQ
+  , retryFromDLQBatch
+  , retryDLQFiltered
 
     -- * Archive operations
   , listArchiveJobs
@@ -222,8 +225,10 @@ module Arbiter.Core.Operations
     -- * Queue operations
   , ensureQueue
   , setQueuePaused
+  , setQueueDLQRetention
   , getQueue
   , listQueues
+  , schemaQueues
 
     -- * Global gate operations
   , runGated
@@ -616,7 +621,7 @@ spawnChildren schemaName tableName job children = withDbTransaction $ do
     groups = Set.fromList (catMaybes (groupKey job : map JT.groupKey (toList children)))
 
     scopedRetry :: forall a. Text -> m a
-    scopedRetry msg = throwScopedFailure (Retryable (JobRetryableException msg)) [jobId]
+    scopedRetry msg = throwScopedFailure (Retryable (JobRetryableException msg Nothing)) [jobId]
 
     refuseSpawn :: m ()
     refuseSpawn = do
@@ -1279,17 +1284,21 @@ updateJobForRetry schemaName tableName backoff errorMsg job =
     (Tmpl.updateJobForRetrySQL schemaName tableName (ceiling backoff) errorMsg (primaryKey job) (claimSeq job))
 
 -- | Soft-nack a job. Hands back the attempt the claim consumed and records no failure.
--- Returns 0 for a job another worker holds, a suspended job, or a released claim.
+-- A delay parks the job for that long, rounded up to whole seconds. Without one, it
+-- is reprocessed once its lease lapses. Returns 0 for a job another worker holds, a
+-- suspended job, or a released claim.
 nackJob
   :: forall m payload
    . (MonadArbiter m)
   => SchemaName
   -> TableName
+  -> Maybe NominalDiffTime
+  -- ^ Delay in seconds
   -> JobRead payload
   -> m Int64
-nackJob schemaName tableName job =
+nackJob schemaName tableName delay job =
   MA.executeStatement
-    (Tmpl.nackJobSQL schemaName tableName (primaryKey job) (claimSeq job) (attempts job))
+    (Tmpl.nackJobSQL schemaName tableName (ceiling <$> delay) (primaryKey job) (claimSeq job) (attempts job))
 
 -- | 'nackJob' over a batch in one statement, returning the ids nacked. Jobs another
 -- worker holds, suspended jobs and released claims are absent.
@@ -1298,12 +1307,21 @@ nackJobsBatch
    . (MonadArbiter m)
   => SchemaName
   -> TableName
+  -> Maybe NominalDiffTime
+  -- ^ Delay in seconds
   -> [JobRead payload]
   -> m [Int64]
-nackJobsBatch _ _ [] = pure []
-nackJobsBatch schemaName tableName jobs =
+nackJobsBatch _ _ _ [] = pure []
+nackJobsBatch schemaName tableName delay jobs =
   MA.executeQuery
-    (Tmpl.nackJobsBatchSQL schemaName tableName (map primaryKey jobs) (map claimSeq jobs) (map attempts jobs))
+    ( Tmpl.nackJobsBatchSQL
+        schemaName
+        tableName
+        (ceiling <$> delay)
+        (map primaryKey jobs)
+        (map claimSeq jobs)
+        (map attempts jobs)
+    )
 
 -- | Whether the caller already took the parent and tree locks over its whole set.
 data TreeLocks
@@ -1505,6 +1523,31 @@ retryFromDLQEditing schemaName tableName dlqId edit = withDbTransaction $ do
   void (MA.executeStatement (Tmpl.lockDLQRetryGroupsSQL schemaName tableName dlqId))
   MA.queryMaybe (Tmpl.retryFromDLQSQL schemaName tableName dlqId edit)
 
+-- | 'retryFromDLQ' over several DLQ rows, each tree in its own transaction. A row
+-- restored with an earlier row's tree is skipped. Returns the number of rows whose
+-- retry restored a tree.
+retryFromDLQBatch
+  :: (MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> [Int64]
+  -- ^ DLQ primary keys ('Arbiter.Core.Job.DLQ.dlqPrimaryKey')
+  -> m Int64
+retryFromDLQBatch schemaName tableName =
+  fmap (fromIntegral . length . catMaybes) . traverse (retryFromDLQ @_ @Value schemaName tableName)
+
+-- | 'retryFromDLQBatch' over every DLQ row the filters match when it starts, oldest
+-- first.
+retryDLQFiltered
+  :: (MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> [Tmpl.JobFilter]
+  -> m Int64
+retryDLQFiltered schemaName tableName filters =
+  MA.executeQuery (Tmpl.dlqIdsFilteredSQL schemaName tableName (Tmpl.buildWhereClause Tmpl.DLQTable filters))
+    >>= retryFromDLQBatch schemaName tableName
+
 -- | The edit that writes a payload and every column derived from it, as an insert does.
 payloadEdit :: (JobPayload payload) => payload -> RowEdit
 payloadEdit = rowEdit payloadWriteCodec . payloadWrite
@@ -1572,6 +1615,28 @@ deleteDLQJobsBatch schemaName tableName dlqIds = withDbTransaction $ do
   held <- lockJobTrees schemaName tableName (catMaybes parents)
   fromIntegral . length
     <$> deleteJobsResumingParents held schemaName tableName (Tmpl.deleteDLQJobsBatchSQL schemaName tableName dlqIds)
+
+-- | Delete one batch of DLQ jobs per given queue that failed longer ago than the
+-- queue's DLQ retention ('setQueueDLQRetention'), resuming any parents left
+-- childless. A queue without a retention is skipped. Returns the rows deleted and
+-- the queues that failed.
+purgeDLQ
+  :: (MonadArbiter m)
+  => SchemaName
+  -> [TableName]
+  -> m (Int64, [Text])
+purgeDLQ schemaName queues = do
+  retentions <- Map.fromList <$> MA.executeQuery (Tmpl.queueDLQRetentionsSQL schemaName)
+  let purgeOne schema queue = case Map.lookup queue retentions of
+        Nothing -> pure 0
+        Just retention ->
+          MA.executeQuery (Tmpl.selectExpiredDLQSQL schema queue retention dlqPurgeBatch)
+            >>= deleteDLQJobsBatch schema queue
+  sweepQueues purgeOne schemaName (filter (`Map.member` retentions) queues)
+
+-- | Per-queue cap on DLQ jobs purged in one reaper pass.
+dlqPurgeBatch :: Int
+dlqPurgeBatch = 1000
 
 -- | List archived (completed) jobs with composable filters and a typed sort
 -- (defaulting to most recent first).
@@ -2939,6 +3004,30 @@ setQueuePaused
   -> m Int64
 setQueuePaused schemaName queue paused =
   countOr0 (Tmpl.setQueuePausedSQL schemaName queue paused)
+
+-- | Set the age in seconds at which the reaper purges the queue's DLQ jobs, creating
+-- the row if missing. 'Nothing' keeps them. A retention that rounds up to zero or
+-- below fails the column's check constraint.
+setQueueDLQRetention
+  :: (MonadArbiter m)
+  => SchemaName
+  -> Text
+  -- ^ Queue name
+  -> Maybe NominalDiffTime
+  -> m ()
+setQueueDLQRetention schemaName queue retention =
+  void (MA.executeStatement (Tmpl.setQueueDLQRetentionSQL schemaName queue (ceiling <$> retention)))
+
+-- | The given queues and every queue migrated into the schema whose tables exist,
+-- in name order. Maintenance covers this set, whatever registry the caller holds.
+schemaQueues
+  :: (MonadArbiter m)
+  => SchemaName
+  -> [TableName]
+  -> m [TableName]
+schemaQueues schemaName queues =
+  Set.toAscList . Set.union (Set.fromList queues) . Set.fromList
+    <$> MA.executeQuery (Tmpl.existingQueuesSQL schemaName)
 
 -- | Get the @arbiter_queues@ row for a single queue. 'Nothing' when absent.
 getQueue

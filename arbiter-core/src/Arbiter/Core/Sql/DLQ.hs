@@ -16,11 +16,13 @@ module Arbiter.Core.Sql.DLQ
   , dlqJobExistsSQL
   , moveToDLQBatchSQL
   , deleteDLQJobsBatchSQL
+  , selectExpiredDLQSQL
   , dlqParentIdsSQL
   , cascadeChildrenToDLQSQL
   , countDLQChildrenBatchSQL
   , listDLQFilteredSQL
   , countDLQFilteredSQL
+  , dlqIdsFilteredSQL
   ) where
 
 import Data.Int (Int64)
@@ -294,6 +296,19 @@ deleteDLQJobsBatchSQL schemaName tableName dlqIds =
         RETURNING @{id :: CInt8}, @{parent_id :: Maybe CInt8}
       |]
 
+-- | Up to @limit@ DLQ ids, oldest first, of rows that failed more than @retention@
+-- seconds ago.
+selectExpiredDLQSQL :: SchemaName -> TableName -> Int64 -> Int -> Query Int64
+selectExpiredDLQSQL schemaName tableName retention limit =
+  let dlqTbl = jobQueueDLQTable schemaName tableName
+      lim = intLiteral limit
+   in [sql|
+        SELECT @{id :: CInt8} FROM ${dlqTbl}
+        WHERE failed_at < NOW() - (#{retention :: CInt8} * interval '1 second')
+        ORDER BY failed_at
+        LIMIT ${lim}
+      |]
+
 -- | The parents of the given DLQ rows.
 dlqParentIdsSQL :: SchemaName -> TableName -> [Int64] -> Query (Maybe Int64)
 dlqParentIdsSQL schemaName tableName dlqIds =
@@ -346,6 +361,12 @@ listDLQFilteredSQL schemaName tableName whereFrag orderBy limit offset =
           ORDER BY ${orderBy}
           LIMIT #{limit :: CInt8} OFFSET #{offset :: CInt8}
         |]
+
+-- | The ids of the DLQ jobs under a dynamic WHERE, oldest first.
+dlqIdsFilteredSQL :: SchemaName -> TableName -> Query () -> Query Int64
+dlqIdsFilteredSQL schemaName tableName whereFrag =
+  let dlqTbl = jobQueueDLQTable schemaName tableName
+   in [sql|SELECT @{id :: CInt8} FROM ${dlqTbl} ${whereFrag} ORDER BY id|]
 
 -- | Count DLQ jobs under a dynamic WHERE.
 countDLQFilteredSQL :: SchemaName -> TableName -> Query () -> Query Int64

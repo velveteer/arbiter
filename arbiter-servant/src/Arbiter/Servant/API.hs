@@ -334,6 +334,29 @@ data DLQAPI payload mode = DLQAPI
           :> ReqBody '[JSON] BatchDeleteRequest
           :> Post '[JSON] BatchDeleteResponse
   -- ^ @POST \/queues\/:queue\/dlq\/batch-delete@
+  , retryDLQBatch
+      :: mode
+        :- Summary "Retry dead-lettered jobs"
+          :> Description
+               "Retries each job's tree in its own transaction. Returns the number of ids whose retry restored a tree. The server skips unknown ids and ids restored with an earlier id's tree."
+          :> "batch-retry"
+          :> ReqBody '[JSON] BatchRetryRequest
+          :> Post '[JSON] BatchRetryResponse
+  -- ^ @POST \/queues\/:queue\/dlq\/batch-retry@
+  , retryDLQMatching
+      :: mode
+        :- Summary "Retry every matching dead-lettered job"
+          :> Description
+               "Retries every job the filters match, oldest first, as batch-retry does. With no filters it retries the whole DLQ. The payload and error filters search the payload and the last error."
+          :> "retry-matching"
+          :> QueryParam "parent_id" Int64
+          :> QueryParam "job_id" Int64
+          :> QueryParam "group_key" Text
+          :> QueryParam "kind" Text
+          :> QueryParam "payload" Text
+          :> QueryParam "error" Text
+          :> Post '[JSON] BatchRetryResponse
+  -- ^ @POST \/queues\/:queue\/dlq\/retry-matching@
   }
   deriving stock (Generic)
 
@@ -441,8 +464,8 @@ data TableAPI payload result mode = TableAPI
   -- ^ @GET \/queues\/:queue\/groups@
   , getDetails
       :: mode
-        :- Summary "Show the pause state of a queue"
-          :> Description "Null when the queue was never paused or resumed."
+        :- Summary "Show a queue's pause state and DLQ retention"
+          :> Description "Null when the queue has no row. Migrations create one for each queue."
           :> "details"
           :> Get '[JSON] (Maybe QueueRow)
   -- ^ @GET \/queues\/:queue\/details@
@@ -459,6 +482,16 @@ data TableAPI payload result mode = TableAPI
           :> "resume"
           :> PostNoContent
   -- ^ @POST \/queues\/:queue\/resume@
+  , setDLQRetention
+      :: mode
+        :- Summary "Set a queue's DLQ retention"
+          :> Description
+               "The reaper deletes the queue's DLQ jobs that failed more than retentionSeconds ago. A null retentionSeconds keeps them. Every worker pool sharing the schema applies it."
+          :> Throws 400 "retentionSeconds is not positive."
+          :> "dlq-retention"
+          :> ReqBody '[JSON] DLQRetentionRequest
+          :> PutNoContent
+  -- ^ @PUT \/queues\/:queue\/dlq-retention@
   }
   deriving stock (Generic)
 

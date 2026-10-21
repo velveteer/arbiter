@@ -42,11 +42,43 @@ before the children were deleted.
 > A retry drops the deduplication key. After a job enters the DLQ, a new insert
 > can reuse its [`IgnoreDuplicate`](deduplication.md) key.
 
+## Bulk Retry
+
+`retryFromDLQBatch` retries several entries. `retryDLQFiltered` retries every
+entry the filters match when it starts, oldest first. With no filters it retries
+the whole DLQ. Each tree retries in its own transaction. A failure part way
+leaves the trees already retried in the main queue.
+
+```haskell
+-- Every entry whose last error mentions the outage
+count <- Arb.retryDLQFiltered @OrderPayload [Arb.FilterErrorText "connection refused"]
+```
+
+Both return the number of entries whose retry restored a tree. An entry restored
+with an earlier entry's tree, or one whose parent is gone, is not counted.
+
 ## Deletion
 
 `deleteDLQJob` removes one entry. `deleteDLQJobsBatch` removes several. Both
 are permanent.
 
-The [REST API and admin UI](../rest-api.md) expose list, retry, and delete.
+## Retention
+
+Entries stay until they are retried or deleted. A queue's DLQ retention purges
+old ones:
+
+```haskell
+Arb.setQueueDLQRetention "orders" (Just (30 * 86400)) -- 30 days
+Arb.setQueueDLQRetention "orders" Nothing             -- keep entries
+```
+
+The retention lives on the queue's `arbiter_queues` row. Every worker pool and
+REST server sharing the schema applies the same value. The reaper deletes entries
+that failed longer ago than the retention, up to 1000 per queue per pass. A purge
+resumes a parent left without children, as `deleteDLQJob` does. `getQueue`
+returns the current retention as `dlqRetention`.
+
+The [REST API and admin UI](../rest-api.md) expose list, retry, bulk retry, and
+delete.
 
 Entry type: [`Arbiter.Core.Job.DLQ` Haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-Job-DLQ.html).

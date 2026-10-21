@@ -130,6 +130,25 @@ migrationReconciliationTests connStr =
           bucketPersistence conn >>= (@?= Just "p")
           migrate defaultMigrationConfig
           bucketPersistence conn >>= (@?= Just "u")
+    , testCase "registers each migrated queue and keeps its row's state" $
+        withFreshSchema connStr reconciliationSchema $ \conn -> do
+          runMigrationsForRegistry (Proxy @ExpandedMigrationRegistry) connStr reconciliationSchema defaultMigrationConfig
+            >>= shouldMigrate
+          void $
+            PG.execute_
+              conn
+              ( sql
+                  ( "UPDATE "
+                      <> reconciliationSchema
+                      <> ".arbiter_queues SET dlq_retention_secs = 60 WHERE queue_name = 'migration_reconciliation_q'"
+                  )
+              )
+          migrate defaultMigrationConfig
+          registered <-
+            PG.query_
+              conn
+              (sql ("SELECT queue_name, dlq_retention_secs FROM " <> reconciliationSchema <> ".arbiter_queues ORDER BY queue_name"))
+          registered @?= [("migration_reconciliation_q" :: Text, Just 60), ("removed_reconciliation_q", Nothing :: Maybe Int64)]
     , testCase "enables, disables, and re-enables optional triggers" $
         withFreshSchema connStr reconciliationSchema $ \conn -> do
           migrate triggerOff

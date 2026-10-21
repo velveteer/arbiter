@@ -802,6 +802,8 @@ instance ToSchema ConcurrencyPolicyView where declareNamedSchema = generic
 
 instance ToSchema BatchDeleteRequest where declareNamedSchema = generic
 instance ToSchema BatchDeleteResponse where declareNamedSchema = generic
+instance ToSchema BatchRetryRequest where declareNamedSchema = generic
+instance ToSchema BatchRetryResponse where declareNamedSchema = generic
 instance ToSchema StatsResponse where declareNamedSchema = generic
 instance ToSchema AllStatsResponse where declareNamedSchema = generic
 instance ToSchema QueuesResponse where declareNamedSchema = generic
@@ -816,6 +818,7 @@ instance ToSchema ConcurrencyReconcileResponse where declareNamedSchema = generi
 instance ToSchema HealthResponse where declareNamedSchema = generic
 instance ToSchema LivenessResponse where declareNamedSchema = generic
 instance ToSchema RescheduleRequest where declareNamedSchema = generic
+instance ToSchema DLQRetentionRequest where declareNamedSchema = generic
 instance ToSchema AddTokensResponse where declareNamedSchema = generic
 instance ToSchema PruneResponse where declareNamedSchema = generic
 

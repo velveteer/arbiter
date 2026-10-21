@@ -69,8 +69,11 @@ data MaintenancePace = MaintenancePace
 
 -- | One pass of the maintenance the reaper runs, with each operation independently
 -- gated across all callers. An operation whose window has not elapsed is skipped.
+-- The pass covers every queue in the schema ('Ops.schemaQueues'), not only the
+-- caller's registry. Which caller wins a gate does not change the result.
 -- Returns the operations that threw. A failure for one queue is logged and not
--- returned. A failure does not stop the pass.
+-- returned. A failure does not stop the pass. When the schema's queues cannot be
+-- read, no operation runs and every operation is returned.
 runMaintenancePass
   :: forall m
    . ( Arb.RegistryAdmissionPolicies (RegistryOf m)
@@ -84,14 +87,32 @@ runMaintenancePass
   -- ^ Statement timeout
   -> m [MaintenanceOp]
 runMaintenancePass logCfg report pace stmtTimeout = do
+  schema <- Arb.getSchema
+  tryAny (Ops.schemaQueues schema (registryTableNames (Proxy @(RegistryOf m))))
+    >>= either
+      (\exception -> [minBound .. maxBound] <$ warnEx logCfg "Reaper queue discovery failed, pass skipped" exception)
+      (maintainQueues logCfg report pace stmtTimeout schema)
+
+-- | 'runMaintenancePass' over the given queues.
+maintainQueues
+  :: forall m
+   . ( Arb.RegistryAdmissionPolicies (RegistryOf m)
+     , MonadArbiter m
+     )
+  => LogConfig
+  -> (MaintenanceOp -> Int64 -> m ())
+  -> MaintenancePace
+  -> NominalDiffTime
+  -> SchemaName
+  -> [Text]
+  -> m [MaintenanceOp]
+maintainQueues logCfg report pace stmtTimeout schema queues = do
   let reaped operation count = runHook logCfg "onMaintenance" $ report operation count
-      queues = registryTableNames (Proxy @(RegistryOf m))
       window = paceWindow pace
       sparseWindow = paceSparseWindow pace
       hasConcurrency = not (Set.null (registryConcurrencyPolicies @(RegistryOf m)))
       hasRateLimit = not (Set.null (registryRateLimitPolicies @(RegistryOf m)))
-  schema <- Arb.getSchema
-  let gated :: MaintenanceOp -> (Maybe a -> m ()) -> NominalDiffTime -> m a -> m (Maybe MaintenanceOp)
+      gated :: MaintenanceOp -> (Maybe a -> m ()) -> NominalDiffTime -> m a -> m (Maybe MaintenanceOp)
       gated operation emit every work =
         tryReaperOp logCfg schema stmtTimeout (maintenanceOpName operation) every work >>= failedOp operation emit
       gatedCount operation = gated operation (traverse_ (reaped operation))
@@ -124,13 +145,19 @@ runMaintenancePass logCfg report pace stmtTimeout = do
         $ Ops.sweepCancelledJobs schema queues
     ]
       <> [gatedCount PruneRateLimitBuckets sparseWindow (Arb.pruneRateLimitBuckets @m (paceBucketIdle pace)) | hasRateLimit]
-      <> [gatedCount ReconcileConcurrencyStale window (Arb.reconcileConcurrencyCountsIfStale @m) | hasConcurrency]
-      <> [gatedCount ReconcilePruneConcurrency sparseWindow (Arb.reconcileAndPruneConcurrency @m) | hasConcurrency]
+      <> [gatedCount ReconcileConcurrencyStale window (Ops.reconcileConcurrencyCountsIfStale schema queues) | hasConcurrency]
+      <> [gatedCount ReconcilePruneConcurrency sparseWindow (Ops.reconcileAndPruneConcurrency schema queues) | hasConcurrency]
       <> [ sweep
              PurgeArchives
              window
              (logSwept Info "purged" "archived job(s)")
              $ Ops.purgeArchives schema queues
+         ]
+      <> [ sweep
+             PurgeDLQ
+             window
+             (logSwept Info "purged" "DLQ job(s)")
+             $ Ops.purgeDLQ schema queues
          ]
 
 -- | Name a failed operation. Report a completed one through @emit@.

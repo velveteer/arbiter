@@ -1,0 +1,1 @@
+ALTER TABLE "arbiter".arbiter_queues ADD COLUMN IF NOT EXISTS dlq_retention_secs BIGINT CHECK (dlq_retention_secs > 0);

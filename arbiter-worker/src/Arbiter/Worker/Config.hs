@@ -94,6 +94,8 @@ data MaintenanceOp
     ReconcilePruneConcurrency
   | -- | Delete expired archived jobs.
     PurgeArchives
+  | -- | Delete DLQ jobs older than their queue's DLQ retention.
+    PurgeDLQ
   deriving stock (Bounded, Enum, Eq, Ord, Show)
 
 -- | The op's stable name, used to coordinate replicas and to label its metrics.
@@ -107,6 +109,7 @@ maintenanceOpName operation = case operation of
   ReconcileConcurrencyStale -> "reconcile-concurrency-stale"
   ReconcilePruneConcurrency -> "reconcile-prune-concurrency"
   PurgeArchives -> "purge-archives"
+  PurgeDLQ -> "purge-dlq"
 
 -- | Invalid worker configuration detected before a pool starts.
 newtype WorkerConfigException = WorkerConfigException Text
@@ -230,6 +233,8 @@ data BatchCallbacks m payload result = BatchCallbacks
   -- ^ Retry with backoff, then DLQ at the job's @maxAttempts@. Fires
   -- 'Arbiter.Core.Job.Types.onJobFailure', then 'Arbiter.Core.Job.Types.onJobRetry' or
   -- 'Arbiter.Core.Job.Types.onJobFailedAndMovedToDLQ'.
+  , failRetryAfter :: JobRead payload -> NominalDiffTime -> Text -> m ()
+  -- ^ 'failRetry' after a delay in seconds in place of the backoff.
   , failPermanent :: JobRead payload -> Text -> m ()
   -- ^ Straight to the DLQ. Fires 'Arbiter.Core.Job.Types.onJobFailure' and
   -- 'Arbiter.Core.Job.Types.onJobFailedAndMovedToDLQ'.
@@ -242,6 +247,8 @@ data BatchCallbacks m payload result = BatchCallbacks
   , nack :: JobRead payload -> m ()
   -- ^ Reprocess after the lease expires. Records no failure and consumes no attempt.
   -- Fires no hook unless the job is no longer this worker's.
+  , nackAfter :: JobRead payload -> NominalDiffTime -> m ()
+  -- ^ 'nack' that reprocesses after a delay in seconds in place of the lease's end.
   , spawn :: JobRead payload -> NonEmpty (JobWrite payload) -> m ()
   -- ^ Insert children under this job and suspend it, in one transaction. Fires
   -- 'Arbiter.Core.Job.Types.onJobSuccess'.
@@ -258,10 +265,12 @@ hoistBatchCallbacks nat callbacks =
     , ackAll = nat . ackAll callbacks
     , ackAllWith = nat . ackAllWith callbacks
     , failRetry = \job msg -> nat (failRetry callbacks job msg)
+    , failRetryAfter = \job delay msg -> nat (failRetryAfter callbacks job delay msg)
     , failPermanent = \job msg -> nat (failPermanent callbacks job msg)
     , cancelBranch = \job msg -> nat (cancelBranch callbacks job msg)
     , cancelTree = \job msg -> nat (cancelTree callbacks job msg)
     , nack = nat . nack callbacks
+    , nackAfter = \job delay -> nat (nackAfter callbacks job delay)
     , spawn = \job children -> nat (spawn callbacks job children)
     }
 

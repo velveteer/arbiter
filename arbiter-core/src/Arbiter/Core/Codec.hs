@@ -500,3 +500,4 @@ queueRowCodec =
     <*> ncol "metadata" CJsonb
     <*> col "created_at" CTimestamptz
     <*> col "updated_at" CTimestamptz
+    <*> (fmap fromIntegral <$> ncol "dlq_retention_secs" CInt8)

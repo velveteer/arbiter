@@ -89,6 +89,8 @@ Per-queue endpoints under `/api/queues/:queue/`:
 | `POST` | `dlq/:id/retry` | Retry a job from the DLQ, optionally with a new payload |
 | `DELETE` | `dlq/:id` | Delete one DLQ entry |
 | `POST` | `dlq/batch-delete` | Delete multiple DLQ entries |
+| `POST` | `dlq/batch-retry` | Retry multiple DLQ entries |
+| `POST` | `dlq/retry-matching` | Retry every DLQ entry the `dlq` list filters match. No filters retries the whole DLQ |
 | `GET` | `archive` | List archived jobs. `payload` searches the payload text |
 | `POST` | `archive/:id/reenqueue` | Re-enqueue an archived job as a new job, optionally with a new payload |
 | `DELETE` | `archive/:id` | Delete one archive entry |
@@ -96,9 +98,10 @@ Per-queue endpoints under `/api/queues/:queue/`:
 | `GET` | `stats` | Queue statistics |
 | `GET` | `kinds` | List the kind labels the queue declares |
 | `GET` | `groups` | List the queue's open groups, largest first |
-| `GET` | `details` | Get the queue's pause state |
+| `GET` | `details` | Get the queue's pause state and DLQ retention |
 | `POST` | `pause` | Pause the queue (all workers stop claiming) |
 | `POST` | `resume` | Resume a paused queue |
+| `PUT` | `dlq-retention` | Set the queue's DLQ retention. `{"retentionSeconds": null}` keeps entries |
 
 Global endpoints under `/api/`:
 
@@ -211,8 +214,8 @@ claim the job.
 ## Maintenance
 
 `POST maintenance` runs one pass over stale workers, exhausted and cancelled
-jobs, rate-limit buckets, concurrency counts, archive retention, and group
-summaries. Each operation runs in one caller at a time.
+jobs, rate-limit buckets, concurrency counts, archive and DLQ retention, and
+group summaries. Each operation runs in one caller at a time.
 
 | Server setting | Meaning |
 | --- | --- |
@@ -228,5 +231,6 @@ names of failed operations. Skipped operations appear in neither:
 {"ops": {"sweep-stale-workers": 2, "purge-archives": 140}, "failed": []}
 ```
 
-Worker pools run the same pass in their reaper. The endpoint supports
-deployments without worker pools.
+Worker pools run the same pass in their reaper. A pass covers every queue the
+migrations created in the schema, including queues outside the caller's
+registry. The endpoint supports deployments without worker pools.

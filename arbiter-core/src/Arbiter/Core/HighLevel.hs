@@ -20,7 +20,9 @@ module Arbiter.Core.HighLevel
   , ackJobsBatch
   , updateJobForRetry
   , nackJob
+  , nackJobAfter
   , nackJobsBatch
+  , nackJobsBatchAfter
   , setVisibilityTimeout
   , setVisibilityTimeoutBatch
   , SetVisibilityResult (..)
@@ -69,6 +71,8 @@ module Arbiter.Core.HighLevel
   , listDLQJobs
   , retryFromDLQ
   , retryFromDLQWithPayload
+  , retryFromDLQBatch
+  , retryDLQFiltered
   , dlqJobExists
   , deleteDLQJob
   , deleteDLQJobsBatch
@@ -143,6 +147,7 @@ module Arbiter.Core.HighLevel
     -- * Queue operations
   , ensureQueue
   , setQueuePaused
+  , setQueueDLQRetention
   , getQueue
   , listQueues
   , QueueRow (..)
@@ -393,7 +398,17 @@ nackJob
    . (MonadArbiter m)
   => JobRead payload
   -> m Int64
-nackJob job = onJob job $ \schemaName tableName -> Ops.nackJob schemaName tableName job
+nackJob job = onJob job $ \schemaName tableName -> Ops.nackJob schemaName tableName Nothing job
+
+-- | 'nackJob' that reprocesses the job after a delay instead of at the lease's end.
+nackJobAfter
+  :: forall payload m
+   . (MonadArbiter m)
+  => NominalDiffTime
+  -- ^ The delay before the job is visible again, rounded up to whole seconds.
+  -> JobRead payload
+  -> m Int64
+nackJobAfter delay job = onJob job $ \schemaName tableName -> Ops.nackJob schemaName tableName (Just delay) job
 
 -- | 'nackJob' over a batch from one queue in one statement, returning the ids nacked.
 -- Jobs another worker holds, suspended jobs and released claims are absent.
@@ -402,7 +417,18 @@ nackJobsBatch
    . (MonadArbiter m)
   => [JobRead payload]
   -> m [Int64]
-nackJobsBatch jobs = onJobs id [] jobs $ \schemaName tableName -> Ops.nackJobsBatch schemaName tableName jobs
+nackJobsBatch jobs = onJobs id [] jobs $ \schemaName tableName -> Ops.nackJobsBatch schemaName tableName Nothing jobs
+
+-- | 'nackJobsBatch' that reprocesses the jobs after a delay instead of at the lease's end.
+nackJobsBatchAfter
+  :: forall payload m
+   . (MonadArbiter m)
+  => NominalDiffTime
+  -- ^ The delay before the jobs are visible again, rounded up to whole seconds.
+  -> [JobRead payload]
+  -> m [Int64]
+nackJobsBatchAfter delay jobs =
+  onJobs id [] jobs $ \schemaName tableName -> Ops.nackJobsBatch schemaName tableName (Just delay) jobs
 
 -- | Extend a job's visibility timeout by hand, for a long-running job. Matches the claim
 -- token only. It also extends a job the caller released (nack, retry). Returns 0 for a
@@ -813,6 +839,27 @@ retryFromDLQWithPayload
 retryFromDLQWithPayload dlqId replacement = onQueue @payload $ \schemaName tableName ->
   withDbTransaction
     (Ops.retryFromDLQWithPayload schemaName tableName dlqId (Just replacement) >>= traverse Ops.typedRow)
+
+-- | 'retryFromDLQ' over several DLQ rows, each tree in its own transaction. A row
+-- restored with an earlier row's tree is skipped. Returns the number of rows whose
+-- retry restored a tree.
+retryFromDLQBatch
+  :: forall payload m
+   . (QueueOperation m payload)
+  => [Int64]
+  -- ^ DLQ primary keys ('Arbiter.Core.Job.DLQ.dlqPrimaryKey')
+  -> m Int64
+retryFromDLQBatch dlqIds = onQueue @payload $ \schemaName tableName -> Ops.retryFromDLQBatch schemaName tableName dlqIds
+
+-- | 'retryFromDLQBatch' over every DLQ row the filters match when it starts, oldest
+-- first. No filters retries the whole DLQ.
+retryDLQFiltered
+  :: forall payload m
+   . (QueueOperation m payload)
+  => [Ops.JobFilter]
+  -- ^ Composable filters
+  -> m Int64
+retryDLQFiltered filters = onQueue @payload $ \schemaName tableName -> Ops.retryDLQFiltered schemaName tableName filters
 
 -- | Whether a DLQ row with the given DLQ primary key exists.
 dlqJobExists
@@ -1316,7 +1363,7 @@ listWorkers queue liveSecs = onSchema $ \schemaName -> Ops.listWorkers schemaNam
 sweepStaleWorkers :: (MonadArbiter m) => m Int64
 sweepStaleWorkers = onSchema Ops.sweepStaleWorkers
 
--- | Ensure a queue's pause-state row exists.
+-- | Ensure a queue's row exists.
 ensureQueue :: (MonadArbiter m) => Text -> m Int64
 ensureQueue queue = onSchema $ \schemaName -> Ops.ensureQueue schemaName queue
 
@@ -1324,11 +1371,17 @@ ensureQueue queue = onSchema $ \schemaName -> Ops.ensureQueue schemaName queue
 setQueuePaused :: (MonadArbiter m) => Text -> Bool -> m Int64
 setQueuePaused queue paused = onSchema $ \schemaName -> Ops.setQueuePaused schemaName queue paused
 
--- | Get one queue's pause-state row.
+-- | Set the age in seconds at which the reaper purges the queue's DLQ jobs, creating
+-- the queue's row if missing. 'Nothing' keeps them. The retention must be positive.
+-- Every pool and server sharing the schema applies it.
+setQueueDLQRetention :: (MonadArbiter m) => Text -> Maybe NominalDiffTime -> m ()
+setQueueDLQRetention queue retention = onSchema $ \schemaName -> Ops.setQueueDLQRetention schemaName queue retention
+
+-- | Get one queue's row.
 getQueue :: (MonadArbiter m) => Text -> m (Maybe QueueRow)
 getQueue queue = onSchema $ \schemaName -> Ops.getQueue schemaName queue
 
--- | List the queue pause-state rows, ordered by queue name.
+-- | List the queue rows, ordered by queue name.
 listQueues :: (MonadArbiter m) => m [QueueRow]
 listQueues = onSchema Ops.listQueues
 

@@ -506,6 +506,40 @@ operationsSpec mkMessage mkResult runM = do
       attempts rereadA `shouldBe` 0
       attempts rereadB `shouldBe` 2
 
+  describe "nackJobAfter" $ do
+    it "parks the job for the delay and refunds the attempt" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "nack-after")))
+      [held] <- claimJobs env 1
+      before' <- getCurrentTime
+
+      runM env (HL.nackJobAfter 3600 held) `shouldReturn` 1
+
+      Just reread <- getJob env (primaryKey inserted)
+      attempts reread `shouldBe` 0
+      claimedBy reread `shouldBe` Nothing
+      notVisibleUntil reread `shouldSatisfy` maybe False (> addUTCTime 3500 before')
+      claimJobs env 1 `shouldReturn` []
+
+    it "parks a batch for the delay" $ \env -> do
+      Just jobA <- runM env (HL.insertJob (defaultJob (mkMessage "nack-after-batch-a")))
+      Just jobB <- runM env (HL.insertJob (defaultJob (mkMessage "nack-after-batch-b")))
+      held <- claimJobs env 2
+      before' <- getCurrentTime
+
+      sort <$> runM env (HL.nackJobsBatchAfter 3600 held) `shouldReturn` sort [primaryKey jobA, primaryKey jobB]
+
+      for_ [jobA, jobB] $ \job -> do
+        Just reread <- getJob env (primaryKey job)
+        attempts reread `shouldBe` 0
+        notVisibleUntil reread `shouldSatisfy` maybe False (> addUTCTime 3500 before')
+      claimJobs env 2 `shouldReturn` []
+
+    it "makes the job visible at once for a zero delay" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "nack-after-zero")))
+      [held] <- claimJobs env 1
+      runM env (HL.nackJobAfter 0 held) `shouldReturn` 1
+      map primaryKey <$> claimJobs env 1 `shouldReturn` [primaryKey inserted]
+
   describe "refreshGroups" $ do
     it "covers the keys past the ones a pass already walked" $ \env -> do
       let keys = ["grp-cursor-a", "grp-cursor-b", "grp-cursor-c"]
@@ -4837,6 +4871,131 @@ operationsSpec mkMessage mkResult runM = do
       length reClaimed `shouldBe` 2
       for_ reClaimed $ \job -> void $ runM env (HL.ackJob job)
       assertNotSuspended env (primaryKey parent)
+
+  describe "purgeDLQ" $ do
+    let dlqTable = do
+          schemaName <- getSchema
+          pure (Schema.jobQueueDLQTable schemaName (HL.queueTable @payload @m))
+        backdateDLQ env jobId =
+          runM env $ do
+            tbl <- dlqTable
+            void $
+              execStatement
+                ("UPDATE " <> tbl <> " SET failed_at = NOW() - interval '2 hours' WHERE job_id = ?")
+                [pval CInt8 jobId]
+        purge env retention =
+          runM env $ do
+            traverse_ (HL.setQueueDLQRetention (HL.queueTable @payload @m) . Just) retention
+            schemaName <- getSchema
+            Ops.purgeDLQ schemaName [HL.queueTable @payload @m]
+
+    it "deletes DLQ jobs older than the retention and keeps newer ones" $ \env -> do
+      Just old <- runM env (HL.insertJob (defaultJob (mkMessage "dlq-purge-old")))
+      Just _new <- runM env (HL.insertJob (defaultJob (mkMessage "dlq-purge-new")))
+      claimed <- claimJobs env 2
+      void $ runM env (HL.moveToDLQBatch [(job, "boom") | job <- claimed])
+      backdateDLQ env (primaryKey old)
+
+      purge env (Just 3600) `shouldReturn` (1, [])
+
+      remaining <- dlqAll env
+      map (payload . DLQ.jobSnapshot) remaining `shouldBe` [mkMessage "dlq-purge-new"]
+
+    it "deletes every row of an expired DLQ tree" $ \env -> do
+      Right (parent :| children) <-
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "dlq-purge-parent"))
+            (JT.leaf (defaultJob (mkMessage "dlq-purge-child1")) :| [JT.leaf (defaultJob (mkMessage "dlq-purge-child2"))])
+      void $ runM env (HL.moveToDLQ "parent failed" parent)
+      traverse_ (backdateDLQ env . primaryKey) (parent : children)
+
+      purge env (Just 3600) `shouldReturn` (3, [])
+      dlqAll env `shouldReturn` []
+
+    it "keeps the DLQ of a queue without a retention" $ \env -> do
+      Just old <- runM env (HL.insertJob (defaultJob (mkMessage "dlq-purge-kept")))
+      [claimed] <- claimJobs env 1
+      void $ runM env (HL.moveToDLQ "boom" claimed)
+      backdateDLQ env (primaryKey old)
+
+      purge env Nothing `shouldReturn` (0, [])
+      length <$> dlqAll env `shouldReturn` 1
+
+    it "stores the retention on the queue's row" $ \env -> do
+      runM env (HL.setQueueDLQRetention (HL.queueTable @payload @m) (Just 86400))
+      (>>= HL.dlqRetention) <$> runM env (HL.getQueue (HL.queueTable @payload @m)) `shouldReturn` Just 86400
+      runM env (HL.setQueueDLQRetention (HL.queueTable @payload @m) Nothing)
+      (>>= HL.dlqRetention) <$> runM env (HL.getQueue (HL.queueTable @payload @m)) `shouldReturn` Nothing
+
+    it "rejects a retention that is not positive" $ \env ->
+      runM env (HL.setQueueDLQRetention (HL.queueTable @payload @m) (Just 0)) `shouldThrow` anyException
+
+  describe "schemaQueues" $ do
+    it "adds registered queues whose tables exist to the given ones" $ \env -> do
+      let table = HL.queueTable @payload @m
+      void $ runM env (HL.ensureQueue table)
+      void $ runM env (HL.ensureQueue "no_such_queue")
+      runM env (getSchema >>= \schemaName -> Ops.schemaQueues schemaName []) `shouldReturn` [table]
+      runM env (getSchema >>= \schemaName -> Ops.schemaQueues schemaName ["registry_only"])
+        `shouldReturn` sort ["registry_only", table]
+
+  describe "retryFromDLQBatch" $ do
+    it "retries each DLQ row and skips unknown ids" $ \env -> do
+      for_ ["dlq-batch-a", "dlq-batch-b", "dlq-batch-c"] $ \name ->
+        runM env (HL.insertJob (defaultJob (mkMessage name)))
+      claimed <- claimJobs env 3
+      void $ runM env (HL.moveToDLQBatch [(job, "boom") | job <- claimed])
+      dlqIds <- map DLQ.dlqPrimaryKey <$> dlqAll env
+
+      runM env (HL.retryFromDLQBatch @payload (absentJobId : dlqIds)) `shouldReturn` 3
+
+      dlqAll env `shouldReturn` []
+      length <$> claimJobs env 3 `shouldReturn` 3
+
+    it "counts a tree once when several of its rows are named" $ \env -> do
+      Right (parent :| _) <-
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "dlq-batch-parent"))
+            (JT.leaf (defaultJob (mkMessage "dlq-batch-child1")) :| [JT.leaf (defaultJob (mkMessage "dlq-batch-child2"))])
+      void $ runM env (HL.moveToDLQ "parent failed" parent)
+      dlqIds <- map DLQ.dlqPrimaryKey <$> dlqAll env
+      length dlqIds `shouldBe` 3
+
+      runM env (HL.retryFromDLQBatch @payload dlqIds) `shouldReturn` 1
+
+      dlqAll env `shouldReturn` []
+      assertSuspended env (primaryKey parent)
+
+  describe "retryDLQFiltered" $ do
+    it "retries only the DLQ rows the filters match" $ \env -> do
+      for_ ["dlq-filter-a", "dlq-filter-b", "dlq-filter-c"] $ \name ->
+        runM env (HL.insertJob (defaultJob (mkMessage name)))
+      claimed <- claimJobs env 3
+      let failure job
+            | payload job == mkMessage "dlq-filter-c" = "bad input"
+            | otherwise = "upstream timeout"
+      void $ runM env (HL.moveToDLQBatch [(job, failure job) | job <- claimed])
+
+      runM env (HL.retryDLQFiltered @payload [Ops.FilterErrorText "TIMEOUT"]) `shouldReturn` 2
+
+      remaining <- dlqAll env
+      map (payload . DLQ.jobSnapshot) remaining `shouldBe` [mkMessage "dlq-filter-c"]
+      requeued <- map payload <$> claimJobs env 3
+      length requeued `shouldBe` 2
+      requeued `shouldSatisfy` all (`elem` [mkMessage "dlq-filter-a", mkMessage "dlq-filter-b"])
+
+    it "retries the whole DLQ with no filters" $ \env -> do
+      for_ ["dlq-filter-all-a", "dlq-filter-all-b"] $ \name ->
+        runM env (HL.insertJob (defaultJob (mkMessage name)))
+      claimed <- claimJobs env 2
+      void $ runM env (HL.moveToDLQBatch [(job, "boom") | job <- claimed])
+
+      runM env (HL.retryDLQFiltered @payload []) `shouldReturn` 2
+      dlqAll env `shouldReturn` []
 
   describe "moveToDLQBatch mixed rollup and non-rollup" $ do
     it "moveToDLQBatch cascades rollup parents but not regular jobs" $ \env -> do

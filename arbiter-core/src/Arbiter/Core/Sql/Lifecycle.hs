@@ -219,13 +219,15 @@ updateJobForRetrySQL schemaName tableName backoff errorMsg jobId cseq =
       |]
 
 -- | Soft nack. Releases the claim and hands back the attempt it consumed, recording no
--- failure. Leaves @not_visible_until@ as it stands.
-nackJobSQL :: SchemaName -> TableName -> Int64 -> Int64 -> Int32 -> Query ()
-nackJobSQL schemaName tableName jobId cseq att =
+-- failure. A delay in seconds parks the job for that long. Without one,
+-- @not_visible_until@ stands.
+nackJobSQL :: SchemaName -> TableName -> Maybe Int64 -> Int64 -> Int64 -> Int32 -> Query ()
+nackJobSQL schemaName tableName delay jobId cseq att =
   let tbl = jobQueueTable schemaName tableName
    in [sql|
         UPDATE ${tbl}
         SET attempts = LEAST(GREATEST(#{att :: CInt4} - 1, attempts - 1, 0), attempts),
+            not_visible_until = COALESCE(NOW() + (#{delay :: Maybe CInt8}::bigint * interval '1 second'), not_visible_until),
             claimed_by = NULL,
             updated_at = NOW()
         WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8} AND NOT suspended
@@ -234,8 +236,8 @@ nackJobSQL schemaName tableName jobId cseq att =
 
 -- | 'nackJobSQL' over @unnest@ed @(id, claim_seq, attempts)@ arrays. Locks rows in
 -- descending id order. Returns the ids nacked.
-nackJobsBatchSQL :: SchemaName -> TableName -> [Int64] -> [Int64] -> [Int32] -> Query Int64
-nackJobsBatchSQL schemaName tableName ids cseqs atts =
+nackJobsBatchSQL :: SchemaName -> TableName -> Maybe Int64 -> [Int64] -> [Int64] -> [Int32] -> Query Int64
+nackJobsBatchSQL schemaName tableName delay ids cseqs atts =
   let tbl = jobQueueTable schemaName tableName
       locked = lockedByIdsCte tbl ids
    in [sql|
@@ -247,6 +249,7 @@ nackJobsBatchSQL schemaName tableName ids cseqs atts =
         ${locked}
         UPDATE ${tbl} job
         SET attempts = LEAST(GREATEST(input_row.att - 1, job.attempts - 1, 0), job.attempts),
+            not_visible_until = COALESCE(NOW() + (#{delay :: Maybe CInt8}::bigint * interval '1 second'), job.not_visible_until),
             claimed_by = NULL,
             updated_at = NOW()
         FROM input input_row

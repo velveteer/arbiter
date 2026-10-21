@@ -44,7 +44,8 @@ import Arbiter.Worker
   , runWorkerPool
   )
 import Arbiter.Worker.Config
-  ( WorkerConfig (..)
+  ( MaintenanceOp (..)
+  , WorkerConfig (..)
   , ackAll
   , ackAllWith
   , ackWith
@@ -103,7 +104,7 @@ import UnliftIO.Async (withAsync)
 import UnliftIO.Async qualified as Async
 
 import Arbiter.Test.Poll (bumpRef, waitUntil, withLinkedAsync)
-import Arbiter.Test.Setup (execStatement, execute_, toQuery, withConn)
+import Arbiter.Test.Setup (addQueueTable, execStatement, execute_, toQuery, withConn)
 import Arbiter.Test.Worker.Backend (TestBackend (..))
 import Arbiter.Test.Worker.Rows (reclaimJob, updateJob)
 
@@ -121,7 +122,21 @@ lifecycleSpec
   -> Spec
 lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mkHandler, runCommand, runM} =
   before mkEnv $ do
-    describe "Maintenance pass" $
+    describe "Maintenance pass" $ do
+      let everyPass = MaintenancePace {paceWindow = 0, paceSparseWindow = 0, paceBucketIdle = 0}
+          dlqPayloads env = map (payload . DLQ.jobSnapshot) <$> runM env (HL.listDLQJobs @payload 10 0)
+          deadLetterAged env name = do
+            Just inserted <- runM env (HL.insertJob (defaultJob (mkSimple name)))
+            [claimed] <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+            void $ runM env (HL.moveToDLQ "boom" claimed)
+            runM env $
+              runCommand
+                ( "UPDATE "
+                    <> Schema.jobQueueDLQTable schema table
+                    <> " SET failed_at = NOW() - interval '2 hours' WHERE job_id = "
+                    <> T.pack (show (primaryKey inserted))
+                )
+
       it "deletes a flagged job whose lease lapsed" $ \env -> do
         Just inserted <- runM env (HL.insertJob (defaultJob (mkSimple "orphan-flagged")))
         [_] <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -129,10 +144,42 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         Just flaggedRow <- runM env (HL.getJobById @payload (primaryKey inserted))
         void $ runM env (HL.setVisibilityTimeout 0 flaggedRow)
 
-        let everyPass = MaintenancePace {paceWindow = 0, paceSparseWindow = 0, paceBucketIdle = 0}
         failed <- runM env (runMaintenancePass silentLogConfig (\_ _ -> pure ()) everyPass 5)
         failed `shouldBe` []
         runM env (HL.getJobById @payload (primaryKey inserted)) `shouldReturn` Nothing
+
+      it "purges DLQ jobs past the queue's retention" $ \env -> do
+        deadLetterAged env "dlq-aged"
+        runM env (HL.setQueueDLQRetention table (Just 3600))
+        purgedRef <- newIORef (0 :: Int64)
+        let report operation count = when (operation == PurgeDLQ) (liftIO (writeIORef purgedRef count))
+
+        failed <- runM env (runMaintenancePass silentLogConfig report everyPass 5)
+        failed `shouldBe` []
+        readIORef purgedRef `shouldReturn` 1
+        dlqPayloads env `shouldReturn` []
+
+      it "keeps DLQ jobs without a retention" $ \env -> do
+        deadLetterAged env "dlq-kept"
+        failed <- runM env (runMaintenancePass silentLogConfig (\_ _ -> pure ()) everyPass 5)
+        failed `shouldBe` []
+        dlqPayloads env `shouldReturn` [mkSimple "dlq-kept"]
+
+      it "covers a queue outside the caller's registry" $ \env -> do
+        let other = table <> "_ext"
+            ownDLQ = Schema.jobQueueDLQTable schema table
+            otherDLQ = Schema.jobQueueDLQTable schema other
+        addQueueTable connStr schema other False
+        deadLetterAged env "dlq-elsewhere"
+        runM env $ do
+          runCommand ("INSERT INTO " <> otherDLQ <> " SELECT * FROM " <> ownDLQ)
+          runCommand ("DELETE FROM " <> ownDLQ)
+          HL.setQueueDLQRetention other (Just 3600)
+
+        failed <- runM env (runMaintenancePass silentLogConfig (\_ _ -> pure ()) everyPass 5)
+        failed `shouldBe` []
+        remaining <- withConn connStr $ \conn -> query conn (toQuery ("SELECT count(*) FROM " <> otherDLQ)) ()
+        remaining `shouldBe` [Only (0 :: Int64)]
 
     describe "Reaper op bounding" $ do
       it "completes an op longer than the timeout when each statement is within it" $ \env -> do

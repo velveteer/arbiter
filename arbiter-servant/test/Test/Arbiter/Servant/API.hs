@@ -91,6 +91,7 @@ import Arbiter.Servant.Types
   , BatchDeleteResponse (..)
   , BatchInsertRequest (..)
   , BatchInsertResponse (..)
+  , BatchRetryResponse (..)
   , ClaimResponse (ClaimResponse)
   , DLQResponse
   , GroupSummary (..)
@@ -858,6 +859,56 @@ spec connStr = do
       -- Verify DLQ is empty
       get "/api/queues/arbiter_servant_test/dlq"
         `shouldRespondWith` jsonMatch [aesonQQ|{ "items": [], "total": 0, "offset": 0, "limit": 50 }|]
+
+    it "POST /api/queues/arbiter_servant_test/dlq/batch-retry retries multiple DLQ jobs" $ do
+      dlqIds <- liftIO $ do
+        for_ ["br1", "br2"] $ \key -> do
+          Just job <- runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob key (TestMessage ("batch retry " <> key)))
+          runSimpleDb mkEnv $ HL.moveToDLQ "err" job
+        dlqs :: [DLQJob ServantTestPayload] <- runSimpleDb mkEnv $ HL.listDLQJobs 10 0
+        pure $ map dlqPrimaryKey dlqs
+
+      resp <-
+        request
+          "POST"
+          "/api/queues/arbiter_servant_test/dlq/batch-retry"
+          [("Content-Type", "application/json")]
+          (encode $ object ["ids" .= (absentJobId : dlqIds)])
+      liftIO $ do
+        body :: BatchRetryResponse <- decodeBody resp
+        retried body `shouldBe` 2
+
+      get "/api/queues/arbiter_servant_test/dlq"
+        `shouldRespondWith` jsonMatch [aesonQQ|{ "items": [], "total": 0, "offset": 0, "limit": 50 }|]
+
+    it "POST /api/queues/arbiter_servant_test/dlq/retry-matching retries only matching DLQ jobs" $ do
+      liftIO $
+        for_ [("rm1", "connection refused"), ("rm2", "connection refused"), ("rm3", "bad input")] $ \(key, err) -> do
+          Just job <- runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob key (TestMessage key))
+          runSimpleDb mkEnv $ HL.moveToDLQ err job
+
+      resp <- post "/api/queues/arbiter_servant_test/dlq/retry-matching?error=refused" ""
+      liftIO $ do
+        body :: BatchRetryResponse <- decodeBody resp
+        retried body `shouldBe` 2
+
+      liftIO $ do
+        remaining :: [DLQJob ServantTestPayload] <- runSimpleDb mkEnv $ HL.listDLQJobs 10 0
+        map (payload . jobSnapshot) remaining `shouldBe` [TestMessage "rm3"]
+
+    it "PUT /api/queues/arbiter_servant_test/dlq-retention sets and clears the retention" $ do
+      let retention body =
+            request
+              "PUT"
+              "/api/queues/arbiter_servant_test/dlq-retention"
+              [("Content-Type", "application/json")]
+              (encode (body :: Value))
+          storedRetention = liftIO (fmap Q.dlqRetention <$> runSimpleDb mkEnv (HL.getQueue "arbiter_servant_test"))
+      retention [aesonQQ|{ "retentionSeconds": 3600 }|] `shouldRespondWith` 204
+      storedRetention >>= liftIO . (`shouldBe` Just (Just 3600))
+      retention [aesonQQ|{ "retentionSeconds": null }|] `shouldRespondWith` 204
+      storedRetention >>= liftIO . (`shouldBe` Just Nothing)
+      retention [aesonQQ|{ "retentionSeconds": 0 }|] `shouldRespondWith` 400
 
     it "POST /api/queues/arbiter_servant_test/dlq/:id/retry moves job back to main queue" $ do
       -- Insert a job, then move it to DLQ

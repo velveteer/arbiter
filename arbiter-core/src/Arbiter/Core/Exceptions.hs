@@ -24,10 +24,12 @@ module Arbiter.Core.Exceptions
 
     -- * Helpers
   , throwRetryable
+  , throwRetryableAfter
   , throwPermanent
   , throwTreeCancel
   , throwBranchCancel
   , throwNack
+  , throwNackAfter
 
     -- * Internal
 
@@ -48,6 +50,7 @@ import Control.Monad.IO.Class (MonadIO)
 import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Time (NominalDiffTime)
 import GHC.Generics (Generic)
 import UnliftIO.Exception qualified as UE
 
@@ -56,7 +59,7 @@ import Arbiter.Core.Enum (showText)
 -- | Decisions a handler can signal by throwing. The worker catches it and retries,
 -- dead-letters or cancels the job.
 data JobException
-  = -- | Retries the job with backoff.
+  = -- | Retries the job after its delay, or with backoff.
     Retryable JobRetryableException
   | -- | Moves the job to the DLQ.
     Permanent JobPermanentException
@@ -75,12 +78,13 @@ instance Exception JobException where
     TreeCancel inner -> displayException inner
     BranchCancel inner -> displayException inner
 
--- | Transient failure. The job is retried with backoff.
-newtype JobRetryableException = JobRetryableException Text
+-- | Transient failure. The job is retried after the delay in seconds, or with the
+-- pool's backoff when there is none.
+data JobRetryableException = JobRetryableException Text (Maybe NominalDiffTime)
   deriving stock (Eq, Generic, Show)
 
 instance Exception JobRetryableException where
-  displayException (JobRetryableException msg) = T.unpack msg
+  displayException (JobRetryableException msg _) = T.unpack msg
 
 -- | Permanent failure. The job goes straight to the DLQ.
 newtype JobPermanentException = JobPermanentException Text
@@ -106,13 +110,14 @@ instance Exception BranchCancelException where
 
 -- | Reprocess the job later without recording a failure (a soft nack). The
 -- worker skips retry\/DLQ, hands back the attempt the claim consumed, and leaves
--- the job to become visible again.
-data JobNackException = JobNackException
+-- the job to become visible again after the delay in seconds, or when its lease
+-- lapses when there is none.
+newtype JobNackException = JobNackException (Maybe NominalDiffTime)
   deriving stock (Eq, Generic, Show)
 
 instance Exception JobNackException where
   backtraceDesired _ = False
-  displayException JobNackException = "job nacked for reprocessing"
+  displayException (JobNackException _) = "job nacked for reprocessing"
 
 -- | Row decoding failure (engine-internal). Classified as a permanent failure
 -- by the worker.
@@ -174,7 +179,12 @@ instance Exception JobDeadlineExceeded where
 
 -- | Fail the job and let it retry.
 throwRetryable :: (MonadIO m) => Text -> m a
-throwRetryable msg = UE.throwIO (Retryable (JobRetryableException msg))
+throwRetryable msg = UE.throwIO (Retryable (JobRetryableException msg Nothing))
+
+-- | Fail the job and retry it after a delay in seconds, in place of the pool's backoff.
+-- The failure uses an attempt.
+throwRetryableAfter :: (MonadIO m) => NominalDiffTime -> Text -> m a
+throwRetryableAfter delay msg = UE.throwIO (Retryable (JobRetryableException msg (Just delay)))
 
 -- | Fail the job straight to the DLQ.
 throwPermanent :: (MonadIO m) => Text -> m a
@@ -191,7 +201,12 @@ throwBranchCancel msg = UE.throwIO (BranchCancel (BranchCancelException msg))
 
 -- | Return the job to the queue without consuming an attempt.
 throwNack :: (MonadIO m) => m a
-throwNack = UE.throwIO JobNackException
+throwNack = UE.throwIO (JobNackException Nothing)
+
+-- | Return the job to the queue without consuming an attempt, visible again after a
+-- delay in seconds.
+throwNackAfter :: (MonadIO m) => NominalDiffTime -> m a
+throwNackAfter delay = UE.throwIO (JobNackException (Just delay))
 
 -- | Fail on an undecodable payload.
 throwParsing :: (MonadIO m) => Text -> m a

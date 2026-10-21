@@ -210,6 +210,37 @@
                 ],
                 "type": "object"
             },
+            "BatchRetryRequest": {
+                "properties": {
+                    "ids": {
+                        "items": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        },
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "ids"
+                ],
+                "type": "object"
+            },
+            "BatchRetryResponse": {
+                "properties": {
+                    "retried": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "retried"
+                ],
+                "type": "object"
+            },
             "ClaimRequest": {
                 "properties": {
                     "leaseSeconds": {
@@ -616,6 +647,16 @@
                     "offset",
                     "limit"
                 ],
+                "type": "object"
+            },
+            "DLQRetentionRequest": {
+                "properties": {
+                    "retentionSeconds": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                    }
+                },
                 "type": "object"
             },
             "DedupKey": {
@@ -1617,6 +1658,11 @@
                 "properties": {
                     "createdAt": {
                         "$ref": "#/components/schemas/UTCTime"
+                    },
+                    "dlqRetention": {
+                        "multipleOf": 1.0e-12,
+                        "nullable": true,
+                        "type": "number"
                     },
                     "metadata": {
                         "anyOf": [
@@ -2823,7 +2869,7 @@
         },
         "/api/queues/queue/details": {
             "get": {
-                "description": "Null when the queue was never paused or resumed.",
+                "description": "Null when the queue has no row. Migrations create one for each queue.",
                 "operationId": "queueGetDetails",
                 "responses": {
                     "200": {
@@ -2837,7 +2883,7 @@
                         "description": ""
                     }
                 },
-                "summary": "Show the pause state of a queue",
+                "summary": "Show a queue's pause state and DLQ retention",
                 "tags": [
                     "queue"
                 ]
@@ -2975,6 +3021,33 @@
                 ]
             }
         },
+        "/api/queues/queue/dlq-retention": {
+            "put": {
+                "description": "The reaper deletes the queue's DLQ jobs that failed more than retentionSeconds ago. A null retentionSeconds keeps them. Every worker pool sharing the schema applies it.",
+                "operationId": "queuePutDlqRetention",
+                "requestBody": {
+                    "content": {
+                        "application/json;charset=utf-8": {
+                            "schema": {
+                                "$ref": "#/components/schemas/DLQRetentionRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "retentionSeconds is not positive. Invalid `body`."
+                    }
+                },
+                "summary": "Set a queue's DLQ retention",
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
         "/api/queues/queue/dlq/batch-delete": {
             "post": {
                 "description": "Returns the number deleted. The server skips unknown ids.",
@@ -3004,6 +3077,121 @@
                     }
                 },
                 "summary": "Delete dead-lettered jobs",
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/queues/queue/dlq/batch-retry": {
+            "post": {
+                "description": "Retries each job's tree in its own transaction. Returns the number of ids whose retry restored a tree. The server skips unknown ids and ids restored with an earlier id's tree.",
+                "operationId": "queuePostDlqBatchRetry",
+                "requestBody": {
+                    "content": {
+                        "application/json;charset=utf-8": {
+                            "schema": {
+                                "$ref": "#/components/schemas/BatchRetryRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BatchRetryResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `body`"
+                    }
+                },
+                "summary": "Retry dead-lettered jobs",
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/queues/queue/dlq/retry-matching": {
+            "post": {
+                "description": "Retries every job the filters match, oldest first, as batch-retry does. With no filters it retries the whole DLQ. The payload and error filters search the payload and the last error.",
+                "operationId": "queuePostDlqRetryMatching",
+                "parameters": [
+                    {
+                        "in": "query",
+                        "name": "parent_id",
+                        "required": false,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "job_id",
+                        "required": false,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "group_key",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "kind",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "payload",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "error",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BatchRetryResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `error` or `payload` or `kind` or `group_key` or `job_id` or `parent_id`"
+                    }
+                },
+                "summary": "Retry every matching dead-lettered job",
                 "tags": [
                     "queue"
                 ]

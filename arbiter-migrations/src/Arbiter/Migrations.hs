@@ -118,7 +118,7 @@ import Arbiter.Core.Job.Schema.Groups
   )
 import Arbiter.Core.Job.Types (RegistryAdmissionPolicies)
 import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..), RegistryTables (..))
-import Arbiter.Core.Queues (createQueuesTableSQL)
+import Arbiter.Core.Queues (addDLQRetentionColumnSQL, createQueuesTableSQL, registerQueuesSQL)
 import Arbiter.Core.RateLimit.Schema
   ( addRateLimitColumnsSQL
   , addRateLimitCostColumnSQL
@@ -430,10 +430,18 @@ migrateSchema conn schemaName tableAdmissions config seeds = do
     other -> pure other
   where
     reconcile = do
+      registerQueues conn schemaName (map fst tableAdmissions)
       reconcileRateLimitPolicies conn schemaName (seedRateLimitPolicies seeds)
       reconcileConcurrencyPolicies conn schemaName (seedConcurrencyPolicies seeds)
       reconcileRateLimitDurability conn schemaName (rateLimitDurability config)
       reconcileOptionalTriggers conn schemaName (map fst tableAdmissions) config
+
+-- | Add an @arbiter_queues@ row for each migrated queue. Maintenance sweeps every
+-- queue listed there, including queues outside the pool's registry. Existing rows
+-- keep their state.
+registerQueues :: PG.Connection -> SchemaName -> [TableName] -> IO ()
+registerQueues conn schemaName tables =
+  void (PG.execute conn (Query (encodeUtf8 (registerQueuesSQL schemaName))) (Only (PGArray tables)))
 
 -- | Create the schema. A failed CREATE is fine when the schema exists.
 ensureSchema :: PG.Connection -> SchemaName -> IO ()
@@ -751,6 +759,7 @@ schemaLevelMigrations schemaName =
   , script "cron-schedules-add-last-manual-run" addLastManualRunColumnSQL
   , script "create-arbiter-workers" createWorkersTableSQL
   , script "create-arbiter-queues" createQueuesTableSQL
+  , script "arbiter-queues-add-dlq-retention" addDLQRetentionColumnSQL
   , script "create-arbiter-gates" createGatesTableSQL
   , script "arbiter-gates-add-metadata" addGateMetadataColumnSQL
   , script "create-arbiter-rate-limit-policies" createRateLimitPoliciesTableSQL

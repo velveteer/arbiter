@@ -98,7 +98,8 @@ poolEffects config statements consumeSpan = do
               runIn . fmap Set.fromList
                 $ Ops.deleteCancelledJobs schemaName queue
                 $ Ops.HeldBy (workerId config) gone
-          , effectRelease = \(UnliftIO runIn) released -> runIn (Set.fromList <$> Arb.nackJobsBatch released)
+          , effectRelease = \(UnliftIO runIn) delay released ->
+              runIn (Set.fromList <$> maybe Arb.nackJobsBatch Arb.nackJobsBatchAfter delay released)
           , effectSpawn = \(UnliftIO runIn) job kids ->
               runIn $ withDbTransaction $ do
                 void $ Arb.spawnChildren job kids
@@ -157,10 +158,12 @@ batchCallbacks callbacks =
     , ackAll = \jobs -> here (\ctx -> callbackAckAll callbacks ctx (map (,Nothing) jobs))
     , ackAllWith = \pairs -> here (\ctx -> callbackAckAll callbacks ctx (map (second encodeJobResult) pairs))
     , failRetry = failAs RetryFailure
+    , failRetryAfter = \job delay -> failAs (RetryAfterFailure delay) job
     , failPermanent = failAs PermanentFailure
     , cancelBranch = failAs BranchCancelFailure
     , cancelTree = failAs TreeCancelFailure
-    , nack = \job -> here (\ctx -> callbackNack callbacks ctx job)
+    , nack = \job -> here (\ctx -> callbackNack callbacks ctx Nothing job)
+    , nackAfter = \job delay -> here (\ctx -> callbackNack callbacks ctx (Just delay) job)
     , spawn = \job children -> here (\ctx -> callbackSpawn callbacks ctx job children)
     }
   where
@@ -277,8 +280,9 @@ handleJobFailure config locks (errorMsg, failureKind) job
       wrote "no longer available for the dead-letter queue" DeadLettered
         <$> Ops.moveToDLQ locks schemaName (Job.queueName job) errorMsg job
   | otherwise = do
-      let baseDelay = calculateBackoff (backoffStrategy config) (Job.attempts job)
-      backoffSecs <- liftIO $ applyJitter (jitter config) baseDelay
+      backoffSecs <- case failureKind of
+        RetryAfterFailure delay -> pure delay
+        _ -> liftIO $ applyJitter (jitter config) (calculateBackoff (backoffStrategy config) (Job.attempts job))
       wrote "no longer available for retry" (Retrying backoffSecs)
         <$> Arb.updateJobForRetry backoffSecs errorMsg job
   where

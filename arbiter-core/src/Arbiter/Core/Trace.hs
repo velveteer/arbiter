@@ -138,7 +138,7 @@ arbiterTracerOptions = tracerOptions {tracerExceptionHandlerOptions = [routineCo
 -- without an error status. Ignore worker cancellation exceptions.
 routineControlFlow :: ExceptionHandler
 routineControlFlow exception
-  | Just JobNackException <- fromException exception = recorded
+  | Just (JobNackException _) <- fromException exception = recorded
   | Just (JobGoneException _ _) <- fromException exception = recorded
   | Just (JobForceCancelled _ _) <- fromException exception = recorded
   | Just AsyncCancelled <- fromException exception = Just (ExceptionResponse IgnoredException mempty)

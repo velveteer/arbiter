@@ -61,7 +61,7 @@ They are not proof that the outer transaction committed.
 | --- | --- |
 | `ack`, `ackAll` | complete, no result |
 | `ackWith`, `ackAllWith` | complete and store the queue [result](../features/results.md) |
-| `failRetry`, `failPermanent`, `cancelBranch`, `cancelTree`, `nack` | see [Error Handling](../features/error-handling.md) |
+| `failRetry`, `failRetryAfter`, `failPermanent`, `cancelBranch`, `cancelTree`, `nack`, `nackAfter` | see [Error Handling](../features/error-handling.md) |
 | `spawn` | insert children under the job and suspend it. See [runtime spawning](../features/job-trees.md#spawning-children-at-runtime) |
 
 `hoistBatchCallbacks` calls the callbacks from another monad through a monad

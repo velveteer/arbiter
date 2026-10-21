@@ -348,8 +348,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Show the pause state of a queue
-         * @description Null when the queue was never paused or resumed.
+         * Show a queue's pause state and DLQ retention
+         * @description Null when the queue has no row. Migrations create one for each queue.
          */
         get: operations["queueGetDetails"];
         put?: never;
@@ -380,6 +380,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/queues/queue/dlq-retention": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set a queue's DLQ retention
+         * @description The reaper deletes the queue's DLQ jobs that failed more than retentionSeconds ago. A null retentionSeconds keeps them. Every worker pool sharing the schema applies it.
+         */
+        put: operations["queuePutDlqRetention"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/queues/queue/dlq/batch-delete": {
         parameters: {
             query?: never;
@@ -394,6 +414,46 @@ export interface paths {
          * @description Returns the number deleted. The server skips unknown ids.
          */
         post: operations["queuePostDlqBatchDelete"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/queues/queue/dlq/batch-retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retry dead-lettered jobs
+         * @description Retries each job's tree in its own transaction. Returns the number of ids whose retry restored a tree. The server skips unknown ids and ids restored with an earlier id's tree.
+         */
+        post: operations["queuePostDlqBatchRetry"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/queues/queue/dlq/retry-matching": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retry every matching dead-lettered job
+         * @description Retries every job the filters match, oldest first, as batch-retry does. With no filters it retries the whole DLQ. The payload and error filters search the payload and the last error.
+         */
+        post: operations["queuePostDlqRetryMatching"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1042,6 +1102,13 @@ export interface components {
             inserted: components["schemas"]["Job_AnyJson"][];
             insertedCount: number;
         };
+        BatchRetryRequest: {
+            ids: number[];
+        };
+        BatchRetryResponse: {
+            /** Format: int64 */
+            retried: number;
+        };
         ClaimRequest: {
             /**
              * Format: double
@@ -1140,6 +1207,10 @@ export interface components {
             limit: number;
             offset: number;
             total: number;
+        };
+        DLQRetentionRequest: {
+            /** Format: double */
+            retentionSeconds?: number | null;
         };
         DedupKey: {
             key: string;
@@ -1340,6 +1411,7 @@ export interface components {
         };
         QueueRow: {
             createdAt: components["schemas"]["UTCTime"];
+            dlqRetention?: number | null;
             metadata?: components["schemas"]["AnyJson"] | (never | null);
             paused: boolean;
             pausedAt?: components["schemas"]["UTCTime"] | (never | null);
@@ -2053,6 +2125,34 @@ export interface operations {
             };
         };
     };
+    queuePutDlqRetention: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json;charset=utf-8": components["schemas"]["DLQRetentionRequest"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description retentionSeconds is not positive. Invalid `body`. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     queuePostDlqBatchDelete: {
         parameters: {
             query?: never;
@@ -2075,6 +2175,69 @@ export interface operations {
                 };
             };
             /** @description Invalid `body` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostDlqBatchRetry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json;charset=utf-8": components["schemas"]["BatchRetryRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["BatchRetryResponse"];
+                };
+            };
+            /** @description Invalid `body` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostDlqRetryMatching: {
+        parameters: {
+            query?: {
+                parent_id?: number;
+                job_id?: number;
+                group_key?: string;
+                kind?: string;
+                payload?: string;
+                error?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["BatchRetryResponse"];
+                };
+            };
+            /** @description Invalid `error` or `payload` or `kind` or `group_key` or `job_id` or `parent_id` */
             400: {
                 headers: {
                     [name: string]: unknown;

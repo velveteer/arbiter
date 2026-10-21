@@ -10,6 +10,7 @@ module Arbiter.Servant.Types
   , JobResponse (..)
   , JobsResponse (..)
   , RescheduleRequest (..)
+  , DLQRetentionRequest (..)
   , BatchInsertRequest (..)
   , BatchInsertResponse (..)
 
@@ -18,6 +19,8 @@ module Arbiter.Servant.Types
   , OptionalJSON
   , BatchDeleteRequest (..)
   , BatchDeleteResponse (..)
+  , BatchRetryRequest (..)
+  , BatchRetryResponse (..)
 
     -- * Pages
   , Page (..)
@@ -420,6 +423,13 @@ newtype RescheduleRequest = RescheduleRequest
   deriving stock (Eq, Generic, Show)
   deriving (FromJSON, ToJSON) via Generically RescheduleRequest
 
+-- | Request body for setting a queue's DLQ retention.
+newtype DLQRetentionRequest = DLQRetentionRequest
+  { retentionSeconds :: Maybe Double
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving (FromJSON, ToJSON) via Generically DLQRetentionRequest
+
 -- | Tokens to add to one rate-limit bucket.
 newtype AddTokensRequest = AddTokensRequest
   { addedTokens :: Double
@@ -504,6 +514,20 @@ newtype BatchDeleteResponse = BatchDeleteResponse
   }
   deriving stock (Eq, Generic, Show)
   deriving (FromJSON, ToJSON) via Generically BatchDeleteResponse
+
+-- | Request body for a batch DLQ retry.
+newtype BatchRetryRequest = BatchRetryRequest
+  { ids :: [Int64]
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving (FromJSON, ToJSON) via Generically BatchRetryRequest
+
+-- | Response body for a batch or filtered DLQ retry.
+newtype BatchRetryResponse = BatchRetryResponse
+  { retried :: Int64
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving (FromJSON, ToJSON) via Generically BatchRetryResponse
 
 -- | A cron schedule row plus the next tick its effective expression fires at.
 -- A disabled schedule, an expression that never fires again, or one the server

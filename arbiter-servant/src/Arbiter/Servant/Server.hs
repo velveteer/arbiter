@@ -575,6 +575,11 @@ dlqServer table config =
     , retryFromDLQ = retryFromDLQHandler @registry @payload table config
     , deleteDLQ = deleteDLQHandler @registry table config
     , deleteDLQBatch = deleteBatchHandler config (`Ops.deleteDLQJobsBatch` table)
+    , retryDLQBatch = \(BatchRetryRequest dlqIds) ->
+        retriedResponse config (\schemaName -> Ops.retryFromDLQBatch schemaName table dlqIds)
+    , retryDLQMatching = \mParentId mJobId mGroupKey mKind mPayload mError ->
+        retriedResponse config $ \schemaName ->
+          Ops.retryDLQFiltered schemaName table (dlqFilters mParentId mJobId mGroupKey mKind mPayload mError)
     }
 
 -- | List DLQ jobs with pagination and composable filters.
@@ -599,10 +604,18 @@ listDLQHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mKind 
   where
     schemaName = serverSchema config
     page = Ops.listDLQFilteredOrdered schemaName tableName filters mSortBy mSortDir
-    filters =
-      catMaybes $
-        listingFilters mParentId mGroupKey mKind mPayload
-          <> [FilterJobId <$> mJobId, FilterErrorText <$> nonBlank mError]
+    filters = dlqFilters mParentId mJobId mGroupKey mKind mPayload mError
+
+-- | The DLQ filters from their query parameters.
+dlqFilters :: Maybe Int64 -> Maybe Int64 -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Text -> [JobFilter]
+dlqFilters mParentId mJobId mGroupKey mKind mPayload mError =
+  catMaybes $
+    listingFilters mParentId mGroupKey mKind mPayload
+      <> [FilterJobId <$> mJobId, FilterErrorText <$> nonBlank mError]
+
+-- | Run a DLQ retry and report how many trees it restored.
+retriedResponse :: ArbiterServerConfig m registry -> (Text -> m Int64) -> Handler BatchRetryResponse
+retriedResponse config retry = BatchRetryResponse <$> runDb config (retry (serverSchema config))
 
 -- | Retry a DLQ job back into the main queue, with its payload replaced when the
 -- request carries one. 409 when its parent is gone.
@@ -780,6 +793,7 @@ tableServer table config =
     , getDetails = runDb config (Ops.getQueue (serverSchema config) table)
     , pauseQueue = setQueuePausedHandler config table True
     , resumeQueue = setQueuePausedHandler config table False
+    , setDLQRetention = setDLQRetentionHandler config table
     }
 
 -- | A page of a queue's open groups, largest first.
@@ -881,7 +895,7 @@ nackClaimedJobHandler
   -> Handler NoContent
 nackClaimedJobHandler tableName config jobId lease =
   withHeldJob @registry tableName config jobId lease $ \schemaName job ->
-    Ops.nackJob schemaName tableName job
+    Ops.nackJob schemaName tableName Nothing job
 
 -- | Extend a held HTTP lease, equivalent to a worker heartbeat.
 extendClaimedJobHandler
@@ -972,8 +986,19 @@ queuesServer registryProxy config =
     , getAllStats = getAllStatsHandler config (registryQueueKinds registryProxy)
     }
 
--- | Flip the @paused@ flag for a queue. The @arbiter_queues@ row is created on the
--- first pause or resume.
+-- | Set a queue's DLQ retention. 400 for a retention that is not positive.
+setDLQRetentionHandler
+  :: forall registry m
+   . (HasRegistry m registry)
+  => ArbiterServerConfig m registry
+  -> Text
+  -> DLQRetentionRequest
+  -> Handler NoContent
+setDLQRetentionHandler config queue (DLQRetentionRequest retention) = do
+  when (any (<= 0) retention) $ throwError err400 {errBody = "retentionSeconds must be positive"}
+  NoContent <$ runDb config (Ops.setQueueDLQRetention (serverSchema config) queue (realToFrac <$> retention))
+
+-- | Flip the @paused@ flag for a queue, creating its @arbiter_queues@ row when missing.
 setQueuePausedHandler
   :: forall registry m
    . (HasRegistry m registry)

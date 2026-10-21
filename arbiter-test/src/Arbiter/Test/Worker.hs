@@ -28,8 +28,10 @@ import Arbiter.Core.Exceptions
   , throwBranchCancel
   , throwJobGone
   , throwNack
+  , throwNackAfter
   , throwPermanent
   , throwRetryable
+  , throwRetryableAfter
   , throwScopedFailure
   , throwTreeCancel
   )
@@ -51,6 +53,8 @@ import Arbiter.Core.Job.Types
   , isRollup
   , jobKind
   , kindOf
+  , lastError
+  , notVisibleUntil
   , parentId
   , payload
   , payloadKeys
@@ -89,7 +93,9 @@ import Arbiter.Worker.Config
   , cancelTree
   , failPermanent
   , failRetry
+  , failRetryAfter
   , nack
+  , nackAfter
   , spawn
   , transactionalWorkerConfig
   )
@@ -914,6 +920,53 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
         length retries `shouldBe` 2
         traverse_ (\(_, backoff) -> backoff `shouldSatisfy` (> 0)) retries
 
+    it "throwRetryableAfter retries after its delay in place of the backoff" $ \env -> do
+      retryRef <- newIORef []
+      let hooks =
+            defaultObservabilityHooks
+              { onJobRetry = \_ delay -> liftIO $ atomicModifyIORef' retryRef $ \seen -> (delay : seen, ())
+              }
+      config <- mkConfig $ \_job -> throwRetryableAfter 3600 "rate limited"
+      Just inserted <- runM env $ HL.insertJob (setMaxAttempts (Just 3) $ defaultJob (mkSimple "retry-after"))
+      before' <- getCurrentTime
+
+      withAsync
+        ( runM env $
+            runWorkerPool
+              config
+                { observabilityHooks = hooks
+                , workerCount = 1
+                , pollInterval = 0.1
+                , backoffStrategy = Constant 0
+                , jitter = NoJitter
+                }
+        )
+        $ \_ -> waitUntil 10_000 $ not . null <$> readIORef retryRef
+
+      readIORef retryRef `shouldReturn` [3600]
+      Just parked <- runM env (HL.getJobById @payload (primaryKey inserted))
+      attempts parked `shouldBe` 1
+      lastError parked `shouldBe` Just "rate limited"
+      notVisibleUntil parked `shouldSatisfy` maybe False (> addUTCTime 3500 before')
+
+    it "throwNackAfter parks the job without using an attempt" $ \env -> do
+      callsRef <- newIORef (0 :: Int)
+      config <- mkConfig $ \_job -> do
+        liftIO $ bumpRef callsRef
+        throwNackAfter 3600
+      Just inserted <- runM env $ HL.insertJob (defaultJob (mkSimple "nack-after"))
+      before' <- getCurrentTime
+      let parked = do
+            Just job <- runM env (HL.getJobById @payload (primaryKey inserted))
+            pure (attempts job == 0 && isNothing (claimedBy job) && maybe False (> addUTCTime 3500 before') (notVisibleUntil job))
+
+      withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ ->
+        waitUntil 10_000 parked
+
+      readIORef callsRef `shouldReturn` 1
+      Just job <- runM env (HL.getJobById @payload (primaryKey inserted))
+      lastError job `shouldBe` Nothing
+
     it "onJobFailedAndMovedToDLQ is called when job exhausts retries" $ \env -> do
       dlqRef <- newIORef []
       let hooks =
@@ -1097,6 +1150,31 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
         occurrences (mkSimple "G1-1") `shouldBe` 1
         occurrences (mkSimple "G1-2") `shouldSatisfy` (>= 2)
         occurrences (mkSimple "G1-3") `shouldSatisfy` (>= 2)
+
+    it "failRetryAfter and nackAfter park their jobs for the delay" $ \env -> do
+      let batchHandler jobs cbs = for_ jobs $ \job ->
+            if payload job == mkSimple "cb-retry-after"
+              then failRetryAfter cbs job 3600 "slow down"
+              else nackAfter cbs job 3600
+      Just retried <- runM env $ HL.insertJob (setGroupKey (Just "cba") $ defaultJob (mkSimple "cb-retry-after"))
+      Just nacked <- runM env $ HL.insertJob (setGroupKey (Just "cba") $ defaultJob (mkSimple "cb-nack-after"))
+      config <- mkBatchedConfig 1 10 batchHandler
+      before' <- getCurrentTime
+      let fetch job = runM env (HL.getJobById @payload (primaryKey job))
+          parkedPast job = maybe False (> addUTCTime 3500 before') (notVisibleUntil job)
+          settled = do
+            Just retriedRow <- fetch retried
+            Just nackedRow <- fetch nacked
+            pure
+              (isNothing (claimedBy retriedRow) && isNothing (claimedBy nackedRow) && parkedPast retriedRow && parkedPast nackedRow)
+
+      withAsync (runM env $ runWorkerPool config {pollInterval = 0.1, backoffStrategy = Constant 0, jitter = NoJitter}) $ \_ ->
+        waitUntil 10_000 settled
+
+      Just retriedRow <- fetch retried
+      Just nackedRow <- fetch nacked
+      (attempts retriedRow, lastError retriedRow) `shouldBe` (1, Just "slow down")
+      (attempts nackedRow, lastError nackedRow) `shouldBe` (0, Nothing)
 
     it "throwNack in single-job mode reprocesses without recording a failure" $ \env -> do
       callsRef <- newIORef (0 :: Int)

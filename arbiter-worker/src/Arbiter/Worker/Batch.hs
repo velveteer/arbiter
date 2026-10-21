@@ -88,6 +88,8 @@ data Report job
 data FailureKind
   = -- | Retry with backoff, or move to the DLQ when attempts are exhausted.
     RetryFailure
+  | -- | Retry after this delay in seconds, or move to the DLQ when attempts are exhausted.
+    RetryAfterFailure NominalDiffTime
   | -- | Move to the DLQ now.
     PermanentFailure
   | -- | Delete the whole job tree from its root.
@@ -128,8 +130,9 @@ data Effects n ctx job kids stored = Effects
   -- elsewhere when the failure cancels a tree, in one transaction.
   , effectDeleteCancelled :: ctx -> [job] -> n (Set JobId)
   -- ^ Delete the jobs a force-cancel flagged. The ids deleted.
-  , effectRelease :: ctx -> [job] -> n (Set JobId)
-  -- ^ Hand back the attempt the claim consumed. The ids released.
+  , effectRelease :: ctx -> Maybe NominalDiffTime -> [job] -> n (Set JobId)
+  -- ^ Hand back the attempt the claim consumed, parking the jobs for the delay when
+  -- there is one. The ids released.
   , effectSpawn :: ctx -> job -> kids -> n ()
   -- ^ Attach children to one job and settle it suspended, in one transaction.
   , effectReport :: ctx -> Report job -> n ()
@@ -153,8 +156,8 @@ data Callbacks n ctx job kids stored = Callbacks
   -- ^ Ack in bulk, storing each result.
   , callbackFail :: ctx -> Failure -> job -> n ()
   -- ^ Write one job's failure.
-  , callbackNack :: ctx -> job -> n ()
-  -- ^ Release one job for reprocessing.
+  , callbackNack :: ctx -> Maybe NominalDiffTime -> job -> n ()
+  -- ^ Release one job for reprocessing, after the delay when there is one.
   , callbackSpawn :: ctx -> job -> kids -> n ()
   -- ^ Attach children to one job and suspend it.
   }
@@ -434,7 +437,7 @@ callbacks base jobs startTime =
     , callbackAckAll = \ctx pairs -> within ctx $ \run -> dropHandled pairs >>= ackJobs run startTime
     , callbackFail = \ctx failure job -> unlessHandled "failure" job $ within ctx $ \run ->
         failJob run jobs startTime failure job
-    , callbackNack = \ctx job -> unlessHandled "nack" job $ within ctx $ \run -> releaseJobs run [job]
+    , callbackNack = \ctx delay job -> unlessHandled "nack" job $ within ctx $ \run -> releaseJobs run delay [job]
     , callbackSpawn = \ctx job kids -> unlessHandled "spawn" job $ within ctx $ \run ->
         settle run (finalized [job]) (effect effectSpawn run job kids) $ \at () ->
           reportSuccess at startTime job
@@ -530,21 +533,23 @@ finalizeForceCancelled run jobs cancelledIds goneIds = do
       (unavailable, siblings) = partition (hasIdIn handoff goneSet) interrupted
   unless (null unavailable) $ logAt run Info unavailable ("Job(s) " <> unownedReason <> ", skipping retry")
   reportGoneJobs run unownedReason (gone <> unavailable)
-  releaseOrWarn run "Releasing a force-cancel batch sibling failed" siblings
+  releaseOrWarn run "Releasing a force-cancel batch sibling failed" Nothing siblings
   where
     handoff = runHandoff run
 
 -- | Hand back the attempt the claim consumed for the jobs left unfinalized, in one
 -- statement, and report whichever of them the release found under another claim.
-releaseJobs :: (MonadMask n, MonadSTM n) => Run n ctx job kids stored -> [job] -> n ()
-releaseJobs _ [] = pure ()
-releaseJobs run jobs =
-  void $ settle run (finalized jobs) (effect effectRelease run jobs) $ \at released ->
+-- A delay parks the jobs for that long.
+releaseJobs :: (MonadMask n, MonadSTM n) => Run n ctx job kids stored -> Maybe NominalDiffTime -> [job] -> n ()
+releaseJobs _ _ [] = pure ()
+releaseJobs run delay jobs =
+  void $ settle run (finalized jobs) (effect effectRelease run delay jobs) $ \at released ->
     settleUnwritten at [(job, Left unownedReason) | job <- jobs, not (hasIdIn (runHandoff run) released job)]
 
 -- | 'releaseJobs' on an unwinding path. A failure is logged as a warning.
-releaseOrWarn :: (MonadMask n, MonadSTM n) => Run n ctx job kids stored -> Text -> [job] -> n ()
-releaseOrWarn run warning jobs = warnOn run jobs warning () (releaseJobs run jobs)
+releaseOrWarn
+  :: (MonadMask n, MonadSTM n) => Run n ctx job kids stored -> Text -> Maybe NominalDiffTime -> [job] -> n ()
+releaseOrWarn run warning delay jobs = warnOn run jobs warning () (releaseJobs run delay jobs)
 
 -- | Run an action, logging a warning and returning @fallback@ when it fails.
 warnOn :: (MonadCatch n) => Run n ctx job kids stored -> [job] -> Text -> a -> n a -> n a
@@ -619,19 +624,19 @@ reportBatchOutcome run jobs startTime endTime outcome = do
           -- its attempt.
           let (inBatch, jobsGone, siblings) = splitNamed gone
           void (settleGoneJobs run reason jobsGone)
-          when inBatch $ releaseOrWarn run interruptedSiblingWarning siblings
+          when inBatch $ releaseOrWarn run interruptedSiblingWarning Nothing siblings
       | Just (JobScopedFailure inner scoped) <- fromException exc -> do
           let (inBatch, theirs, siblings) = splitNamed scoped
               failure = classifyException (toException inner)
           if inBatch
             then do
               failJobs failure theirs
-              releaseOrWarn run interruptedSiblingWarning siblings
+              releaseOrWarn run interruptedSiblingWarning Nothing siblings
             else failJobs failure unhandled
-      | Just JobNackException <- fromException exc -> do
+      | Just (JobNackException delay) <- fromException exc -> do
           -- Hand back the attempt the claim consumed for every job the handler
           -- left unfinalized.
-          releaseOrWarn run "Handing back a nacked batch's attempt failed" unhandled
+          releaseOrWarn run "Handing back a nacked batch's attempt failed" delay unhandled
           logAt run Info (toList jobs) "Job(s) nacked, will be reprocessed"
       | otherwise -> do
           -- Fail the jobs the handler did not finalize, in a separate transaction.
@@ -658,7 +663,8 @@ reportBatchOutcome run jobs startTime endTime outcome = do
 -- | Classify a handler exception into an error message and failure disposition.
 classifyException :: SomeException -> Failure
 classifyException exception
-  | Just (Retryable (JobRetryableException msg)) <- fromException exception = (msg, RetryFailure)
+  | Just (Retryable (JobRetryableException msg delay)) <- fromException exception =
+      (msg, maybe RetryFailure RetryAfterFailure delay)
   | Just (Permanent (JobPermanentException msg)) <- fromException exception = (msg, PermanentFailure)
   | Just (TreeCancel (TreeCancelException msg)) <- fromException exception = (msg, TreeCancelFailure)
   | Just (BranchCancel (BranchCancelException msg)) <- fromException exception = (msg, BranchCancelFailure)

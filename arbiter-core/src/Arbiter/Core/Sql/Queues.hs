@@ -7,6 +7,9 @@
 module Arbiter.Core.Sql.Queues
   ( ensureQueueSQL
   , setQueuePausedSQL
+  , setQueueDLQRetentionSQL
+  , queueDLQRetentionsSQL
+  , existingQueuesSQL
   , getQueueSQL
   , listQueuesSQL
   ) where
@@ -15,7 +18,7 @@ import Data.Int (Int64)
 import Data.Text (Text)
 
 import Arbiter.Core.Codec (codecColumns, joinColumns, queueRowCodec)
-import Arbiter.Core.Job.Schema (SchemaName, pauseNotifyChannelPrefix)
+import Arbiter.Core.Job.Schema (SchemaName, dlqSuffix, pauseNotifyChannelPrefix)
 import Arbiter.Core.Queues (QueueRow, arbiterQueuesTable)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, rows)
@@ -71,6 +74,42 @@ setQueuePausedSQL schemaName queue paused =
         )
         SELECT count(*)::int8 AS @{count :: CInt8} FROM upsert
         WHERE (SELECT count(*) FROM notif) >= 0
+      |]
+
+-- | Upsert the queue's DLQ retention in seconds. 'Nothing' keeps its DLQ jobs.
+setQueueDLQRetentionSQL :: SchemaName -> Text -> Maybe Int64 -> Query ()
+setQueueDLQRetentionSQL schemaName queue retention =
+  let tbl = arbiterQueuesTable schemaName
+   in [sql|
+        INSERT INTO ${tbl} (queue_name, dlq_retention_secs)
+          VALUES (#{queue :: CText}, #{retention :: Maybe CInt8}::bigint)
+        ON CONFLICT (queue_name) DO UPDATE
+          SET dlq_retention_secs = EXCLUDED.dlq_retention_secs, updated_at = NOW()
+      |]
+
+-- | The queues with a DLQ retention, with the retention in seconds.
+queueDLQRetentionsSQL :: SchemaName -> Query (Text, Int64)
+queueDLQRetentionsSQL schemaName =
+  let tbl = arbiterQueuesTable schemaName
+   in [sql|
+        SELECT @{queue_name :: CText}, @{dlq_retention_secs :: CInt8}
+        FROM ${tbl}
+        WHERE dlq_retention_secs IS NOT NULL
+        ORDER BY queue_name
+      |]
+
+-- | The @arbiter_queues@ names whose job and DLQ tables exist in the schema.
+existingQueuesSQL :: SchemaName -> Query Text
+existingQueuesSQL schemaName =
+  let tbl = arbiterQueuesTable schemaName
+      schemaLit = textLiteral schemaName
+      dlqLit = textLiteral dlqSuffix
+   in [sql|
+        SELECT @{queue_name :: CText}
+        FROM ${tbl}
+        WHERE to_regclass(format('%I.%I', ${schemaLit}::text, queue_name)) IS NOT NULL
+          AND to_regclass(format('%I.%I', ${schemaLit}::text, queue_name || ${dlqLit})) IS NOT NULL
+        ORDER BY queue_name
       |]
 
 -- | Get the @arbiter_queues@ row for a single queue.

@@ -289,6 +289,7 @@ failWrite (_, kind) job now rows
       let (deleted, rows') = cancelTreeRows now rows
        in ((Right (TreeCancelled deleted), [(gone, Deleted) | gone <- deleted]), rows')
   | kind == PermanentFailure = write Dlqed DeadLettered dlqRow unwrittenDlq
+  | RetryAfterFailure delay <- kind = write Retried (Retrying delay) retryRow unwrittenRetry
   | otherwise = write Retried (Retrying modelBackoff) retryRow unwrittenRetry
   where
     write op outcome stmt reason =
@@ -378,7 +379,7 @@ modelEffects rows recorder =
         for_ landings $ \(job, op) -> recorder (Landed job op)
         pure outcomes
     , effectDeleteCancelled = \() -> landedIds rows recorder Deleted deleteCancelledRow
-    , effectRelease = \() -> landedIds rows recorder Released releaseRow
+    , effectRelease = \() _ -> landedIds rows recorder Released releaseRow
     , effectSpawn = \() job () -> do
         spawned <- landing rows recorder Spawned spawnRow job
         unless spawned (throwIO (JobGoneException reclaimedReason [jobId job]))
@@ -517,7 +518,12 @@ genPlan = do
       frequency
         [ (3, AckOne <$> choose (1, count))
         , (1, AckMany . enumFromTo 1 <$> choose (1, count))
-        , (2, FailOne <$> elements [RetryFailure, PermanentFailure, TreeCancelFailure, BranchCancelFailure] <*> choose (1, count))
+        ,
+          ( 2
+          , FailOne
+              <$> elements [RetryFailure, RetryAfterFailure 30, PermanentFailure, TreeCancelFailure, BranchCancelFailure]
+              <*> choose (1, count)
+          )
         , (1, NackOne <$> choose (1, count))
         , (2, SpawnOne <$> choose (1, count))
         , (3, Sleep <$> elements [0.005, 0.5, 1, 2.5])
@@ -540,13 +546,13 @@ genPlan = do
 
 thrownException :: NonEmpty Job -> Thrown -> SomeException
 thrownException jobs = \case
-  ThrowRetryable -> toException (Retryable (JobRetryableException "transient"))
+  ThrowRetryable -> toException (Retryable (JobRetryableException "transient" Nothing))
   ThrowPermanent -> toException (Permanent (JobPermanentException "permanent"))
   ThrowTreeCancel -> toException (TreeCancel (TreeCancelException "cancel the tree"))
   ThrowBranchCancel -> toException (BranchCancel (BranchCancelException "cancel the branch"))
   ThrowGone index -> toException (JobGoneException handlerGone [jobId (toList jobs !! (index - 1))])
   ThrowGoneAll -> toException (JobGoneException handlerGone (map jobId (toList jobs)))
-  ThrowNack -> toException JobNackException
+  ThrowNack -> toException (JobNackException Nothing)
   ThrowOther -> toException (userError "handler crashed")
 
 -- | Run a plan: claim the rows, run the batch as the pool does, let the actors
@@ -629,7 +635,7 @@ modeFor rows recorder jobs plan = case planSingle plan of
     AckOne index -> callbackAck callbacks () (pick batch index) Nothing
     AckMany indexes -> callbackAckAll callbacks () [(pick batch index, Nothing) | index <- indexes]
     FailOne kind index -> callbackFail callbacks () ("failed", kind) (pick batch index)
-    NackOne index -> callbackNack callbacks () (pick batch index)
+    NackOne index -> callbackNack callbacks () Nothing (pick batch index)
     SpawnOne index -> callbackSpawn callbacks () (pick batch index) ()
     Sleep delay -> threadDelay delay
     Throw thrown -> throwIO (thrownException batch thrown)
