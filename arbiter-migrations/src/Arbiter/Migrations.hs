@@ -19,6 +19,11 @@ module Arbiter.Migrations
   , TableAdmission (..)
   , allTableAdmission
 
+    -- * Dropping queues
+  , dropQueue
+  , forceDropQueue
+  , orphanedQueues
+
     -- * Validation
   , validateRegistryNames
   , maxQueueNameBytes
@@ -38,6 +43,7 @@ module Arbiter.Migrations
 
 import Arbiter.Core.Concurrency.Schema
   ( addConcurrencyColumnsSQL
+  , concurrencyTriggerBase
   , createConcurrencyIndexSQL
   , createConcurrencyPoliciesTableSQL
   , createConcurrencyTableSQL
@@ -52,6 +58,7 @@ import Arbiter.Core.CronSchedule
   , addRunRequestedColumnSQL
   , addTimezoneColumnSQL
   , createCronSchedulesTableSQL
+  , cronSchedulesTable
   )
 import Arbiter.Core.Enum (showText)
 import Arbiter.Core.Exceptions (displayEx)
@@ -93,6 +100,7 @@ import Arbiter.Core.Job.Schema
   , eventStreamingObjectComment
   , eventStreamingObjectCommentPrefix
   , eventStreamingTriggerName
+  , jobQueueDLQTable
   , jobQueueTable
   , legacyEventStreamingTriggers
   , migrateUngroupedReadySplitIndexesSQL
@@ -102,6 +110,7 @@ import Arbiter.Core.Job.Schema
   , notifyObjectCommentPrefix
   , notifyTriggerName
   , pauseNotifyChannel
+  , qualifiedName
   , queueTableNames
   , setMaxAttemptsDefaultSQL
   )
@@ -114,16 +123,18 @@ import Arbiter.Core.Job.Schema.Groups
   , createJobQueueGroupKeyIndexSQL
   , createJobQueueGroupRetriedIndexSQL
   , createJobQueueGroupedDueIndexSQL
+  , groupsTriggerBase
   , migrateGroupsReadyRankingSQL
   )
 import Arbiter.Core.Job.Types (RegistryAdmissionPolicies)
 import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..), RegistryTables (..))
-import Arbiter.Core.Queues (addDLQRetentionColumnSQL, createQueuesTableSQL, registerQueuesSQL)
+import Arbiter.Core.Queues (addDLQRetentionColumnSQL, arbiterQueuesTable, createQueuesTableSQL, registerQueuesSQL)
 import Arbiter.Core.RateLimit.Schema
   ( addRateLimitColumnsSQL
   , addRateLimitCostColumnSQL
   , alterRateLimitsDurabilitySQL
   , arbiterRateLimitsTableName
+  , bucketTriggerBase
   , createRateLimitBucketTriggerFunctionsSQL
   , createRateLimitBucketTriggersSQL
   , createRateLimitPoliciesTableSQL
@@ -138,10 +149,11 @@ import Arbiter.Core.RateLimit.Spec
   , registryRateLimitTables
   )
 import Arbiter.Core.SchemaTables (sharedArbiterTables)
+import Arbiter.Core.Sql.Workers (workerStaleSQL)
 import Arbiter.Core.SqlLiterals (maxIdentifierBytes)
-import Arbiter.Core.Worker (createWorkersTableSQL)
+import Arbiter.Core.Worker (arbiterWorkersTable, createWorkersTableSQL)
 import Control.Exception (bracket, catch, throwIO, try)
-import Control.Monad (unless, void, when)
+import Control.Monad (filterM, unless, void, when)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Foldable (find, traverse_)
@@ -155,7 +167,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Time (NominalDiffTime)
 import Database.PostgreSQL.LibPQ qualified as LibPQ
-import Database.PostgreSQL.Simple (Only (..), close, connectPostgreSQL, execute_, query)
+import Database.PostgreSQL.Simple (Only (..), close, connectPostgreSQL, execute_, query, query_)
 import Database.PostgreSQL.Simple qualified as PG
 import Database.PostgreSQL.Simple.Internal (withConnection)
 import Database.PostgreSQL.Simple.Migration
@@ -187,6 +199,10 @@ data MigrationConfig = MigrationConfig
   , migrationLockTimeout :: Maybe NominalDiffTime
   -- ^ Seconds to wait for the schema's migration lock, then return 'MigrationError'.
   -- 'Nothing' (default) waits indefinitely.
+  , retiredQueues :: [TableName]
+  -- ^ Queues removed from the registry. Each run drops them as 'dropQueue' does. A
+  -- queue the drop refuses stays until a later run. A name also in the registry
+  -- returns 'MigrationError'. Default: @[]@.
   }
   deriving stock (Eq, Show)
 
@@ -198,6 +214,7 @@ defaultMigrationConfig =
     , enableEventStreaming = False
     , rateLimitDurability = Unlogged
     , migrationLockTimeout = Nothing
+    , retiredQueues = []
     }
 
 -- | Migrate every queue in a registry into one schema. The schema itself is created
@@ -354,11 +371,16 @@ runMigrationsTrackedForTables
   -- ^ Admission policy rows to seed
   -> IO (MigrationResult String)
 runMigrationsTrackedForTables connStr schemaName tableAdmissions config seeds =
-  case validateRegistryNames schemaName (map fst tableAdmissions) of
+  case validateRegistryNames schemaName tables >> traverse_ validateRetired (retiredQueues config) of
     Left err -> pure (MigrationError (T.unpack err))
     Right () -> bracket (connectPostgreSQL connStr) close $ \conn ->
       withMigrationLock conn schemaName (migrationLockTimeout config) $
         migrateSchema conn schemaName tableAdmissions config seeds
+  where
+    tables = map fst tableAdmissions
+    validateRetired table
+      | table `elem` tables = Left ("Arbiter queue is both registered and retired: " <> table)
+      | otherwise = validateRegistryNames schemaName [table]
 
 -- | Hold the schema's session-level migration lock for the run. Replicas that migrate at
 -- the same time run one after another. A session lock spans the reconciles, which run
@@ -380,13 +402,7 @@ withMigrationLock conn schemaName timeout act = bracket acquire release run
           | otherwise -> throwIO sqlError
     lock = void (query conn "SELECT pg_advisory_lock(hashtextextended(?, 0))::text" lockName :: IO [Only (Maybe Text)])
     -- Pinned for this transaction.
-    setTimeouts = traverse_ setLocal [("lock_timeout", maybe "0" millis timeout), ("statement_timeout", "0")]
-    setLocal (name, value) =
-      void (query conn "SELECT set_config(?, ?, TRUE)" (name :: Text, value :: Text) :: IO [Only Text])
-    millis seconds = showText (max 1 (min maxLockTimeoutMillis (ceiling (seconds * millisPerSecond) :: Int)))
-    maxLockTimeoutMillis = fromIntegral (maxBound :: Int32)
-    millisPerSecond = 1000
-    lockNotAvailable = "55P03"
+    setTimeouts = traverse_ (setLocal conn) [lockTimeoutSetting timeout, ("statement_timeout", "0")]
     release locked =
       when locked $
         void (try unlock :: IO (Either PG.SqlError [Only Bool]))
@@ -395,6 +411,18 @@ withMigrationLock conn schemaName timeout act = bracket acquire release run
       | locked = act
       | otherwise =
           pure (MigrationError ("Timed out waiting on the arbiter migration lock for schema " <> T.unpack schemaName))
+
+-- | Set a parameter for the current transaction.
+setLocal :: PG.Connection -> (Text, Text) -> IO ()
+setLocal conn (name, value) = void (query conn "SELECT set_config(?, ?, TRUE)" (name, value) :: IO [Only Text])
+
+-- | The @lock_timeout@ for a wait bound. 'Nothing' waits without bound.
+lockTimeoutSetting :: Maybe NominalDiffTime -> (Text, Text)
+lockTimeoutSetting timeout = ("lock_timeout", maybe "0" millis timeout)
+  where
+    millis seconds = showText (max 1 (min maxLockTimeoutMillis (ceiling (seconds * millisPerSecond) :: Int)))
+    maxLockTimeoutMillis = fromIntegral (maxBound :: Int32)
+    millisPerSecond = 1000
 
 -- | Apply a schema's tracked migrations and reconcile it, under the migration lock.
 migrateSchema
@@ -414,11 +442,10 @@ migrateSchema conn schemaName tableAdmissions config seeds = do
   let schemaMigrations = schemaLevelMigrations schemaName
       tableMigrations = concatMap (uncurry (jobQueueMigrationsForTable schemaName)) tableAdmissions
       migrations = schemaMigrations <> tableMigrations
-      migrationTableName = encodeUtf8 $ schemaName <> ".schema_migrations"
       options =
         defaultOptions
           { optVerbose = Quiet
-          , optTableName = migrationTableName
+          , optTableName = encodeUtf8 (migrationTable schemaName)
           }
 
   void (runMigrations conn options [MigrationInitialization])
@@ -435,6 +462,7 @@ migrateSchema conn schemaName tableAdmissions config seeds = do
       reconcileConcurrencyPolicies conn schemaName (seedConcurrencyPolicies seeds)
       reconcileRateLimitDurability conn schemaName (rateLimitDurability config)
       reconcileOptionalTriggers conn schemaName (map fst tableAdmissions) config
+      traverse_ (void . dropQueueOn conn schemaName RefuseInUse) (retiredQueues config)
 
 -- | Add an @arbiter_queues@ row for each migrated queue. Maintenance sweeps every
 -- queue listed there, including queues outside the pool's registry. Existing rows
@@ -442,6 +470,155 @@ migrateSchema conn schemaName tableAdmissions config seeds = do
 registerQueues :: PG.Connection -> SchemaName -> [TableName] -> IO ()
 registerQueues conn schemaName tables =
   void (PG.execute conn (Query (encodeUtf8 (registerQueuesSQL schemaName))) (Only (PGArray tables)))
+
+-- | Drop one queue: its tables, its trigger functions, its @arbiter_queues@,
+-- @cron_schedules@ and @arbiter_workers@ rows, and its migration history. Its archive
+-- goes with it. A later migrate that names the queue creates it fresh. Policy rows are
+-- keyed by prefix and stay. Runs in one transaction under the schema's migration lock.
+-- Returns 'MigrationError' for a name without an @arbiter_queues@ row, while a live
+-- worker serves the queue, while the queue or its DLQ holds jobs, or while another
+-- transaction holds a lock on one of its tables. 'forceDropQueue' skips the in-use checks.
+dropQueue
+  :: ByteString
+  -- ^ Database connection string
+  -> SchemaName
+  -- ^ Schema for the arbiter tables
+  -> MigrationConfig
+  -- ^ Only 'migrationLockTimeout' applies
+  -> TableName
+  -- ^ Queue table name
+  -> IO (MigrationResult String)
+dropQueue connStr schemaName config = runDrop connStr schemaName config RefuseInUse
+
+-- | 'dropQueue' without the in-use refusals. Drops the queue with its jobs, DLQ rows
+-- and archive, releasing the concurrency slots its claimed jobs hold. Drops it even
+-- while workers serve it. Stop them and its producers first, or their next statement
+-- on the queue fails. Waits for other transactions' locks on its tables, bounded by
+-- 'migrationLockTimeout'. Still returns 'MigrationError' for a name without an
+-- @arbiter_queues@ row.
+forceDropQueue
+  :: ByteString
+  -- ^ Database connection string
+  -> SchemaName
+  -- ^ Schema for the arbiter tables
+  -> MigrationConfig
+  -- ^ Only 'migrationLockTimeout' applies
+  -> TableName
+  -- ^ Queue table name
+  -> IO (MigrationResult String)
+forceDropQueue connStr schemaName config =
+  runDrop connStr schemaName config (Force (migrationLockTimeout config))
+
+runDrop :: ByteString -> SchemaName -> MigrationConfig -> DropMode -> TableName -> IO (MigrationResult String)
+runDrop connStr schemaName config mode table =
+  case validateRegistryNames schemaName [table] of
+    Left err -> pure (MigrationError (T.unpack err))
+    Right () -> bracket (connectPostgreSQL connStr) close $ \conn ->
+      withMigrationLock conn schemaName (migrationLockTimeout config) $
+        either (MigrationError . T.unpack . displayEx) (maybe MigrationSuccess (MigrationError . T.unpack))
+          <$> tryAny (dropQueueOn conn schemaName mode table)
+
+-- | The schema's @arbiter_queues@ names that the registry does not declare, in name
+-- order. Candidates for 'retiredQueues'.
+orphanedQueues
+  :: (RegistryTables registry)
+  => Proxy registry
+  -> ByteString
+  -- ^ Database connection string
+  -> SchemaName
+  -- ^ Schema for the arbiter tables
+  -> IO [TableName]
+orphanedQueues proxy connStr schemaName =
+  bracket (connectPostgreSQL connStr) close $ \conn ->
+    Set.toAscList . (`Set.difference` Set.fromList (registryTableNames proxy)) <$> recordedQueues conn schemaName
+
+-- | The schema's @arbiter_queues@ names.
+recordedQueues :: PG.Connection -> SchemaName -> IO (Set.Set TableName)
+recordedQueues conn schemaName =
+  Set.fromList . map fromOnly <$> query_ conn (textQuery ("SELECT queue_name FROM " <> arbiterQueuesTable schemaName))
+
+-- | Whether a drop refuses a queue in use, or forces it with a bound on each lock wait.
+data DropMode = RefuseInUse | Force (Maybe NominalDiffTime)
+
+-- | Drop a queue on an open connection, in one transaction. Returns why it refused.
+dropQueueOn :: PG.Connection -> SchemaName -> DropMode -> TableName -> IO (Maybe Text)
+dropQueueOn conn schemaName mode table = guarded `catch` lockRefusal
+  where
+    guarded = PG.withTransaction conn $ do
+      recorded <- Set.member table <$> recordedQueues conn schemaName
+      if not recorded
+        then refuse "has no arbiter_queues row"
+        else case mode of
+          Force timeout -> do
+            setLocal conn (lockTimeoutSetting timeout)
+            present <- lockPresent ""
+            when (jobQueueTable schemaName table `elem` present) releaseConcurrency
+            Nothing <$ dropObjects
+          RefuseInUse -> do
+            served <- exists conn liveWorkerProbe (Only table)
+            if served
+              then refuse "still has a live worker"
+              else do
+                present <- lockPresent " NOWAIT"
+                holdsJobs <- or <$> traverse hasRows (filter (`elem` jobTables) present)
+                if holdsJobs then refuse "still holds jobs" else Nothing <$ dropObjects
+    lockPresent wait = do
+      present <- filterM relationExists tables
+      unless (null present) $
+        executeSQL conn ("LOCK TABLE " <> T.intercalate ", " present <> " IN ACCESS EXCLUSIVE MODE" <> wait <> ";")
+      pure present
+    lockRefusal sqlError
+      | PG.sqlState sqlError == lockNotAvailable = refuse "is in use by another transaction"
+      | otherwise = throwIO sqlError
+    refuse reason = pure (Just ("Queue " <> table <> " " <> reason))
+    tables = map (qualifiedName schemaName) (queueTableNames table)
+    jobTables = [jobQueueTable schemaName table, jobQueueDLQTable schemaName table]
+    liveWorkerProbe =
+      textQuery $
+        "SELECT EXISTS (SELECT 1 FROM "
+          <> arbiterWorkersTable schemaName
+          <> " WHERE queue_name = ? AND NOT ("
+          <> workerStaleSQL
+          <> "))"
+    releaseConcurrency =
+      executeSQL
+        conn
+        ("DELETE FROM " <> jobQueueTable schemaName table <> " WHERE claimed_by IS NOT NULL AND concurrency_key IS NOT NULL;")
+    relationExists relation = exists conn "SELECT to_regclass(?) IS NOT NULL" (Only relation)
+    hasRows relation = exists conn (textQuery ("SELECT EXISTS (SELECT 1 FROM " <> relation <> ")")) ()
+
+    dropObjects = do
+      executeSQL conn ("DROP TABLE IF EXISTS " <> T.intercalate ", " tables <> ";")
+      executeRendered
+        conn
+        ( "SELECT format('DROP FUNCTION %I.%I();', namespace.nspname, function.proname) "
+            <> functionJoins
+            <> "WHERE namespace.nspname = ? AND function.proname = ANY(?::text[]) AND function.pronargs = 0"
+        )
+        (schemaName, PGArray functions)
+      traverse_
+        (\tbl -> PG.execute conn (textQuery ("DELETE FROM " <> tbl <> " WHERE queue_name = ?")) (Only table))
+        [arbiterQueuesTable schemaName, cronSchedulesTable schemaName, arbiterWorkersTable schemaName]
+      void $
+        PG.execute
+          conn
+          (textQuery ("DELETE FROM " <> migrationTable schemaName <> " WHERE filename = ANY(?)"))
+          (Only (PGArray [T.pack name | MigrationScript name _ <- jobQueueMigrationsForTable schemaName table allTableAdmission]))
+
+    functions =
+      notifyFunctionName table
+        : [ base <> suffix
+          | base <- [groupsTriggerBase table, concurrencyTriggerBase table, bucketTriggerBase table]
+          , suffix <- ["_insert", "_delete", "_update"]
+          ]
+
+-- | SQLSTATE for a lock a statement could not take.
+lockNotAvailable :: ByteString
+lockNotAvailable = "55P03"
+
+-- | The schema's migration history table.
+migrationTable :: SchemaName -> Text
+migrationTable schemaName = schemaName <> ".schema_migrations"
 
 -- | Create the schema. A failed CREATE is fine when the schema exists.
 ensureSchema :: PG.Connection -> SchemaName -> IO ()
@@ -688,7 +865,11 @@ eventTables = concatMap (\table -> [table, table <> dlqSuffix])
 
 -- | Run one rendered DDL or DML statement.
 executeSQL :: PG.Connection -> Text -> IO ()
-executeSQL conn = void . execute_ conn . Query . encodeUtf8
+executeSQL conn = void . execute_ conn . textQuery
+
+-- | A query from rendered SQL text.
+textQuery :: Text -> Query
+textQuery = Query . encodeUtf8
 
 -- | The catalog joins the trigger sweeps share.
 triggerJoins :: Query

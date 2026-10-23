@@ -3018,16 +3018,16 @@ setQueueDLQRetention
 setQueueDLQRetention schemaName queue retention =
   void (MA.executeStatement (Tmpl.setQueueDLQRetentionSQL schemaName queue (ceiling <$> retention)))
 
--- | The given queues and every queue migrated into the schema whose tables exist,
--- in name order. Maintenance covers this set, whatever registry the caller holds.
+-- | The given queues and every queue migrated into the schema, keeping those whose
+-- tables exist, in name order. Maintenance covers this set, whatever registry the
+-- caller holds. A dropped queue still in the registry drops out.
 schemaQueues
   :: (MonadArbiter m)
   => SchemaName
   -> [TableName]
   -> m [TableName]
 schemaQueues schemaName queues =
-  Set.toAscList . Set.union (Set.fromList queues) . Set.fromList
-    <$> MA.executeQuery (Tmpl.existingQueuesSQL schemaName)
+  Set.toAscList . Set.fromList <$> MA.executeQuery (Tmpl.existingQueuesSQL schemaName queues)
 
 -- | Get the @arbiter_queues@ row for a single queue. 'Nothing' when absent.
 getQueue

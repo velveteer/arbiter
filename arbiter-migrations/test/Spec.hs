@@ -33,7 +33,7 @@ import Data.Text.Encoding (encodeUtf8)
 import Database.PostgreSQL.Simple qualified as PG
 import Database.PostgreSQL.Simple.Migration (MigrationCommand (..))
 import Database.PostgreSQL.Simple.Notification (Notification (..), getNotification)
-import Database.PostgreSQL.Simple.Types (Query (..))
+import Database.PostgreSQL.Simple.Types (PGArray (..), Query (..))
 import GHC.Generics (Generic)
 import System.Environment (lookupEnv)
 import System.FilePath ((<.>), (</>))
@@ -48,8 +48,11 @@ import Arbiter.Migrations
   , allTableAdmission
   , conflictingPolicyPrefixes
   , defaultMigrationConfig
+  , dropQueue
+  , forceDropQueue
   , jobQueueMigrationsForTable
   , noAdmissionSeeds
+  , orphanedQueues
   , runMigrationsForRegistry
   , runMigrationsTrackedForTables
   , schemaLevelMigrations
@@ -67,6 +70,7 @@ main = do
       , testGroup "registry name validation" registryNameTests
       , migrationReconciliationTests connStr
       , migrationLockTests connStr
+      , dropQueueTests connStr
       ]
 
 -- | 'conflictingPolicyPrefixes' flags a prefix carrying two distinct parameter sets.
@@ -401,6 +405,219 @@ migrationLockTests connStr =
     migrate config =
       runMigrationsTrackedForTables connStr lockSchema [("lock_probe_jobs", allTableAdmission)] config noAdmissionSeeds
     bounded = defaultMigrationConfig {migrationLockTimeout = Just 0.25}
+
+dropSchema :: Text
+dropSchema = "arbiter_drop_queue_test"
+
+-- | The queue the drop tests remove, and one whose name extends it.
+droppedQueue, extendingQueue :: Text
+droppedQueue = "drop_q"
+extendingQueue = "drop_q2"
+
+dropQueueTests :: ByteString -> TestTree
+dropQueueTests connStr =
+  testGroup
+    "dropping queues"
+    [ testCase "removes the queue's tables, functions, rows and history, and nothing of another queue" $
+        withFreshSchema connStr dropSchema $ \conn -> do
+          migrate
+          exec
+            conn
+            ( "INSERT INTO "
+                <> inSchema "cron_schedules"
+                <> " (name, default_expression, default_overlap, queue_name) VALUES ('nightly', '0 0 * * *', 'SkipOverlap', '"
+                <> droppedQueue
+                <> "')"
+            )
+          exec conn (workerRow droppedQueue "NOW() - interval '1 hour'")
+          dropQ droppedQueue >>= shouldMigrate
+          queueFootprint conn droppedQueue >>= (@?= (0, 0, 0, 0))
+          queueFootprint conn extendingQueue >>= (@?= migratedFootprint extendingQueue)
+    , testCase "creates a dropped queue fresh on the next migrate" $
+        withFreshSchema connStr dropSchema $ \conn -> do
+          migrate
+          dropQ droppedQueue >>= shouldMigrate
+          migrate
+          queueFootprint conn droppedQueue >>= (@?= migratedFootprint droppedQueue)
+          exec conn ("INSERT INTO " <> inSchema droppedQueue <> " (payload) VALUES ('{}')")
+          rowCount conn (inSchema droppedQueue) >>= (@?= 1)
+    , testCase "refuses a queue holding jobs or DLQ rows" $
+        withFreshSchema connStr dropSchema $ \conn -> do
+          migrate
+          exec conn ("INSERT INTO " <> inSchema droppedQueue <> " (payload) VALUES ('{}')")
+          dropQ droppedQueue >>= shouldRefuse "still holds jobs"
+          exec conn ("DELETE FROM " <> inSchema droppedQueue)
+          exec conn ("INSERT INTO " <> inSchema (droppedQueue <> "_dlq") <> " (job_id, payload) VALUES (1, '{}')")
+          dropQ droppedQueue >>= shouldRefuse "still holds jobs"
+          queueFootprint conn droppedQueue >>= (@?= migratedFootprint droppedQueue)
+          exec conn ("DELETE FROM " <> inSchema (droppedQueue <> "_dlq"))
+          dropQ droppedQueue >>= shouldMigrate
+    , testCase "refuses a queue a live worker serves, and drops it once the worker is stale" $
+        withFreshSchema connStr dropSchema $ \conn -> do
+          migrate
+          exec conn (workerRow droppedQueue "NOW()")
+          dropQ droppedQueue >>= shouldRefuse "still has a live worker"
+          exec conn ("UPDATE " <> inSchema "arbiter_workers" <> " SET last_heartbeat = NOW() - interval '1 hour'")
+          dropQ droppedQueue >>= shouldMigrate
+    , testCase "refuses a queue another transaction has locked, without waiting" $
+        withFreshSchema connStr dropSchema $ \_ -> do
+          migrate
+          bracket (PG.connectPostgreSQL connStr) PG.close $ \other -> do
+            PG.begin other
+            exec other ("LOCK TABLE " <> inSchema (droppedQueue <> "_archive") <> " IN ACCESS SHARE MODE")
+            dropQ droppedQueue >>= shouldRefuse "is in use by another transaction"
+            PG.rollback other
+          dropQ droppedQueue >>= shouldMigrate
+    , testCase "force drops a queue holding jobs and DLQ rows that a live worker serves" $
+        withFreshSchema connStr dropSchema $ \conn -> do
+          migrate
+          exec conn ("INSERT INTO " <> inSchema droppedQueue <> " (payload) VALUES ('{}')")
+          exec conn ("INSERT INTO " <> inSchema (droppedQueue <> "_dlq") <> " (job_id, payload) VALUES (1, '{}')")
+          exec conn (workerRow droppedQueue "NOW()")
+          traverse_ (claimKeyed conn) [droppedQueue, droppedQueue, extendingQueue]
+          inFlight conn >>= (@?= 3)
+          forceDropQ defaultMigrationConfig droppedQueue >>= shouldMigrate
+          inFlight conn >>= (@?= 1)
+          queueFootprint conn droppedQueue >>= (@?= (0, 0, 0, 0))
+          queueFootprint conn extendingQueue >>= (@?= migratedFootprint extendingQueue)
+    , testCase "force drop waits on another transaction's lock up to the lock timeout" $
+        withFreshSchema connStr dropSchema $ \_ -> do
+          migrate
+          bracket (PG.connectPostgreSQL connStr) PG.close $ \other -> do
+            PG.begin other
+            exec other ("LOCK TABLE " <> inSchema (droppedQueue <> "_archive") <> " IN ACCESS SHARE MODE")
+            forceDropQ defaultMigrationConfig {migrationLockTimeout = Just 0.2} droppedQueue
+              >>= shouldRefuse "is in use by another transaction"
+            PG.rollback other
+          forceDropQ defaultMigrationConfig droppedQueue >>= shouldMigrate
+    , testCase "force drop refuses a table without an arbiter_queues row" $
+        withFreshSchema connStr dropSchema $ \conn -> do
+          migrate
+          exec conn ("CREATE TABLE " <> inSchema "users" <> " (id bigint)")
+          forceDropQ defaultMigrationConfig "users" >>= shouldRefuse "has no arbiter_queues row"
+          rowCount conn (inSchema "users") >>= (@?= 0)
+    , testCase "refuses a table without an arbiter_queues row" $
+        withFreshSchema connStr dropSchema $ \conn -> do
+          migrate
+          exec conn ("CREATE TABLE " <> inSchema "users" <> " (id bigint)")
+          dropQ "users" >>= shouldRefuse "has no arbiter_queues row"
+          rowCount conn (inSchema "users") >>= (@?= 0)
+    , testCase "lists the recorded queues the registry lacks" $
+        withFreshSchema connStr dropSchema $ \_ -> do
+          runMigrationsForRegistry (Proxy @ExpandedMigrationRegistry) connStr dropSchema defaultMigrationConfig
+            >>= shouldMigrate
+          orphanedQueues (Proxy @MigrationRegistry) connStr dropSchema >>= (@?= ["removed_reconciliation_q"])
+          orphanedQueues (Proxy @ExpandedMigrationRegistry) connStr dropSchema >>= (@?= [])
+    , testCase "drops retired queues on migrate, keeping the ones it refuses until a later run" $
+        withFreshSchema connStr dropSchema $ \conn -> do
+          runMigrationsForRegistry (Proxy @ExpandedMigrationRegistry) connStr dropSchema defaultMigrationConfig
+            >>= shouldMigrate
+          exec conn ("INSERT INTO " <> inSchema "removed_reconciliation_q" <> " (payload) VALUES ('{}')")
+          let retiring = defaultMigrationConfig {retiredQueues = ["removed_reconciliation_q"]}
+              migrateRetiring = runMigrationsForRegistry (Proxy @MigrationRegistry) connStr dropSchema retiring
+          migrateRetiring >>= shouldMigrate
+          orphanedQueues (Proxy @MigrationRegistry) connStr dropSchema >>= (@?= ["removed_reconciliation_q"])
+          exec conn ("DELETE FROM " <> inSchema "removed_reconciliation_q")
+          migrateRetiring >>= shouldMigrate
+          queueFootprint conn "removed_reconciliation_q" >>= (@?= (0, 0, 0, 0))
+          migrateRetiring >>= shouldMigrate
+    , testCase "rejects a queue both registered and retired" $
+        runMigrationsForRegistry
+          (Proxy @MigrationRegistry)
+          connStr
+          dropSchema
+          defaultMigrationConfig {retiredQueues = ["migration_reconciliation_q"]}
+          >>= shouldRefuse "both registered and retired"
+    ]
+  where
+    migrate =
+      runMigrationsTrackedForTables
+        connStr
+        dropSchema
+        [(droppedQueue, allTableAdmission), (extendingQueue, allTableAdmission)]
+        defaultMigrationConfig
+        noAdmissionSeeds
+        >>= shouldMigrate
+    dropQ = dropQueue connStr dropSchema defaultMigrationConfig
+    forceDropQ = forceDropQueue connStr dropSchema
+    exec conn = void . PG.execute_ conn . sql
+    claimKeyed conn table = do
+      exec
+        conn
+        ("INSERT INTO " <> inSchema table <> " (payload, concurrency_key, concurrency_prefix) VALUES ('{}', 'drop:k', 'drop')")
+      exec conn ("UPDATE " <> inSchema table <> " SET claimed_by = gen_random_uuid() WHERE claimed_by IS NULL")
+    inFlight conn =
+      fromOnlyOne
+        <$> PG.query_
+          conn
+          (sql ("SELECT in_flight::int8 FROM " <> inSchema "arbiter_concurrency" <> " WHERE concurrency_key = 'drop:k'"))
+    workerRow table heartbeat =
+      "INSERT INTO "
+        <> inSchema "arbiter_workers"
+        <> " (worker_id, queue_name, last_heartbeat) VALUES (gen_random_uuid(), '"
+        <> table
+        <> "', "
+        <> heartbeat
+        <> ")"
+
+-- | A relation in the drop test schema.
+inSchema :: Text -> Text
+inSchema relation = dropSchema <> "." <> relation
+
+rowCount :: PG.Connection -> Text -> IO Int64
+rowCount conn relation = fromOnlyOne <$> PG.query_ conn (sql ("SELECT count(*) FROM " <> relation))
+
+-- | A queue's tables, trigger functions, bookkeeping rows and migration history rows in
+-- the drop test schema.
+queueFootprint :: PG.Connection -> Text -> IO (Int64, Int64, Int64, Int64)
+queueFootprint conn table = do
+  tables <-
+    countWhere
+      "pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace"
+      "namespace.nspname = ? AND relation.relkind = 'r' AND relation.relname = ANY(?)"
+      (dropSchema, PGArray (map (table <>) ["", "_dlq", "_archive", "_results", "_groups"]))
+  functions <-
+    countWhere
+      "pg_proc function JOIN pg_namespace namespace ON namespace.oid = function.pronamespace"
+      "namespace.nspname = ? AND function.proname = ANY(?)"
+      (dropSchema, PGArray (queueFunctionNames table))
+  bookkeeping <-
+    sum
+      <$> traverse
+        (\relation -> countWhere (inSchema relation) "queue_name = ?" (PG.Only table))
+        ["arbiter_queues", "cron_schedules", "arbiter_workers"]
+  history <- countWhere (inSchema "schema_migrations") "starts_with(filename, ?)" (PG.Only (table <> "-"))
+  pure (tables, functions, bookkeeping, history)
+  where
+    countWhere :: (PG.ToRow params) => Text -> Text -> params -> IO Int64
+    countWhere from predicate params =
+      fromOnlyOne <$> PG.query conn (sql ("SELECT count(*) FROM " <> from <> " WHERE " <> predicate)) params
+
+-- | The footprint of a queue migrated with every admission trigger kind and no worker.
+migratedFootprint :: Text -> (Int64, Int64, Int64, Int64)
+migratedFootprint table =
+  ( 5
+  , fromIntegral (length (queueFunctionNames table)) - 1
+  , 1
+  , fromIntegral (length (jobQueueMigrationsForTable dropSchema table allTableAdmission))
+  )
+
+-- | Every trigger function name a queue can own. The rate-limit triggers have no
+-- delete function.
+queueFunctionNames :: Text -> [Text]
+queueFunctionNames table =
+  ("notify_" <> table <> "_created")
+    : [ base <> suffix
+      | base <-
+          ["maintain_" <> table <> "_groups", "maintain_" <> table <> "_concurrency", "ensure_" <> table <> "_rate_limit_buckets"]
+      , suffix <- ["_insert", "_delete", "_update"]
+      ]
+
+shouldRefuse :: String -> MigrationResult String -> IO ()
+shouldRefuse reason result =
+  assertBool ("expected a refusal: " <> reason) $ case result of
+    MigrationError message -> reason `isInfixOf` message
+    MigrationSuccess -> False
 
 -- | Take the same lock the migration takes, on a connection of the caller's own.
 withMigrationLockHeld :: PG.Connection -> IO a -> IO a

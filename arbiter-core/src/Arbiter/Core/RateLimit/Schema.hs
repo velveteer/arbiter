@@ -25,6 +25,7 @@ module Arbiter.Core.RateLimit.Schema
   , createThrottledIndexSQL
   , createRateLimitBucketTriggerFunctionsSQL
   , createRateLimitBucketTriggersSQL
+  , bucketTriggerBase
   ) where
 
 import Data.Text (Text)

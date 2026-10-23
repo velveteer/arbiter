@@ -70,6 +70,30 @@ Replicas can migrate concurrently. `migrationLockTimeout` bounds the wait for
 the migration lock, unbounded by default. A transaction-mode pooler cannot
 serialize migration sessions.
 
+### Removing a Queue
+
+Removing a queue from the registry leaves its tables and data in place. To drop
+it, name it in `retiredQueues`:
+
+```haskell
+config = Mig.defaultMigrationConfig {Mig.retiredQueues = ["old_email_queue"]}
+```
+
+Each migrate drops a retired queue's tables, trigger functions, schedules,
+worker rows and migration history in one transaction. A migrate skips the
+queue while a live worker serves it, while it or its DLQ holds jobs, or while
+another transaction holds a lock on one of its tables, and still succeeds. The
+next migrate tries the drop again. Stop producing to a queue before retiring
+it. A producer still inserting into it fails once the drop goes through. Once
+the queue is gone the entry does nothing. Remove it whenever convenient.
+
+`orphanedQueues` lists the queues the schema records that a registry lacks.
+`dropQueue` drops one queue directly and returns why it refused.
+`forceDropQueue` also drops a queue that holds jobs or that workers serve, and
+releases its concurrency slots. It waits for other transactions' locks up to
+`migrationLockTimeout`. Stop the queue's workers and producers first, or their
+next statement on it fails.
+
 ## Inserting Jobs
 
 ```haskell

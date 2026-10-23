@@ -98,15 +98,20 @@ queueDLQRetentionsSQL schemaName =
         ORDER BY queue_name
       |]
 
--- | The @arbiter_queues@ names whose job and DLQ tables exist in the schema.
-existingQueuesSQL :: SchemaName -> Query Text
-existingQueuesSQL schemaName =
+-- | The @arbiter_queues@ names and the given names whose job and DLQ tables exist in
+-- the schema.
+existingQueuesSQL :: SchemaName -> [Text] -> Query Text
+existingQueuesSQL schemaName queues =
   let tbl = arbiterQueuesTable schemaName
       schemaLit = textLiteral schemaName
       dlqLit = textLiteral dlqSuffix
    in [sql|
         SELECT @{queue_name :: CText}
-        FROM ${tbl}
+        FROM (
+          SELECT queue_name FROM ${tbl}
+          UNION
+          SELECT unnest(#{queues :: [CText]}::text[])
+        ) known(queue_name)
         WHERE to_regclass(format('%I.%I', ${schemaLit}::text, queue_name)) IS NOT NULL
           AND to_regclass(format('%I.%I', ${schemaLit}::text, queue_name || ${dlqLit})) IS NOT NULL
         ORDER BY queue_name

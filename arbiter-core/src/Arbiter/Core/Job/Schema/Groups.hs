@@ -26,6 +26,7 @@ module Arbiter.Core.Job.Schema.Groups
     -- * Groups trigger SQL
   , createGroupsTriggerFunctionsSQL
   , createGroupsTriggersSQL
+  , groupsTriggerBase
   ) where
 
 import Data.Text (Text)

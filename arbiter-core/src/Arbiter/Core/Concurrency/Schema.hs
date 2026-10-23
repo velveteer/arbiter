@@ -25,6 +25,7 @@ module Arbiter.Core.Concurrency.Schema
   , createConcurrencyTriggerFunctionsSQL
   , createConcurrencyTriggersSQL
   , upsertConcurrencyPolicyRowSQL
+  , concurrencyTriggerBase
   ) where
 
 import Data.Text (Text)

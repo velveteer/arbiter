@@ -4933,13 +4933,14 @@ operationsSpec mkMessage mkResult runM = do
       runM env (HL.setQueueDLQRetention (HL.queueTable @payload @m) (Just 0)) `shouldThrow` anyException
 
   describe "schemaQueues" $ do
-    it "adds registered queues whose tables exist to the given ones" $ \env -> do
+    it "keeps the given and registered queues whose tables exist" $ \env -> do
       let table = HL.queueTable @payload @m
       void $ runM env (HL.ensureQueue table)
       void $ runM env (HL.ensureQueue "no_such_queue")
       runM env (getSchema >>= \schemaName -> Ops.schemaQueues schemaName []) `shouldReturn` [table]
       runM env (getSchema >>= \schemaName -> Ops.schemaQueues schemaName ["registry_only"])
-        `shouldReturn` sort ["registry_only", table]
+        `shouldReturn` [table]
+      runM env (getSchema >>= \schemaName -> Ops.schemaQueues schemaName [table]) `shouldReturn` [table]
 
   describe "retryFromDLQBatch" $ do
     it "retries each DLQ row and skips unknown ids" $ \env -> do
