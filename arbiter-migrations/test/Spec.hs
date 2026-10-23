@@ -433,6 +433,34 @@ dropQueueTests connStr =
           dropQ droppedQueue >>= shouldMigrate
           queueFootprint conn droppedQueue >>= (@?= (0, 0, 0, 0))
           queueFootprint conn extendingQueue >>= (@?= migratedFootprint extendingQueue)
+    , testCase "removes history from earlier versions, and none of a queue extending the name with a hyphen" $
+        withFreshSchema connStr dropSchema $ \conn -> do
+          let hyphenated = droppedQueue <> "-x"
+              historyOf prefix =
+                fromOnlyOne
+                  <$> PG.query
+                    conn
+                    (sql ("SELECT count(*) FROM " <> inSchema "schema_migrations" <> " WHERE starts_with(filename, ?)"))
+                    (PG.Only (prefix <> "-"))
+          runMigrationsTrackedForTables
+            connStr
+            dropSchema
+            [(droppedQueue, allTableAdmission), (hyphenated, allTableAdmission)]
+            defaultMigrationConfig
+            noAdmissionSeeds
+            >>= shouldMigrate
+          exec
+            conn
+            ( "INSERT INTO "
+                <> inSchema "schema_migrations"
+                <> " (filename, checksum) VALUES ('"
+                <> droppedQueue
+                <> "-create-groups-trigger-functions-v11', '')"
+            )
+          dropQ droppedQueue >>= shouldMigrate
+          historyOf hyphenated
+            >>= (@?= fromIntegral (length (jobQueueMigrationsForTable dropSchema hyphenated allTableAdmission)))
+          (-) <$> historyOf droppedQueue <*> historyOf hyphenated >>= (@?= (0 :: Int64))
     , testCase "creates a dropped queue fresh on the next migrate" $
         withFreshSchema connStr dropSchema $ \conn -> do
           migrate

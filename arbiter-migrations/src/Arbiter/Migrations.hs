@@ -493,8 +493,9 @@ dropQueue connStr schemaName config = runDrop connStr schemaName config RefuseIn
 -- | 'dropQueue' without the in-use refusals. Drops the queue with its jobs, DLQ rows
 -- and archive, releasing the concurrency slots its claimed jobs hold. Drops it even
 -- while workers serve it. Stop them and its producers first, or their next statement
--- on the queue fails. Waits for other transactions' locks on its tables, bounded by
--- 'migrationLockTimeout'. Still returns 'MigrationError' for a name without an
+-- on the queue fails. Waits for the migration lock and then for other transactions'
+-- locks on its tables, each wait bounded by 'migrationLockTimeout'. Still returns
+-- 'MigrationError' for a name without an
 -- @arbiter_queues@ row.
 forceDropQueue
   :: ByteString
@@ -599,11 +600,17 @@ dropQueueOn conn schemaName mode table = guarded `catch` lockRefusal
       traverse_
         (\tbl -> PG.execute conn (textQuery ("DELETE FROM " <> tbl <> " WHERE queue_name = ?")) (Only table))
         [arbiterQueuesTable schemaName, cronSchedulesTable schemaName, arbiterWorkersTable schemaName]
+      history <- map fromOnly <$> query_ conn (textQuery ("SELECT filename FROM " <> migrationTable schemaName))
+      let extending = [queue | filename <- history, Just queue <- [T.stripSuffix "-create-table" filename], owns table queue]
+          ownHistory filename = owns table filename && not (any (`owns` filename) extending)
       void $
         PG.execute
           conn
           (textQuery ("DELETE FROM " <> migrationTable schemaName <> " WHERE filename = ANY(?)"))
-          (Only (PGArray [T.pack name | MigrationScript name _ <- jobQueueMigrationsForTable schemaName table allTableAdmission]))
+          (Only (PGArray (scriptNames <> filter ownHistory history)))
+
+    scriptNames = [T.pack name | MigrationScript name _ <- jobQueueMigrationsForTable schemaName table allTableAdmission]
+    owns queue filename = (queue <> "-") `T.isPrefixOf` filename
 
     functions =
       notifyFunctionName table

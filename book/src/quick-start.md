@@ -90,9 +90,10 @@ the queue is gone the entry does nothing. Remove it whenever convenient.
 `orphanedQueues` lists the queues the schema records that a registry lacks.
 `dropQueue` drops one queue directly and returns why it refused.
 `forceDropQueue` also drops a queue that holds jobs or that workers serve, and
-releases its concurrency slots. It waits for other transactions' locks up to
-`migrationLockTimeout`. Stop the queue's workers and producers first, or their
-next statement on it fails.
+releases its concurrency slots. It waits up to `migrationLockTimeout` for the
+migration lock and again for other transactions' locks on the queue's tables.
+Stop the queue's workers and producers first, or their next statement on it
+fails.
 
 ## Inserting Jobs
 
