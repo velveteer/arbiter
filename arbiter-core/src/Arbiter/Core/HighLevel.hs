@@ -1311,11 +1311,11 @@ getParentStateSnapshot jobId =
     Ops.getParentStateSnapshot schemaName tableName jobId
 
 -- | Refresh every registered queue's groups table to the end. Returns the rows rewritten
--- and the queue names that failed.
+-- and the queues that failed, with their errors.
 refreshAllGroupsFully
   :: forall m
    . (MonadArbiter m, RegistryTables (RegistryOf m))
-  => m (Int64, [Text])
+  => m (Int64, [(Text, Text)])
 refreshAllGroupsFully = onRegistry Ops.refreshAllGroupsFully
 
 -- | Register or refresh a worker and return its effective pause state (worker or

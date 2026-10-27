@@ -243,6 +243,7 @@ module Arbiter.Core.Operations
   , Shared (..)
   ) where
 
+import Control.Applicative ((<|>))
 import Control.Monad (foldM, join, unless, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson
@@ -257,7 +258,7 @@ import Data.Aeson
   )
 import Data.Bifunctor (bimap, first)
 import Data.Coerce (coerce)
-import Data.Either (fromRight, isLeft, partitionEithers)
+import Data.Either (fromRight, partitionEithers)
 import Data.Foldable (for_, toList, traverse_)
 import Data.Int (Int64)
 import Data.IntMap qualified as IntMap
@@ -300,6 +301,7 @@ import Arbiter.Core.Enum (enumFromText, showText)
 import Arbiter.Core.Exceptions
   ( JobException (..)
   , JobRetryableException (..)
+  , displayEx
   , orThrowParsing
   , throwJobGoneIds
   , throwParsing
@@ -1620,12 +1622,12 @@ deleteDLQJobsBatch schemaName tableName dlqIds = withDbTransaction $ do
 -- | Delete one batch of DLQ jobs per given queue that failed longer ago than the
 -- queue's DLQ retention ('setQueueDLQRetention'), resuming any parents left
 -- childless. A queue without a retention is skipped. Returns the rows deleted and
--- the queues that failed.
+-- the queues that failed, with their errors.
 purgeDLQ
   :: (MonadArbiter m)
   => SchemaName
   -> [TableName]
-  -> m (Int64, [Text])
+  -> m (Int64, [(Text, Text)])
 purgeDLQ schemaName queues = do
   retentions <- Map.fromList <$> MA.executeQuery (Tmpl.queueDLQRetentionsSQL schemaName)
   let purgeOne schema queue = case Map.lookup queue retentions of
@@ -1774,10 +1776,11 @@ toArchiveRow (aId, aCompletedAt, snapshot, aResult) =
     }
 
 -- | Purge one batch of expired archived jobs per given queue. Each row uses its
--- @archive_expires_at@ value. Returns the rows purged and the queues that failed.
+-- @archive_expires_at@ value. Returns the rows purged and the queues that failed,
+-- with their errors.
 purgeArchives
   :: (MonadArbiter m)
-  => SchemaName -> [TableName] -> m (Int64, [Text])
+  => SchemaName -> [TableName] -> m (Int64, [(Text, Text)])
 purgeArchives =
   sweepQueues $ \schemaName queue ->
     withDbTransaction (MA.executeStatement (Tmpl.purgeArchiveSQL schemaName queue archivePurgeBatch))
@@ -2627,13 +2630,13 @@ instance FromJSON GroupsCursor where
   parseJSON = withObject "GroupsCursor" $ \obj ->
     GroupsCursor <$> obj .:? "window" <*> obj .:? "emptied"
 
--- | What one queue's groups pass did: the rows it rewrote, whether its missing-summary
+-- | What one queue's groups pass did: the rows it rewrote, what its missing-summary
 -- repair threw, and where the next pass resumes.
 data GroupsPass = GroupsPass
   { passRewritten :: Int64
   -- ^ Summary rows the pass rewrote.
-  , passRepairFailed :: Bool
-  -- ^ Whether the missing-summary repair threw.
+  , passRepairError :: Maybe Text
+  -- ^ What the missing-summary repair threw.
   , passResume :: Maybe GroupsCursor
   -- ^ Where the next pass resumes. 'Nothing' once both walks have wrapped.
   }
@@ -2678,7 +2681,7 @@ refreshGroupsForQueue schemaName tableName batch resume = do
   pure
     GroupsPass
       { passRewritten = rewritten + fromIntegral (length (filter snd repaired))
-      , passRepairFailed = isLeft repair
+      , passRepairError = either (Just . displayEx) (const Nothing) repair
       , passResume = resumeCursor nextWindow nextEmptied
       }
   where
@@ -2698,19 +2701,19 @@ groupsRefreshBatch = 20000
 -- pool runs it per interval and every worker pool resumes from the same cursors. Each
 -- queue's rewrite and repair run in their own savepoints. One queue's failure leaves
 -- the rest. Its row locks stand until the caller's transaction ends. Returns the rows
--- rewritten, the queue names that failed or whose repair failed, and where each queue
--- resumes.
+-- rewritten, the queues that failed or whose repair failed with their errors, and where
+-- each queue resumes.
 refreshAllGroups
   :: (MonadArbiter m)
   => SchemaName
   -> [TableName]
   -> Map TableName GroupsCursor
   -- ^ Where the previous pass left off, per queue.
-  -> m ((Int64, [Text]), Map TableName GroupsCursor)
+  -> m ((Int64, [(Text, Text)]), Map TableName GroupsCursor)
 refreshAllGroups schemaName queues cursors = do
   (refreshed, failed) <- sweepEachQueue one schemaName queues
   let rewritten = sum [passRewritten pass | (_, pass) <- refreshed]
-      unrepaired = [tbl | (tbl, pass) <- refreshed, passRepairFailed pass]
+      unrepaired = [(tbl, err) | (tbl, pass) <- refreshed, Just err <- [passRepairError pass]]
       resumed = foldl' (\acc (tbl, pass) -> Map.alter (const (passResume pass)) tbl acc) cursors refreshed
   pure ((rewritten, failed <> unrepaired), resumed)
   where
@@ -2723,33 +2726,33 @@ refreshAllGroupsFully
   :: (MonadArbiter m)
   => SchemaName
   -> [TableName]
-  -> m (Int64, [Text])
+  -> m (Int64, [(Text, Text)])
 refreshAllGroupsFully schemaName queues = do
   (walked, failed) <- sweepEachQueue walk schemaName queues
-  let unrepaired = [tbl | (tbl, (_, True)) <- walked]
+  let unrepaired = [(tbl, err) | (tbl, (_, Just err)) <- walked]
   pure (sum [count | (_, (count, _)) <- walked], failed <> unrepaired)
   where
-    walk schema tbl = go 0 False Nothing
+    walk schema tbl = go 0 Nothing Nothing
       where
-        go acc failedRepair cursor = do
+        go acc repairError cursor = do
           pass <- refreshGroupsForQueue schema tbl groupsRefreshBatch cursor
           let total = acc + passRewritten pass
-              failedYet = failedRepair || passRepairFailed pass
-          maybe (pure (total, failedYet)) (go total failedYet . Just) (passResume pass)
+              errorYet = repairError <|> passRepairError pass
+          maybe (pure (total, errorYet)) (go total errorYet . Just) (passResume pass)
 
 -- | Run a per-queue sweep over every queue, returning what each one swept and the
--- names of queues whose sweep threw.
+-- queues whose sweep threw, with what they threw.
 sweepEachQueue
   :: (MonadUnliftIO m)
   => (SchemaName -> TableName -> m a)
   -> SchemaName
   -> [TableName]
-  -> m ([(TableName, a)], [Text])
+  -> m ([(TableName, a)], [(Text, Text)])
 sweepEachQueue sweepOne schemaName queues = do
   (failures, swept) <- partitionEithers <$> traverse run queues
   pure (swept, failures)
   where
-    run queue = bimap (const queue) (queue,) <$> tryAny (sweepOne schemaName queue)
+    run queue = bimap ((queue,) . displayEx) (queue,) <$> tryAny (sweepOne schemaName queue)
 
 -- | 'sweepEachQueue' for a sweep reporting the rows it touched, totalled.
 sweepQueues
@@ -2757,17 +2760,17 @@ sweepQueues
   => (SchemaName -> TableName -> m Int64)
   -> SchemaName
   -> [TableName]
-  -> m (Int64, [Text])
+  -> m (Int64, [(Text, Text)])
 sweepQueues sweepOne schemaName queues =
   first (sum . map snd) <$> sweepEachQueue sweepOne schemaName queues
 
 -- | Sweep exhausted jobs across the given queues. Returns the total moved and the
--- names of queues whose sweep failed.
+-- queues whose sweep failed, with their errors.
 sweepExhaustedJobs
   :: (MonadArbiter m)
   => SchemaName
   -> [TableName]
-  -> m (Int64, [Text])
+  -> m (Int64, [(Text, Text)])
 sweepExhaustedJobs = sweepQueues sweepExhaustedForQueue
 
 -- | Move each exhausted job to the DLQ via the tree-aware 'moveToDLQFields'. One
@@ -2797,12 +2800,12 @@ exhaustedSweepBatch = 1000
 
 -- | Sweep force-cancel-flagged jobs whose lease has lapsed across the given queues.
 -- A job under a live lease is left for its holder's cancel handler. Returns the
--- total deleted and the names of queues whose sweep failed.
+-- total deleted and the queues whose sweep failed, with their errors.
 sweepCancelledJobs
   :: (MonadArbiter m)
   => SchemaName
   -> [TableName]
-  -> m (Int64, [Text])
+  -> m (Int64, [(Text, Text)])
 sweepCancelledJobs = sweepQueues sweepCancelledForQueue
 
 -- | Delete one queue's lease-lapsed flagged jobs, resuming any parents left

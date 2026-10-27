@@ -4942,6 +4942,13 @@ operationsSpec mkMessage mkResult runM = do
         `shouldReturn` [table]
       runM env (getSchema >>= \schemaName -> Ops.schemaQueues schemaName [table]) `shouldReturn` [table]
 
+  describe "purgeArchives" $
+    it "reports a failed queue with its error" $ \env -> do
+      (purged, failed) <- runM env (getSchema >>= \schemaName -> Ops.purgeArchives schemaName ["no_such_queue"])
+      purged `shouldBe` 0
+      map fst failed `shouldBe` ["no_such_queue"]
+      all (T.isInfixOf "no_such_queue_archive" . snd) failed `shouldBe` True
+
   describe "retryFromDLQBatch" $ do
     it "retries each DLQ row and skips unknown ids" $ \env -> do
       for_ ["dlq-batch-a", "dlq-batch-b", "dlq-batch-c"] $ \name ->

@@ -119,7 +119,8 @@ maintainQueues logCfg report pace stmtTimeout schema queues = do
       logSwept level verb noun count =
         tryLog logCfg level $ "Reaper " <> verb <> " " <> showText count <> " " <> noun
       reportFailed operation =
-        traverse_ (\queue -> tryLog logCfg Warning $ maintenanceOpName operation <> " failed for queue: " <> queue)
+        traverse_
+          (\(queue, err) -> tryLog logCfg Warning $ maintenanceOpName operation <> " failed for queue " <> queue <> ": " <> err)
       reportSwept operation done =
         traverse_ (\(count, failed) -> reaped operation count >> reportFailed operation failed >> when (count > 0) (done count))
       sweep operation every done = gated operation (reportSwept operation done) every
