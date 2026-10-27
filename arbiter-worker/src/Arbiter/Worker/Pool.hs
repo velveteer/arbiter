@@ -125,6 +125,10 @@ runWorkerPool config = do
             *> atomically (writePause config True)
       )
       (traverse_ (atomically . writePause config))
+  tryWarn
+    (logConfig config)
+    "Retiring cron schedules failed"
+    (Ops.retireCronSchedules schemaName queueName (retiredCronJobs config))
 
   dispatcherNotifVar <- newTVarIO Nothing
   cronRunVar <- newTVarIO False

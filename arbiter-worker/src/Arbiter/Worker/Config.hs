@@ -73,6 +73,7 @@ import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.BackoffStrategy (BackoffStrategy, Jitter (..), exponentialBackoff)
 import Arbiter.Worker.Cron.Types (CronJob)
+import Arbiter.Worker.Cron.Types qualified as Cron
 import Arbiter.Worker.Logger (LogConfig, defaultLogConfig, withIdentity)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
@@ -176,6 +177,10 @@ data WorkerConfig m payload = WorkerConfig
   , cronJobs :: [CronJob payload]
   -- ^ Cron schedules. A non-empty list gives the pool a scheduler thread, which reads
   -- the @cron_schedules@ table each tick for runtime overrides. Default: @[]@.
+  , retiredCronJobs :: [Text]
+  -- ^ Names of cron schedules removed from 'cronJobs'. Each pool start deletes their
+  -- rows that belong to this pool's queue. A name also in 'cronJobs' fails validation.
+  -- Default: @[]@.
   , reaperInterval :: NominalDiffTime
   -- ^ Sleep in seconds between reaper passes, and the gap between runs of each ordinary
   -- reaper operation. Default: @300@ (5 minutes).
@@ -323,6 +328,7 @@ fieldInvariants config =
     <*> traverse (nonNegative "gracefulShutdownTimeout") (gracefulShutdownTimeout config)
     <*> waived (logConfig config)
     <*> waived (cronJobs config)
+    <*> waived (retiredCronJobs config)
     <*> positive "reaperInterval" (reaperInterval config)
     <*> positive "reaperSparseInterval" (reaperSparseInterval config)
     <*> positive "reaperBucketIdle" (reaperBucketIdle config)
@@ -341,6 +347,11 @@ crossFieldInvariants config =
     *> require
       (workerHeartbeatInterval config < workerStaleThreshold config)
       "workerHeartbeatInterval must be less than workerStaleThreshold"
+    *> require
+      (null stillDeclared)
+      ("retiredCronJobs names a schedule in cronJobs: " <> T.intercalate ", " stillDeclared)
+  where
+    stillDeclared = filter (`elem` map Cron.name (cronJobs config)) (retiredCronJobs config)
 
 newtype Validation a = Validation (Either (NonEmpty Text) a)
   deriving newtype (Functor)
@@ -510,6 +521,7 @@ mkDefaultConfig workerCnt mode = do
       , gracefulShutdownTimeout = Just defaultGracefulShutdownTimeout
       , logConfig = withIdentity ("worker_id" .= uuid) defaultLogConfig
       , cronJobs = []
+      , retiredCronJobs = []
       , reaperInterval = defaultReaperInterval
       , reaperSparseInterval = defaultMaintenanceSparseInterval
       , reaperBucketIdle = defaultMaintenanceBucketIdle

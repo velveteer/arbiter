@@ -554,6 +554,22 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
         length rows2 `shouldBe` 2
         map CS.defaultExpression rows2 `shouldBe` ["*/10 * * * *", "*/5 * * * *"]
 
+      it "retires a schedule, which stops firing until init recreates it" $ \env -> do
+        let Right cron = cronJob "retire-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "retired"))
+        runM env $ initCronSchedules silentLogConfig table [cron]
+        elsewhere <- runM env $ Ops.retireCronSchedules schema "other_queue" ["retire-test"]
+        retired <- runM env $ Ops.retireCronSchedules schema table ["retire-test"]
+        again <- runM env $ Ops.retireCronSchedules schema table ["retire-test"]
+        (elsewhere, retired, again) `shouldBe` (0, 1, 0)
+
+        runM env $ catchUpAt schema table [cron] (mkTime 2025 6 15 12 0 0)
+        jobs <- runM env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead payload]
+        length jobs `shouldBe` 0
+
+        runM env $ initCronSchedules silentLogConfig table [cron]
+        rows <- runM env $ Ops.listCronSchedules schema Nothing
+        map CS.name rows `shouldBe` ["retire-test"]
+
       it "skips disabled schedules" $ \env -> do
         let Right cron = cronJob "disabled-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "should-skip"))
         runM env $ do

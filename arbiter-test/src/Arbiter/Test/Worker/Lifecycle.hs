@@ -1694,6 +1694,18 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         Just CS.CronScheduleRow {CS.enabled = isEnabled} <- readBack
         isEnabled `shouldBe` True
 
+      it "deletes its queue's retired schedules on pool start, and no other queue's" $ \env -> do
+        let seed (name, queue) = Ops.upsertCronDefault schema name queue "0 3 * * *" "AllowOverlap" Nothing True
+            handler :: JobRead payload -> m ()
+            handler _job = pure ()
+            names = map CS.name <$> runM env (Ops.listCronSchedules schema Nothing)
+        runM env $ traverse_ seed [("cron-retired", table), ("cron-kept", table), ("cron-elsewhere", "other_queue")]
+        config :: WorkerConfig m payload <- transactionalWorkerConfig 10 (mkHandler (noResult handler))
+        let cfg = config {workerCount = 1, retiredCronJobs = ["cron-retired", "cron-elsewhere"]}
+        withLinkedAsync (runM env $ runWorkerPool cfg) $ \_ ->
+          waitUntil 10_000 (notElem "cron-retired" <$> names)
+        names `shouldReturn` ["cron-elsewhere", "cron-kept"]
+
     describe "Cron queue filter" $ do
       it "filters cron schedules by queue" $ \env -> do
         let otherQueue = "other_queue"

@@ -203,6 +203,7 @@ module Arbiter.Core.Operations
   , listCronSchedules
   , getCronScheduleByName
   , updateCronSchedule
+  , retireCronSchedules
   , touchCronChecked
   , tryFireCronGate
   , tryAcquireCronLeader
@@ -2873,6 +2874,20 @@ updateCronSchedule
   -> m Int64
 updateCronSchedule schemaName scheduleName upd =
   maybe (pure 0) MA.executeStatement (Tmpl.updateCronScheduleSQL schemaName scheduleName upd)
+
+-- | Delete the named cron schedules that belong to a queue. A schedule of that name
+-- on another queue stays. Returns rows affected.
+retireCronSchedules
+  :: (MonadArbiter m)
+  => SchemaName
+  -> Text
+  -- ^ Queue name
+  -> [Text]
+  -- ^ Schedule names
+  -> m Int64
+retireCronSchedules _ _ [] = pure 0
+retireCronSchedules schemaName queueName names =
+  MA.executeStatement (Tmpl.retireCronSchedulesSQL schemaName queueName names)
 
 -- | Advance @last_checked_at@ to the supplied watermark for the given cron
 -- schedule names. The watermark is the minute boundary the scheduler finished

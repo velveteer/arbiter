@@ -20,6 +20,7 @@ import Arbiter.Worker.Config
   , transactionalWorkerConfig
   , validateWorkerConfig
   )
+import Arbiter.Worker.Cron (OverlapPolicy (SkipOverlap), cronJob)
 import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
@@ -77,6 +78,13 @@ spec connStr = do
           handler _conn _job = pure ()
       config <- transactionalWorkerConfig 1 handler :: IO (WorkerConfig (SimpleDb SizingTestRegistry IO) WorkerTestPayload)
       validateWorkerConfig config {jobHeartbeatInterval = visibilityTimeout config} `shouldSatisfy` isLeft
+
+    it "rejects a retired cron schedule still in cronJobs" $ do
+      let handler :: JobHandler (SimpleDb SizingTestRegistry IO) WorkerTestPayload ()
+          handler _conn _job = pure ()
+          Right nightly = cronJob "nightly" "0 3 * * *" SkipOverlap (\_ _ -> defaultJob (SimpleTask "nightly"))
+      config <- transactionalWorkerConfig 1 handler :: IO (WorkerConfig (SimpleDb SizingTestRegistry IO) WorkerTestPayload)
+      validateWorkerConfig config {cronJobs = [nightly], retiredCronJobs = ["nightly"]} `shouldSatisfy` isLeft
 
   beforeAll (setupOnce connStr testSchema testSchema True) $
     describe "pool sizing" $

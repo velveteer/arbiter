@@ -60,4 +60,18 @@ newest tick is retried on the next pass.
 overlap policy, time zone, and enabled state. An override of `null` restores
 the value from code.
 
+**Removing a schedule.** Dropping a schedule from `cronJobs` stops it firing
+but leaves its row, and its overrides, in the schedule list. To delete the row,
+name it in `retiredCronJobs`:
+
+```haskell
+config {Worker.cronJobs = [healthCheck], Worker.retiredCronJobs = ["nightly-report"]}
+```
+
+Each pool start deletes the retired schedules that belong to its queue. Jobs a
+schedule already enqueued still run. A name in both lists fails validation.
+Once the row is gone the entry does nothing. Remove it whenever convenient. A
+running pool that still declares a retired schedule logs a warning and stops
+firing it until it restarts.
+
 Schedule type: [`Arbiter.Worker.Cron` Haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Cron.html).

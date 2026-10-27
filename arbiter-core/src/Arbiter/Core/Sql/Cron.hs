@@ -10,6 +10,7 @@ module Arbiter.Core.Sql.Cron
   , listCronSchedulesSQL
   , getCronScheduleByNameSQL
   , updateCronScheduleSQL
+  , retireCronSchedulesSQL
   , touchCronCheckedSQL
   , tryFireCronGateSQL
   , tryAcquireCronLeaderSQL
@@ -129,6 +130,15 @@ updateCronScheduleSQL
               updated_at = NOW()
           WHERE name = #{name :: CText}
         |]
+
+-- | Delete the named cron schedules that belong to a queue.
+retireCronSchedulesSQL :: SchemaName -> Text -> [Text] -> Query ()
+retireCronSchedulesSQL schemaName queueName names =
+  let tbl = cronSchedulesTable schemaName
+   in [sql|
+        DELETE FROM ${tbl}
+        WHERE queue_name = #{queueName :: CText} AND name = ANY(#{names :: [CText]})
+      |]
 
 -- | Set @last_checked_at@ to the caller-supplied watermark for the given
 -- schedule names. The watermark is the minute boundary the scheduler finished

@@ -136,6 +136,9 @@ processCronCatchUp cronLog schemaName queueName jobs now = traverse_ processOneC
     processOneCron cron = do
       void $ tryCron cronLog (cronLabel cron <> " tick") $ do
         mRow <- Ops.getCronScheduleByName schemaName (name cron)
+        when (isNothing mRow)
+          $ logCron cronLog Warning
+          $ cronLabel cron <> " has no schedule row and does not fire until the pool restarts"
         completed <- processOne mRow cron
         when completed $ void $ Ops.touchCronChecked schemaName [name cron] currentTick
     processOne mRow cron = case resolveAndParse cron mRow of
