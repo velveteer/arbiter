@@ -15,7 +15,7 @@ groups:
           severity: warning
         annotations:
           summary: "{{ $labels.queue }}: the oldest ready job has waited over 5m."
-          description: Ready work is not being claimed. Check for a paused queue, an exhausted admission policy, or workers that are up but not claiming.
+          description: Ready work is not being claimed. Check for a paused queue (arbiter_queue_paused_ratio), an exhausted admission policy, or workers that are up but not claiming.
         noDataState: OK
         execErrState: Error
         data:
@@ -111,7 +111,7 @@ groups:
           severity: warning
         annotations:
           summary: Exported gauges are older than three export intervals.
-          description: The gauge scan is timing out or its shared gate is held. Every other gauge-based alert here is reading stale values while this fires. Raise the threshold to 3x OTEL_METRIC_EXPORT_INTERVAL if that is not the 60s default.
+          description: The gauge scan is timing out or its shared gate is held. Every other gauge-based alert here is reading stale values while this fires. Raise the threshold to 3x the metric export interval if that is not the 60s default.
         noDataState: Alerting
         execErrState: Error
         data:
@@ -142,8 +142,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: Over 10% of job attempts are ending in a retry.
-          description: Handler failures are outpacing successes. The denominator is every attempt that ended, retried or terminal. Check the DLQ and the traces for the failing queue.
+          summary: Over 10% of job attempts are ending in a retry or the DLQ.
+          description: Handler failures make up over a tenth of the attempts that ended. The numerator is retries plus a worker's DLQ moves, the denominator every attempt that ended, retried or terminal. Check the DLQ and the traces for the failing queue.
         noDataState: OK
         execErrState: Error
         data:
@@ -155,7 +155,7 @@ groups:
             model:
               refId: query
               instant: true
-              expr: sum(rate(arbiter_jobs_retried_total[5m])) / clamp_min(sum(rate(arbiter_jobs_retried_total[5m])) + sum(rate(arbiter_jobs_processed_total[5m])), 0.001)
+              expr: ((sum(rate(arbiter_jobs_retried_total[5m])) or vector(0)) + (sum(rate(arbiter_jobs_processed_total{outcome="dlq"}[5m])) or vector(0))) / clamp_min((sum(rate(arbiter_jobs_retried_total[5m])) or vector(0)) + (sum(rate(arbiter_jobs_processed_total[5m])) or vector(0)), 0.001)
           - refId: threshold
             datasourceUid: __expr__
             model:
@@ -174,7 +174,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: An arbiter table is over 1.5B transactions from wraparound.
+          summary: "{{ $labels.table }}: transaction-id age over 1.5B."
           description: Autovacuum is not keeping up. Postgres refuses writes at 2B.
         noDataState: OK
         execErrState: Error
@@ -187,7 +187,7 @@ groups:
             model:
               refId: query
               instant: true
-              expr: max(arbiter_pg_table_xid_age)
+              expr: max by (table) (arbiter_pg_table_xid_age)
           - refId: threshold
             datasourceUid: __expr__
             model:
@@ -206,8 +206,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "{{ $labels.table }}: no vacuum in over 24h."
-          description: A high-churn queue table that autovacuum has not reached accumulates dead tuples and slows the claim query.
+          summary: "{{ $labels.table }}: past the autovacuum threshold and no vacuum in over 24h."
+          description: A high-churn queue table that autovacuum has not reached accumulates dead tuples and slows the claim query. Only tables past postgres's own autovacuum trigger at its default settings count. An idle table never earns a vacuum and stays quiet.
         noDataState: OK
         execErrState: Error
         data:
@@ -219,7 +219,7 @@ groups:
             model:
               refId: query
               instant: true
-              expr: max by (table) (arbiter_pg_table_vacuum_age_seconds)
+              expr: max by (table) (arbiter_pg_table_vacuum_age_seconds) and on (table) max by (table) (arbiter_pg_table_dead_tuples > (50 + 0.2 * arbiter_pg_table_live_tuples))
           - refId: threshold
             datasourceUid: __expr__
             model:
@@ -239,7 +239,7 @@ groups:
           severity: warning
         annotations:
           summary: "{{ $labels.table }}: past the autovacuum threshold and no vacuum has ever run."
-          description: The age gauge is absent for this table, so neither autovacuum nor a manual vacuum has reached it. Check that autovacuum is enabled and not starved. The comparison mirrors postgres's own trigger at its default settings, so a table that has legitimately never earned a vacuum stays quiet. Raise it to match if you have tuned autovacuum_vacuum_threshold or autovacuum_vacuum_scale_factor.
+          description: The age gauge is absent for this table. Neither autovacuum nor a manual vacuum has reached it. Check that autovacuum is enabled and not starved. The comparison mirrors postgres's own trigger at its default settings, and a table that has legitimately never earned a vacuum stays quiet. Raise it to match if you have tuned autovacuum_vacuum_threshold or autovacuum_vacuum_scale_factor.
         noDataState: OK
         execErrState: Error
         data:
@@ -271,7 +271,7 @@ groups:
           severity: warning
         annotations:
           summary: "{{ $labels.table }}: over 20% of the table is dead tuples."
-          description: Vacuum is not keeping up with the churn on this table, and the dead rows slow the claim query. A table autovacuum has never reached exports no age, so age alone does not surface it.
+          description: Vacuum is not keeping up with the churn on this table, and the dead rows slow the claim query. A table autovacuum has never reached exports no age, and the age rules miss it.
         noDataState: OK
         execErrState: Error
         data:

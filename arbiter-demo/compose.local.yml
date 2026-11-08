@@ -27,6 +27,11 @@ services:
     ports:
       - "4318:4318"
 
+  postgres-exporter:
+    extends:
+      file: compose.yml
+      service: postgres-exporter
+
   caddy:
     image: caddy:2
     depends_on:

@@ -3,6 +3,7 @@
 -- | Cross-process coordination for database gauge scans.
 module Arbiter.Otel.Gauges.Coordination
   ( RefreshSource (..)
+  , ScanAbandoned
   , prepareRefreshSource
   ) where
 
@@ -10,7 +11,7 @@ import Arbiter.Core.Job.Schema (SchemaName, TableName)
 import Arbiter.Core.MonadArbiter (MonadArbiter)
 import Arbiter.Core.Operations (Shared (..), gateNameFor, micros, runGatedShared)
 import Arbiter.Worker.Logger (LogConfig, LogLevel (Warning), tryLog)
-import Control.Exception (SomeException)
+import Control.Exception (Exception (..), SomeException)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import Data.Time (NominalDiffTime)
@@ -20,12 +21,20 @@ import UnliftIO.Exception (tryAny)
 import Arbiter.Otel.Gauges.Cache (Snapshot)
 import Arbiter.Otel.Gauges.Scan (scanSnapshot)
 
--- | Prepared refresh operation and timing values. An abandoned refresh yields
--- @Right Nothing@.
+-- | Prepared refresh operation and timing values. An abandoned scan yields
+-- 'ScanAbandoned'. @Right Nothing@ means the round took no reading and the cache keeps
+-- its last one.
 data RefreshSource = RefreshSource
   { runRefresh :: IO (Either SomeException (Maybe (Shared Snapshot)))
   , minimumDelay :: NominalDiffTime
   }
+
+-- | A scan that outlived the freshness window while a fresh reading stood in for it.
+data ScanAbandoned = ScanAbandoned
+  deriving stock (Show)
+
+instance Exception ScanAbandoned where
+  displayException _ = "Gauge scan outlived the freshness window, abandoned"
 
 -- | Gate interval as a fraction of the refresh interval. Below one for
 -- consecutive gate acquisitions by the same replica.
@@ -74,9 +83,9 @@ prepareRefreshSource logCfg runDb schema queueKinds refreshInterval freshnessWin
     bounded :: IO (Maybe (Shared Snapshot)) -> IO (Either SomeException (Maybe (Shared Snapshot)))
     bounded act = do
       stale <- cacheIsStale
-      tryAny (if stale then Just <$> act else timeout (micros freshnessWindow) act)
-        >>= traverse (maybe (Nothing <$ tryLog logCfg Warning abandoned) pure)
-    abandoned = "Gauge scan outlived the freshness window, abandoned"
+      if stale
+        then tryAny act
+        else (>>= maybe (Left (toException ScanAbandoned)) Right) <$> tryAny (timeout (micros freshnessWindow) act)
 
     -- An unreadable payload falls back to a local scan when the cache is stale.
     localScan why = do

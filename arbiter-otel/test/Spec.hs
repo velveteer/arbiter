@@ -48,7 +48,7 @@ import Arbiter.Worker
   , transactionalWorkerConfig
   )
 import Control.Exception (bracket)
-import Control.Monad (foldM_, join, void)
+import Control.Monad (join, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
@@ -65,29 +65,26 @@ import Data.Text.Encoding (encodeUtf8)
 import Data.Text.IO qualified as TIO
 import Data.Time (getCurrentTime)
 import GHC.Generics (Generic)
-import OpenTelemetry.Attributes (Attributes, emptyAttributes, lookupAttributeByKey)
+import OpenTelemetry.Attributes (Attributes, lookupAttributeByKey)
 import OpenTelemetry.Attributes.Key (AttributeKey)
 import OpenTelemetry.Context (empty, insertSpan)
 import OpenTelemetry.Context.ThreadLocal (attachContext, detachContext)
 import OpenTelemetry.Exporter.Metric
   ( MetricExport (..)
-  , NumberValue (..)
   , ResourceMetricsExport (..)
   , ScopeMetricsExport (..)
   , exponentialHistogramDataPointAttributes
   , gaugeDataPointAttributes
   , histogramDataPointAttributes
   , sumDataPointAttributes
-  , sumDataPointValue
   )
 import OpenTelemetry.MeterProvider (collectResourceMetrics)
-import OpenTelemetry.Metric (SdkMeterEnv, createMeterProvider, defaultSdkMeterProviderOptions)
-import OpenTelemetry.Metric.Core
-  ( counterAdd
-  , defaultAdvisoryParameters
-  , getMeter
-  , meterCreateCounterDouble
+import OpenTelemetry.Metric
+  ( SdkMeterEnv
+  , createMeterProvider
+  , defaultSdkMeterProviderOptions
   )
+import OpenTelemetry.Metric.Core (MeterProvider)
 import OpenTelemetry.Processor.Span (SpanProcessor (..))
 import OpenTelemetry.Propagator.W3CTraceContext (decodeSpanContext)
 import OpenTelemetry.Resource (materializeResources, mkResource)
@@ -229,19 +226,9 @@ collected env = concatMap resourcePoints <$> collectResourceMetrics env
         withName meehName exponentialHistogramDataPointAttributes meehPoints
     withName name pointAttrs = foldMap (\point -> [(name, pointAttrs point)])
 
--- | The monotonic sums a collection produced, as metric name and point value.
-collectedSums :: SdkMeterEnv -> IO [(Text, Double)]
-collectedSums env = concatMap resourceSums <$> collectResourceMetrics env
-  where
-    resourceSums = foldMap scopeSums . resourceMetricsScopes
-    scopeSums = foldMap metricSums . scopeMetricsExports
-    metricSums = \case
-      MetricExportSum {mesName, mesMonotonic = True, mesSumPoints} ->
-        foldMap (\point -> [(mesName, asDouble (sumDataPointValue point))]) mesSumPoints
-      _ -> []
-    asDouble = \case
-      DoubleNumber double -> double
-      IntNumber int -> fromIntegral int
+everySecond :: MeterProvider -> Otel.ExternalProviders
+everySecond meterProvider =
+  Otel.defaultExternalProviders {Otel.externalMeterProvider = Just meterProvider, Otel.externalGaugeRefresh = 1}
 
 -- | Whether a metric was recorded carrying every one of @kvs@ on one point.
 recordedWith :: Text -> [(Text, Text)] -> [(Text, Attributes)] -> Bool
@@ -290,7 +277,7 @@ spec = do
   describe "telemetry" $
     it "records job metrics and queue-depth gauges" $ do
       (meterProvider, env) <- createMeterProvider (materializeResources (mkResource [])) defaultSdkMeterProviderOptions
-      Otel.withExternalTelemetry (Just meterProvider) Nothing $ \tel -> do
+      Otel.withExternalTelemetry (everySecond meterProvider) $ \tel -> do
         job <- enqueue plainEnv (Greeting "measured")
         now <- getCurrentTime
         let noopHandler :: JobHandler (SimpleDb Reg IO) Greeting ()
@@ -319,15 +306,16 @@ spec = do
             , ("arbiter.maintenance.rows", [("op", "sweep-exhausted-jobs")])
             , ("arbiter.queue.depth", [("queue", queue)])
             , ("arbiter.queue.depth_by_kind", [("queue", queue), ("kind", "Greeting")])
-            , ("arbiter.pg.database.backends", [])
-            , ("arbiter.pg.table.blocks", [("table", queue), ("source", "hit")])
+            , ("arbiter.queue.dlq_depth", [("queue", queue)])
+            , ("arbiter.queue.paused", [("queue", queue)])
+            , ("arbiter.pg.table.dead_tuples", [("table", queue)])
             , ("arbiter.pg.table.xid_age", [("table", queue)])
             ]
 
   describe "instrument export" $
     it "exports no token stats for a policy without buckets" $ do
       (meterProvider, env) <- createMeterProvider (materializeResources (mkResource [])) defaultSdkMeterProviderOptions
-      Otel.withExternalTelemetry (Just meterProvider) Nothing $ \tel -> do
+      Otel.withExternalTelemetry (everySecond meterProvider) $ \tel -> do
         loop <- Otel.startGauges tel defaultLogConfig (runSimpleDb plainEnv) schema [(queue, kindsFor @Greeting)] 1
         withAsync loop $ \_ -> do
           waitUntil 30_000 $ recordedWith "arbiter.admission.limit" [("policy", meteredPrefix)] <$> collected env
@@ -337,7 +325,7 @@ spec = do
   -- The one series that tells a stopped refresh loop from a fresh reading.
   describe "reading staleness" $ do
     let emptySnapshot =
-          Cache.Snapshot {Cache.queues = [], Cache.db = Nothing, Cache.tables = [], Cache.concurrency = [], Cache.rateLimits = []}
+          Cache.Snapshot {Cache.queues = [], Cache.tables = [], Cache.concurrency = [], Cache.rateLimits = []}
         scanned scanAt = Cache.Live Cache.Cached {Cache.takenAt = scanAt, Cache.reading = emptySnapshot}
 
     it "keeps the scan time a retired reading was taken at" $
@@ -351,45 +339,6 @@ spec = do
 
     it "has no scan time before the first reading" $
       Cache.lastScan (Cache.Idle Nothing) `shouldBe` Nothing
-
-  describe "counter baselines" $ do
-    let rise = Cache.riseSince ("arbiter.jobs.processed", [("outcome", "success")])
-        counted scanAt total = fst (rise scanAt total mempty)
-
-    it "counts nothing from the first scan" $
-      snd (rise 10 7 mempty) `shouldBe` 0
-
-    it "counts the rise between consecutive scans" $
-      snd (rise 20 11 (counted 10 7)) `shouldBe` 4
-
-    it "counts the whole total when the counter reset" $
-      snd (rise 20 3 (counted 10 7)) `shouldBe` 3
-
-    it "counts nothing from a scan already counted" $
-      snd (rise 10 9 (counted 10 7)) `shouldBe` 0
-
-  describe "counter export" $ do
-    let name = "arbiter.test.total"
-        key = (name, [])
-        scans totals = do
-          (meterProvider, env) <- createMeterProvider (materializeResources (mkResource [])) defaultSdkMeterProviderOptions
-          meter <- getMeter meterProvider "arbiter-otel-test"
-          counter <- meterCreateCounterDouble meter name Nothing Nothing defaultAdvisoryParameters
-          let count seen (scanAt, total) = do
-                let (seen', rise) = Cache.riseSince key scanAt total seen
-                counterAdd counter rise emptyAttributes
-                pure seen'
-          foldM_ count mempty totals
-          lookup name <$> collectedSums env
-
-    it "sums the rises across three scans" $
-      scans [(10, 100), (20, 130), (30, 190)] `shouldReturn` Just 90
-
-    it "counts nothing from a single scan" $
-      scans [(10, 100)] `shouldReturn` Just 0
-
-    it "counts the whole total across a reset" $
-      scans [(10, 100), (20, 130), (30, 5)] `shouldReturn` Just 35
 
   -- Nothing else reads the dashboard.
   describe "provisioned dashboard" $ withProvisioned dashboardPath $ \referenced -> do

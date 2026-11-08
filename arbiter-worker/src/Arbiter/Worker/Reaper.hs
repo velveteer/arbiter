@@ -137,7 +137,7 @@ maintainQueues logCfg report pace stmtTimeout schema queues = do
     , sweep
         SweepExhaustedJobs
         window
-        (logSwept Warning "moved" "exhausted job(s) to the DLQ")
+        (logSwept Warning "moved" "job(s) to the DLQ, exhausted ones and the rollup descendants they took")
         $ Ops.sweepExhaustedJobs schema queues
     , sweep
         SweepCancelledJobs

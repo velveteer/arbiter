@@ -232,7 +232,7 @@ benchTelemetry = do
   (meterProvider, _env) <- createMeterProvider (materializeResources (mkResource [])) defaultSdkMeterProviderOptions
   setGlobalMeterProvider meterProvider
   -- The handle holds nothing bracketed and outlives the call.
-  tel <- Otel.withExternalTelemetry (Just meterProvider) Nothing pure
+  tel <- Otel.withExternalTelemetry Otel.defaultExternalProviders {Otel.externalMeterProvider = Just meterProvider} pure
   pure (tracerProvider, tel)
   where
     discardSpans =

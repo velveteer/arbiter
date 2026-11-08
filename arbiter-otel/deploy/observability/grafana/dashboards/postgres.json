@@ -1,0 +1,435 @@
+{
+  "uid": "arbiter-postgres",
+  "title": "Arbiter Postgres",
+  "tags": [
+    "arbiter"
+  ],
+  "description": "Postgres statistics from postgres_exporter, for the database and schema arbiter runs in.",
+  "schemaVersion": 39,
+  "editable": true,
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "refresh": "10s",
+  "links": [
+    {
+      "title": "Dashboards",
+      "type": "dashboards",
+      "tags": [
+        "arbiter"
+      ],
+      "asDropdown": false
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "label": "Metrics",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "database",
+        "label": "Database",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": {
+          "query": "label_values(pg_stat_user_tables_n_live_tup, datname)",
+          "refId": "database"
+        },
+        "refresh": 2,
+        "current": {
+          "text": "postgres",
+          "value": "postgres"
+        },
+        "hide": 0
+      },
+      {
+        "name": "schema",
+        "label": "Schema",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": {
+          "query": "label_values(pg_stat_user_tables_n_live_tup{datname=\"$database\"}, schemaname)",
+          "refId": "schema"
+        },
+        "refresh": 2,
+        "current": {
+          "text": "arbiter_demo",
+          "value": "arbiter_demo"
+        },
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Dead tuples by table (vacuum pressure)",
+      "description": "Dead tuples per table in the selected schema. The dashed series is the dead-tuple count at which autovacuum takes each table at the server settings, against the live-tuple estimate. Per-table storage options can move it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (relname) (pg_stat_user_tables_n_dead_tup{schemaname=\"$schema\"})",
+          "legendFormat": "{{relname}}"
+        },
+        {
+          "refId": "B",
+          "expr": "scalar(max(pg_settings_autovacuum_vacuum_threshold)) + scalar(max(pg_settings_autovacuum_vacuum_scale_factor)) * max by (relname) (pg_stat_user_tables_n_live_tup{schemaname=\"$schema\"})",
+          "legendFormat": "{{relname}} threshold"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Database connections by state",
+      "description": "Backends by state in the selected database, from pg_stat_activity.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (state) (pg_stat_activity_count{datname=\"$database\"})",
+          "legendFormat": "{{state}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Time since last vacuum by table",
+      "description": "Seconds since the last vacuum or autovacuum. A table that has never been vacuumed is absent.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max by (relname) ({__name__=~\"pg_stat_user_tables_last_(auto)?vacuum\", schemaname=\"$schema\"} > 0)",
+          "legendFormat": "{{relname}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Table scans /s by access path",
+      "description": "Sequential and index scans per table.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (relname) (rate(pg_stat_user_tables_seq_scan_total{schemaname=\"$schema\"}[5m]))",
+          "legendFormat": "{{relname}} seq"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (relname) (rate(pg_stat_user_tables_idx_scan_total{schemaname=\"$schema\"}[5m]))",
+          "legendFormat": "{{relname}} index"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Total relation size by table",
+      "description": "Heap, indexes and TOAST together.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (relname) (pg_stat_user_tables_size_bytes{schemaname=\"$schema\"})",
+          "legendFormat": "{{relname}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Live tuples by table",
+      "description": "A cumulative-statistics estimate, not an exact count.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (relname) (pg_stat_user_tables_n_live_tup{schemaname=\"$schema\"})",
+          "legendFormat": "{{relname}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Cache hit ratio (5m)",
+      "description": "Blocks found in shared buffers, across the selected schema's heaps, indexes and TOAST.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum(rate(pg_statio_user_tables_heap_blocks_hit_total{schemaname=\"$schema\"}[5m])) + sum(rate(pg_statio_user_tables_idx_blocks_hit_total{schemaname=\"$schema\"}[5m])) + sum(rate(pg_statio_user_tables_toast_blocks_hit_total{schemaname=\"$schema\"}[5m])) + sum(rate(pg_statio_user_tables_tidx_blocks_hit_total{schemaname=\"$schema\"}[5m]))) / (sum(rate(pg_statio_user_tables_heap_blocks_hit_total{schemaname=\"$schema\"}[5m])) + sum(rate(pg_statio_user_tables_heap_blocks_read_total{schemaname=\"$schema\"}[5m])) + sum(rate(pg_statio_user_tables_idx_blocks_hit_total{schemaname=\"$schema\"}[5m])) + sum(rate(pg_statio_user_tables_idx_blocks_read_total{schemaname=\"$schema\"}[5m])) + sum(rate(pg_statio_user_tables_toast_blocks_hit_total{schemaname=\"$schema\"}[5m])) + sum(rate(pg_statio_user_tables_toast_blocks_read_total{schemaname=\"$schema\"}[5m])) + sum(rate(pg_statio_user_tables_tidx_blocks_hit_total{schemaname=\"$schema\"}[5m])) + sum(rate(pg_statio_user_tables_tidx_blocks_read_total{schemaname=\"$schema\"}[5m])) > 0)"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Oldest open transaction",
+      "description": "The longest-open transaction in the selected database. A transaction left open holds back vacuum for every table.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(pg_stat_activity_max_tx_duration{datname=\"$database\"})"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "Oldest running query",
+      "description": "The longest-running active query in the selected database.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 12,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(pg_activity_oldest_query_age_seconds{datname=\"$database\"})"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Backends connected",
+      "description": "Backends connected to the selected database.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(pg_stat_database_numbackends{datname=\"$database\"})"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Table transaction-id age (wraparound headroom)",
+      "description": "The oldest unfrozen transaction id across the selected schema's tables. Postgres stops accepting writes near 2.1 billion. Orange marks the point to look into autovacuum, red the point to act.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1000000000
+              },
+              {
+                "color": "red",
+                "value": 1500000000
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(pg_table_frozen_xid_age{schemaname=\"$schema\"})"
+        }
+      ]
+    }
+  ]
+}

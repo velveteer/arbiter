@@ -6,7 +6,7 @@
 module Arbiter.Core.Health
   ( PgDbHealth (..)
   , PgTableHealth (..)
-  , getPgHealth
+  , getPgTableHealth
   , getPgDbHealth
   ) where
 
@@ -47,7 +47,7 @@ data PgDbHealth = PgDbHealth
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Per-table tuple counts, size, scan counters, block traffic, and freeze age.
+-- | Per-table tuple counts, size, and freeze age.
 data PgTableHealth = PgTableHealth
   { table :: Text
   , liveTup :: Int64
@@ -58,14 +58,6 @@ data PgTableHealth = PgTableHealth
   -- ^ Seconds since the last vacuum, manual or auto. 'Nothing' when the table has never been vacuumed.
   , totalBytes :: Int64
   -- ^ Size with indexes and TOAST, in bytes.
-  , seqScan :: Double
-  -- ^ Sequential scans started.
-  , idxScan :: Double
-  -- ^ Index scans started.
-  , blksHit :: Double
-  -- ^ Blocks read from the buffer cache, for the table, its indexes, and its TOAST.
-  , blksRead :: Double
-  -- ^ Blocks read from disk, for the table, its indexes, and its TOAST.
   , xidAge :: Maybe Int64
   -- ^ Age of the table's frozen transaction id, in transactions. 'Nothing' when the table has no frozen transaction id.
   }
@@ -94,24 +86,14 @@ pgTableHealthCodec =
     <*> col "n_dead_tup" CInt8
     <*> ncol "vacuum_age" CFloat8
     <*> col "total_bytes" CInt8
-    <*> col "seq_scan" CFloat8
-    <*> col "idx_scan" CFloat8
-    <*> col "blks_hit" CFloat8
-    <*> col "blks_read" CFloat8
     <*> ncol "xid_age" CInt8
 
--- | Database-wide health and per-table churn for the given queues' tables and the schema's
--- shared arbiter tables. Backends owned by another role report their state as unknown,
--- absent @pg_read_all_stats@.
-getPgHealth :: (MonadArbiter m) => [TableName] -> m (Maybe PgDbHealth, [PgTableHealth])
-getPgHealth queueTables = do
+-- | Health of the given queues' tables and the schema's shared arbiter tables.
+getPgTableHealth :: (MonadArbiter m) => [TableName] -> m [PgTableHealth]
+getPgTableHealth queueTables = do
   schemaName <- getSchema
-  dbHealth <- getPgDbHealth
-  tableRows <- executeQuery (rows pgTableHealthCodec (Sql.pgTableHealthSQL schemaName scanned))
-  pure (dbHealth, tableRows)
-  where
-    scanned = allSchemaTables queueTables
+  executeQuery (rows pgTableHealthCodec (Sql.pgTableHealthSQL schemaName (allSchemaTables queueTables)))
 
--- | The database-wide half on its own.
+-- | Connection and age counters for the current database.
 getPgDbHealth :: (MonadArbiter m) => m (Maybe PgDbHealth)
 getPgDbHealth = queryMaybe (rows pgDbHealthCodec Sql.pgDbHealthSQL)

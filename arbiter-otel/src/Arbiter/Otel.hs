@@ -22,6 +22,8 @@ module Arbiter.Otel
   , withTelemetryIf
   , withTelemetryFromEnv
   , withExternalTelemetry
+  , ExternalProviders (..)
+  , defaultExternalProviders
   , telemetryLogConfig
 
     -- * Instrumenting a pool
@@ -64,7 +66,9 @@ import Arbiter.Otel.Gauges (startGauges, withGaugeLoop)
 import Arbiter.Otel.MetricNames (MetricName (..), arbiterMetricNames, metricName)
 import Arbiter.Otel.Metrics (ArbiterMeters, otelHooks, otelMaintenance)
 import Arbiter.Otel.Telemetry
-  ( Telemetry (..)
+  ( ExternalProviders (..)
+  , Telemetry (..)
+  , defaultExternalProviders
   , telemetryLogConfig
   , withExternalTelemetry
   , withTelemetry
