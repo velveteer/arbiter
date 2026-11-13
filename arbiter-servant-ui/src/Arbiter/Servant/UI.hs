@@ -60,7 +60,6 @@ import Data.Text qualified as T
 import Network.HTTP.Media (Encoding, matchAccept)
 import Network.HTTP.Types
   ( HeaderName
-  , hAcceptEncoding
   , hCacheControl
   , hContentEncoding
   , hContentType
@@ -69,6 +68,7 @@ import Network.HTTP.Types
   , status301
   , status404
   )
+import Network.HTTP.Types.Header (hAcceptEncoding)
 import Network.Wai (Request, pathInfo, rawPathInfo, rawQueryString, requestHeaders, responseLBS)
 import Numeric (showHex)
 import Servant
