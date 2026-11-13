@@ -1,6 +1,19 @@
 {
   "uid": "arbiter",
   "title": "Arbiter",
+  "tags": [
+    "arbiter"
+  ],
+  "links": [
+    {
+      "title": "Dashboards",
+      "type": "dashboards",
+      "tags": [
+        "arbiter"
+      ],
+      "asDropdown": false
+    }
+  ],
   "schemaVersion": 39,
   "editable": true,
   "time": {
@@ -41,7 +54,7 @@
       "id": 1,
       "type": "timeseries",
       "title": "Queue depth by status",
-      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. The statuses partition a queue's rows, so its backlog is their sum.",
+      "description": "Shared reading: one replica scans and every replica exports it. Aggregate it with max, never sum. The statuses partition a queue's rows. Its backlog is their sum.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -70,7 +83,7 @@
       "id": 2,
       "type": "timeseries",
       "title": "Oldest job age (waiting vs running)",
-      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. Waiting is the oldest job still to be claimed, blocked ones included, running is the longest-held lease. Both read 0 when the queue holds nothing in that state, so a flat zero means idle rather than instant.",
+      "description": "Shared reading: one replica scans and every replica exports it. Aggregate it with max, never sum. Waiting is the oldest job still to be claimed, blocked ones included, running is the longest-held lease. Both read 0 when the queue holds nothing in that state. A flat zero means idle rather than instant.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -103,7 +116,7 @@
       "id": 29,
       "type": "timeseries",
       "title": "Queue depth by payload variant",
-      "description": "Shared reading, so this aggregates with max, never sum. The series are the labels the payload declares, so unlabelled rows and labels outside that set are left out: these sum to the queue depth only when every row carries a declared label.",
+      "description": "Shared reading. Aggregate it with max, never sum. Only the labels the payload declares get a series. Unlabelled rows and labels outside that set are left out: these sum to the queue depth only when every row carries a declared label.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -132,7 +145,7 @@
       "id": 3,
       "type": "timeseries",
       "title": "Jobs processed /s by outcome (retries are not terminal)",
-      "description": "Counted per worker process, so this one sums across replicas. Retries are not terminal, so a retried job appears again later under whatever outcome it finally reaches.",
+      "description": "Counted per worker process. Sum it across replicas. One count per claim that ends in neither a retry nor a release. A retried or released job appears again under the outcome its next claim reaches. A spawning job counts a success when it suspends and another when its finalizer runs. Unavailable is a lost lease, and another claim may settle the job. Reaper DLQ moves are not counted here.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -165,7 +178,7 @@
       "id": 4,
       "type": "timeseries",
       "title": "Handler duration p95",
-      "description": "The handler's own runtime, per queue. A quantile over 5m bucket rates, so a queue with no traffic in the window drops out rather than reading 0.",
+      "description": "The handler's own runtime, per queue, for runs that ended in an ack, a spawn, a retry or a DLQ move. A quantile over 5m bucket rates. A queue with no traffic in the window drops out rather than reading 0. The top finite bucket is one hour.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -190,383 +203,10 @@
       ]
     },
     {
-      "id": 5,
-      "type": "timeseries",
-      "title": "Dead tuples by table (vacuum pressure)",
-      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. A planner estimate, not an exact count.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 24
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max by (table) (arbiter_pg_table_dead_tuples)",
-          "legendFormat": "{{table}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0
-        }
-      }
-    },
-    {
-      "id": 6,
-      "type": "timeseries",
-      "title": "Database connections by state (all clients)",
-      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. Other counts backends reporting no state, which is mostly Postgres's own background processes. The total across states is on Backends connected. Needs pg_read_all_stats to see connections outside arbiter's own role.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 24
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0,
-          "custom": {
-            "stacking": {
-              "mode": "none"
-            }
-          }
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max by (state) (arbiter_pg_database_connections)",
-          "legendFormat": "{{state}}"
-        }
-      ]
-    },
-    {
-      "id": 13,
-      "type": "timeseries",
-      "title": "Admission: concurrency slots per key",
-      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. The cap is per key, so read the fullest key against it.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 0,
-        "y": 32
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0,
-          "custom": {
-            "axisLabel": "slots per key"
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "B",
-          "expr": "max by (policy) (arbiter_admission_limit{policy_kind=\"concurrency\"})",
-          "legendFormat": "{{policy}} cap per key"
-        },
-        {
-          "refId": "C",
-          "expr": "max by (policy) (arbiter_admission_busiest_key)",
-          "legendFormat": "{{policy}} fullest key"
-        }
-      ]
-    },
-    {
-      "id": 28,
-      "type": "timeseries",
-      "title": "Admission: concurrency jobs in flight",
-      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. Counts every key at once, so it is not comparable to the per-key cap.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 6,
-        "y": 32
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0,
-          "custom": {
-            "axisLabel": "jobs"
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max by (policy) (arbiter_admission_in_flight)",
-          "legendFormat": "{{policy}} in flight"
-        }
-      ]
-    },
-    {
-      "id": 14,
-      "type": "timeseries",
-      "title": "Admission: rate-limit tokens left",
-      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. Buckets refill continuously, so the emptiest one is what admission is waiting on.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 32
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max by (policy) (arbiter_admission_tokens{stat=\"min\"})",
-          "legendFormat": "{{policy}} emptiest bucket"
-        },
-        {
-          "refId": "B",
-          "expr": "max by (policy) (arbiter_admission_tokens{stat=\"avg\"})",
-          "legendFormat": "{{policy}} mean bucket"
-        },
-        {
-          "refId": "C",
-          "expr": "max by (policy) (arbiter_admission_limit{policy_kind=\"rate_limit\"})",
-          "legendFormat": "{{policy}} bucket size"
-        }
-      ]
-    },
-    {
-      "id": 15,
-      "type": "timeseries",
-      "title": "Admission: jobs through each policy /s",
-      "description": "Counted per worker process, so this one sums across replicas. Jobs a policy admitted, not jobs it held back.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 40
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (policy_kind, policy) (rate(arbiter_admission_admitted_total[5m]))",
-          "legendFormat": "{{policy_kind}} {{policy}}"
-        }
-      ]
-    },
-    {
-      "id": 16,
-      "type": "timeseries",
-      "title": "Reaper rows /s by op",
-      "description": "Counted per worker process, so this one sums across replicas. Rows each op actually touched, so a flat zero means nothing needed repairing.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 40
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (op) (rate(arbiter_maintenance_rows_total[5m]))",
-          "legendFormat": "{{op}}"
-        }
-      ]
-    },
-    {
-      "id": 7,
-      "type": "stat",
-      "title": "Cache hit ratio, arbiter tables (5m)",
-      "description": "Windowed, not lifetime: the raw counters are cumulative, so a lifetime average would barely move during a miss storm.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 0,
-        "y": 48
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "min": 0,
-          "max": 1
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(max by (table) (rate(arbiter_pg_table_blocks_total{source=\"hit\"}[5m]))) / sum(max by (table, source) (rate(arbiter_pg_table_blocks_total[5m])))"
-        }
-      ]
-    },
-    {
-      "id": 8,
-      "type": "stat",
-      "title": "Oldest open transaction (all clients)",
-      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. A transaction left open holds back vacuum for every table, so this climbing is what makes dead tuples accumulate.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 6,
-        "y": 48
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(arbiter_pg_database_oldest_transaction_age_seconds)"
-        }
-      ]
-    },
-    {
-      "id": 9,
-      "type": "stat",
-      "title": "Table transaction-id age (wraparound headroom)",
-      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. How far transaction ids have advanced since the oldest unfrozen row. Postgres stops accepting writes near 2.1 billion, so orange marks the point to look into autovacuum and red the point to act.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 12,
-        "y": 48
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(arbiter_pg_table_xid_age)"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 1000000000
-              },
-              {
-                "color": "red",
-                "value": 1500000000
-              }
-            ]
-          }
-        }
-      }
-    },
-    {
-      "id": 11,
-      "type": "stat",
-      "title": "Gauge reading age",
-      "description": "How stale the depth and Postgres readings above are. Climbing past the refresh interval means the scan stopped, not that the queues went quiet.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 18,
-        "y": 48
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 45
-              },
-              {
-                "color": "red",
-                "value": 120
-              }
-            ]
-          }
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(arbiter_gauges_age_seconds)"
-        }
-      ]
-    },
-    {
       "id": 17,
       "type": "timeseries",
       "title": "Jobs claimed /s by queue",
-      "description": "Counted per worker process, so this one sums across replicas.",
+      "description": "Counted per worker process. Sum it across replicas.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -575,7 +215,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 54
+        "y": 24
       },
       "fieldConfig": {
         "defaults": {
@@ -594,7 +234,7 @@
       "id": 18,
       "type": "state-timeline",
       "title": "Registered pools by state",
-      "description": "One series per queue and state, counting registered worker pools rather than worker threads: a process serving a queue is one pool however many threads it runs. Active means a fresh heartbeat, not shutting down and not paused, so an idle pool with no jobs to work on still counts. Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum.",
+      "description": "One series per queue and state, counting registered worker pools rather than worker threads: a process serving a queue is one pool however many threads it runs. Active means a fresh heartbeat, not shutting down and not paused. An idle pool with no jobs to work on still counts. Shared reading: one replica scans and every replica exports it. Aggregate it with max, never sum.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -603,7 +243,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 54
+        "y": 24
       },
       "fieldConfig": {
         "defaults": {
@@ -640,10 +280,10 @@
       ]
     },
     {
-      "id": 19,
+      "id": 31,
       "type": "timeseries",
-      "title": "Admission: live keys by policy",
-      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. Keyed by policy prefix, never by admission key.",
+      "title": "Dead-letter depth by queue",
+      "description": "Shared reading: one replica scans and every replica exports it. Aggregate it with max, never sum. Jobs waiting in each queue's dead-letter table.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -652,7 +292,244 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 62
+        "y": 32
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (queue) (arbiter_queue_dlq_depth)",
+          "legendFormat": "{{queue}}"
+        }
+      ]
+    },
+    {
+      "id": 32,
+      "type": "state-timeline",
+      "title": "Paused queues",
+      "description": "Shared reading: one replica scans and every replica exports it. Aggregate it with max, never sum. The queue's own pause flag. A paused queue claims nothing, whatever its workers' state.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "running",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "paused",
+                  "color": "orange",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (queue) (arbiter_queue_paused_ratio)",
+          "legendFormat": "{{queue}}"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Admission: concurrency slots per key",
+      "description": "Shared reading: one replica scans and every replica exports it. Aggregate it with max, never sum. The cap is per key. Read the fullest key against it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "axisLabel": "slots per key"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "B",
+          "expr": "max by (policy) (arbiter_admission_limit{policy_kind=\"concurrency\"})",
+          "legendFormat": "{{policy}} cap per key"
+        },
+        {
+          "refId": "C",
+          "expr": "max by (policy) (arbiter_admission_busiest_key)",
+          "legendFormat": "{{policy}} fullest key"
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "Admission: concurrency jobs in flight",
+      "description": "Shared reading: one replica scans and every replica exports it. Aggregate it with max, never sum. Counts every key at once and is not comparable to the per-key cap.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "axisLabel": "jobs"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (policy) (arbiter_admission_in_flight)",
+          "legendFormat": "{{policy}} in flight"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Admission: rate-limit tokens left",
+      "description": "Shared reading: one replica scans and every replica exports it. Aggregate it with max, never sum. Buckets refill continuously. The emptiest one is what admission is waiting on.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (policy) (arbiter_admission_tokens{stat=\"min\"})",
+          "legendFormat": "{{policy}} emptiest bucket"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (policy) (arbiter_admission_tokens{stat=\"avg\"})",
+          "legendFormat": "{{policy}} mean bucket"
+        },
+        {
+          "refId": "C",
+          "expr": "max by (policy) (arbiter_admission_limit{policy_kind=\"rate_limit\"})",
+          "legendFormat": "{{policy}} bucket size"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Admission: jobs through each policy /s",
+      "description": "Counted per worker process. Sum it across replicas. Jobs a policy admitted, not jobs it held back.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (policy_kind, policy) (rate(arbiter_admission_admitted_total[5m]))",
+          "legendFormat": "{{policy_kind}} {{policy}}"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Reaper rows /s by op",
+      "description": "Counted per worker process. Sum it across replicas. Rows each op actually touched, and a flat zero means nothing needed repairing. refresh-all-groups also counts a group whose lease or backoff lapsed before a claim, routine in a queue with many retries. sweep-exhausted-jobs counts the descendants a rollup takes to the DLQ.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (op) (rate(arbiter_maintenance_rows_total[5m]))",
+          "legendFormat": "{{op}}"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Admission: live keys by policy",
+      "description": "Shared reading: one replica scans and every replica exports it. Aggregate it with max, never sum. Keyed by policy prefix, never by admission key.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 56
       },
       "fieldConfig": {
         "defaults": {
@@ -669,171 +546,46 @@
       ]
     },
     {
-      "id": 20,
-      "type": "timeseries",
-      "title": "Table scans /s by access path",
-      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. Sequential scans climbing on a queue table usually means a missing or unused index.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 62
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max by (table, path) (rate(arbiter_pg_table_scans_total[5m]))",
-          "legendFormat": "{{table}} / {{path}}"
-        }
-      ]
-    },
-    {
-      "id": 22,
-      "type": "timeseries",
-      "title": "Total relation size by table",
-      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. Includes indexes and TOAST.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 70
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bytes"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max by (table) (arbiter_pg_table_size_bytes)",
-          "legendFormat": "{{table}}"
-        }
-      ]
-    },
-    {
-      "id": 23,
-      "type": "timeseries",
-      "title": "Live tuples by table",
-      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. A planner estimate, not an exact count.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 70
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max by (table) (arbiter_pg_table_live_tuples)",
-          "legendFormat": "{{table}}"
-        }
-      ]
-    },
-    {
-      "id": 24,
-      "type": "timeseries",
-      "title": "Time since last vacuum by table",
-      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. A table that has never been vacuumed reads -1 and is filtered out rather than plotted below zero, so it is absent here instead of looking freshly vacuumed.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 78
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max by (table) (arbiter_pg_table_vacuum_age_seconds)",
-          "legendFormat": "{{table}}"
-        }
-      ]
-    },
-    {
-      "id": 25,
+      "id": 11,
       "type": "stat",
-      "title": "Oldest running query (all clients)",
-      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum.",
+      "title": "Gauge reading age",
+      "description": "How stale the queue, worker, admission and table readings are. Climbing past the refresh interval means the scan stopped, not that the queues went quiet.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
       "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 0,
-        "y": 86
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 56
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "s"
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 45
+              },
+              {
+                "color": "red",
+                "value": 120
+              }
+            ]
+          }
         }
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "max(arbiter_pg_database_oldest_query_age_seconds)"
-        }
-      ]
-    },
-    {
-      "id": 26,
-      "type": "stat",
-      "title": "Backends connected (all clients)",
-      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. Excludes the backend taking the reading.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 8,
-        "y": 86
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 0,
-          "min": 0
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(arbiter_pg_database_backends)"
+          "expr": "max(arbiter_gauges_age_seconds)"
         }
       ]
     },
@@ -841,16 +593,16 @@
       "id": 30,
       "type": "stat",
       "title": "Database reachable",
-      "description": "0 when the last gauge scan did not reach the database. Aggregates with min, so one replica that cannot reach it shows here.",
+      "description": "0 when the last gauge scan did not reach the database. Aggregate it with min to surface a replica that cannot reach it.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
       "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 16,
-        "y": 86
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 56
       },
       "fieldConfig": {
         "defaults": {
@@ -896,6 +648,165 @@
       ]
     },
     {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Dead tuples by table (vacuum pressure)",
+      "description": "Shared reading: one replica scans and every replica exports it. Aggregate it with max, never sum. A cumulative-statistics estimate, not an exact count.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 64
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (table) (arbiter_pg_table_dead_tuples)",
+          "legendFormat": "{{table}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        }
+      }
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Live tuples by table",
+      "description": "Shared reading: one replica scans and every replica exports it. Aggregate it with max, never sum. A cumulative-statistics estimate, not an exact count.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 64
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (table) (arbiter_pg_table_live_tuples)",
+          "legendFormat": "{{table}}"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Total relation size by table",
+      "description": "Shared reading: one replica scans and every replica exports it. Aggregate it with max, never sum. Includes indexes and TOAST.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 72
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (table) (arbiter_pg_table_size_bytes)",
+          "legendFormat": "{{table}}"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Time since last vacuum by table",
+      "description": "Shared reading: one replica scans and every replica exports it. Aggregate it with max, never sum. A table that has never been vacuumed is absent here.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 72
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (table) (arbiter_pg_table_vacuum_age_seconds)",
+          "legendFormat": "{{table}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "Table transaction-id age (wraparound headroom)",
+      "description": "Shared reading: one replica scans and every replica exports it. Aggregate it with max, never sum. How far transaction ids have advanced since the oldest unfrozen row. Postgres stops accepting writes near 2.1 billion. Orange marks the point to look into autovacuum, red the point to act.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 80
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(arbiter_pg_table_xid_age)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1000000000
+              },
+              {
+                "color": "red",
+                "value": 1500000000
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
       "id": 10,
       "type": "table",
       "title": "Recent job traces (click a traceID to open the waterfall)",
@@ -907,7 +818,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 92
+        "y": 86
       },
       "timeFrom": "1h",
       "options": {
@@ -944,7 +855,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 102
+        "y": 96
       },
       "timeFrom": "1h",
       "options": {

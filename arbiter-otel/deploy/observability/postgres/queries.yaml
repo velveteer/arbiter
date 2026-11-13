@@ -1,0 +1,41 @@
+# postgres_exporter queries for what its built-in collectors leave out: each
+# table's transaction-id age and the oldest running query in each database.
+pg_table_frozen_xid:
+  query: |
+    SELECT namespace.nspname AS schemaname, relation.relname,
+      GREATEST(age(relation.relfrozenxid), age(toast.relfrozenxid)) AS age
+    FROM pg_class relation
+    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    LEFT JOIN pg_class toast ON toast.oid = relation.reltoastrelid
+    WHERE relation.relkind = 'r'
+      AND namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+  metrics:
+    - schemaname:
+        usage: LABEL
+        description: Schema of the table
+    - relname:
+        usage: LABEL
+        description: Name of the table
+    - age:
+        usage: GAUGE
+        description: Transaction-id age of the table or its TOAST table, whichever is older
+
+pg_activity_oldest_query:
+  query: |
+    SELECT db.datname,
+      COALESCE(
+        EXTRACT(EPOCH FROM max(clock_timestamp() - activity.query_start)
+          FILTER (WHERE activity.state = 'active' AND activity.pid <> pg_backend_pid())),
+        0
+      ) AS age_seconds
+    FROM pg_database db
+    LEFT JOIN pg_stat_activity activity ON activity.datid = db.oid
+    WHERE db.datallowconn AND NOT db.datistemplate
+    GROUP BY db.datname
+  metrics:
+    - datname:
+        usage: LABEL
+        description: Database the backends are connected to
+    - age_seconds:
+        usage: GAUGE
+        description: Age of the oldest running query, in seconds

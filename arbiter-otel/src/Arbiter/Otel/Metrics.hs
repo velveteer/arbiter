@@ -72,7 +72,9 @@ newArbiterMeters meterProvider = do
         meterCreateCounterInt64 meter (Name.metricName name) Nothing (Just desc) defaultAdvisoryParameters
   ArbiterMeters
     <$> counter Name.JobsClaimed "Jobs claimed by workers"
-    <*> counter Name.JobsProcessed "Jobs processed, by terminal outcome"
+    <*> counter
+      Name.JobsProcessed
+      "Claims that ended in neither a retry nor a release, by outcome. A spawn counts as a success and its finalizer counts again. Unavailable is a lost lease, and another claim may settle the job."
     <*> counter Name.JobsRetried "Failed jobs scheduled for another attempt"
     <*> counter Name.AdmissionAdmitted "Claimed jobs that passed an admission policy, by policy kind and policy"
     <*> counter Name.MaintenanceRows "Rows a reaper op touched, by op"
@@ -80,14 +82,17 @@ newArbiterMeters meterProvider = do
       meter
       (Name.metricName Name.HandlerDuration)
       (Just "s")
-      (Just "Seconds a job spent in the handler. A batched pool records the batch duration for each job.")
+      ( Just
+          "Seconds a job spent in the handler, for runs that ended in an ack, a spawn, a retry or a DLQ move. A batched pool records each job from the batch start to that job's settlement."
+      )
       durationBuckets
 
 -- | Second-scale histogram bounds.
 durationBuckets :: AdvisoryParameters
 durationBuckets =
   defaultAdvisoryParameters
-    { advisoryExplicitBucketBoundaries = Just [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300]
+    { advisoryExplicitBucketBoundaries =
+        Just [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300, 600, 1800, 3600]
     }
 
 -- | Observability hooks recording one queue's jobs to the instruments.

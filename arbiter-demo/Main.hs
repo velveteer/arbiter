@@ -102,7 +102,7 @@ type DemoAPI =
     :<|> ServantUI.AdminUI
 
 -- | The demo application. @mDevDir@ serves the dashboard from disk when set.
-demoApp :: Maybe FilePath -> Servant.ArbiterServerConfig (ArbS.SimpleDb DemoRegistry IO) DemoRegistry -> Application
+demoApp :: Maybe FilePath -> Servant.ArbiterServerConfig (ArbS.SimpleDb DemoRegistry IO) -> Application
 demoApp mDevDir config =
   serve (Proxy @DemoAPI) $
     Servant.arbiterServer config

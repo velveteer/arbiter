@@ -4942,7 +4942,26 @@ operationsSpec mkMessage mkResult runM = do
         `shouldReturn` [table]
       runM env (getSchema >>= \schemaName -> Ops.schemaQueues schemaName [table]) `shouldReturn` [table]
 
-  describe "purgeArchives" $
+  describe "purgeArchives" $ do
+    it "deletes expired archived jobs and keeps unexpired ones" $ \env -> do
+      Just old <- runM env (HL.insertJob (setArchiveFor (Just dayRetention) (defaultJob (mkMessage "archive-purge-old"))))
+      Just new <- runM env (HL.insertJob (setArchiveFor (Just dayRetention) (defaultJob (mkMessage "archive-purge-new"))))
+      claimed <- claimJobs env 2
+      map primaryKey claimed `shouldMatchList` [primaryKey old, primaryKey new]
+      for_ claimed $ \job -> void $ runM env (HL.ackJob job)
+      runM env $ do
+        schemaName <- getSchema
+        let tbl = Schema.jobQueueArchiveTable schemaName (HL.queueTable @payload @m)
+        void $
+          execStatement
+            ("UPDATE " <> tbl <> " SET archive_expires_at = NOW() - interval '1 hour' WHERE job_id = ?")
+            [pval CInt8 (primaryKey old)]
+
+      runM env (getSchema >>= \schemaName -> Ops.purgeArchives schemaName [HL.queueTable @payload @m])
+        `shouldReturn` (1, [])
+      isJust <$> runM env (HL.getArchiveJobById @payload (primaryKey old)) `shouldReturn` False
+      isJust <$> runM env (HL.getArchiveJobById @payload (primaryKey new)) `shouldReturn` True
+
     it "reports a failed queue with its error" $ \env -> do
       (purged, failed) <- runM env (getSchema >>= \schemaName -> Ops.purgeArchives schemaName ["no_such_queue"])
       purged `shouldBe` 0

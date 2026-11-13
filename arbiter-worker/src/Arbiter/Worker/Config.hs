@@ -83,7 +83,8 @@ data MaintenanceOp
     RefreshGroups
   | -- | Delete worker rows whose heartbeat is stale.
     SweepStaleWorkers
-  | -- | Move exhausted jobs to the DLQ.
+  | -- | Move exhausted jobs to the DLQ. The count includes the descendants a rollup
+    -- takes with it.
     SweepExhaustedJobs
   | -- | Delete force-cancelled jobs whose lease has lapsed.
     SweepCancelledJobs

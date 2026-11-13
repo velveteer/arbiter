@@ -14,41 +14,29 @@ import Arbiter.Core.RateLimit.Stats qualified as RL (RateLimitPolicyView (..))
 import Control.Concurrent.STM (readTVarIO)
 import Control.Monad (void)
 import Data.Foldable (toList, traverse_)
-import Data.HashMap.Strict (HashMap)
-import Data.HashMap.Strict qualified as HM
-import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
-import Data.Text (Text)
 import GHC.Clock (getMonotonicTime)
 import OpenTelemetry.Metric.Core
-  ( Counter
-  , Meter
-  , counterAdd
+  ( Meter
   , defaultAdvisoryParameters
-  , meterCreateCounterDouble
   , meterCreateObservableGaugeDouble
   , observe
   )
 
 import Arbiter.Otel.Gauges.Cache
-  ( Baseline
-  , Cached (..)
+  ( Cached (..)
   , GaugeCache (..)
-  , SeriesKey
   , Snapshot (..)
   , lastScan
   , live
-  , riseSince
   )
 import Arbiter.Otel.MetricNames qualified as Name
 import Arbiter.Otel.Metrics (attrs, concurrencyKind, rateLimitKind)
 
--- | Register instruments that read the last shared snapshot, and return the action
--- that carries a freshly published reading onto the counters.
-registerInstruments :: Meter -> GaugeCache -> IO (Cached -> IO ())
+-- | Register instruments that read the last shared snapshot.
+registerInstruments :: Meter -> GaugeCache -> IO ()
 registerInstruments meter cache = do
-  baselines <- newIORef HM.empty
   let withCached emit = [\res -> readTVarIO (export cache) >>= traverse_ (emit res) . live]
       callback emit = withCached (\res -> emit res . reading)
       -- Every replica exports the winner's reading. Aggregate with max.
@@ -63,18 +51,6 @@ registerInstruments meter cache = do
             defaultAdvisoryParameters
             cbs
       reg name unit desc emit = regGauge name unit (shared desc) (callback emit)
-      regCounter name unit desc series = do
-        counter <-
-          meterCreateCounterDouble
-            meter
-            (Name.metricName name)
-            (Just unit)
-            (Just (shared desc))
-            defaultAdvisoryParameters
-        pure $ \cached ->
-          traverse_
-            (addRise baselines (Name.metricName name) counter (takenAt cached))
-            (series (reading cached))
 
   reg Name.QueueDepth "{job}" "Jobs in a queue by status" $
     observed $
@@ -88,6 +64,12 @@ registerInstruments meter cache = do
         [ ([("queue", overviewQueue overview), ("kind", kind)], fromIntegral count)
         | (kind, count) <- Map.toList (kindCounts (overviewStats overview))
         ]
+  reg Name.QueueDlqDepth "{job}" "Jobs in a queue's dead-letter table" $
+    perQueue (Just . fromIntegral . dlqJobs)
+  reg Name.QueuePaused "1" "1 when the queue is paused, 0 when not" $
+    observed $
+      over queues $
+        \overview -> [([("queue", overviewQueue overview)], if overviewQueuePaused overview then 1 else 0)]
   reg Name.QueueOldestReadyAge "s" "Time the oldest ready or blocked job has waited, 0 when none is waiting" $
     perQueue oldestReadyAgeSeconds
   reg Name.QueueOldestInFlightAge "s" "Time the longest-running job has been leased, 0 when none is in flight" $
@@ -124,35 +106,19 @@ registerInstruments meter cache = do
   reg Name.PgTableSize "By" "Total relation size" $ perTable (fromIntegral . Health.totalBytes)
   reg Name.PgTableXidAge "{transaction}" "Transaction-id age of the table" $
     perTableMaybe (fmap fromIntegral . Health.xidAge)
-  reg Name.PgDbConnections "{connection}" "Backends by state, across the whole database" $
-    perDbBy "state" (map (fmap fromIntegral) . connCounts)
-  reg Name.PgDbOldestTransactionAge "s" "Age of the oldest open transaction, across the whole database" $
-    perDb Health.oldestTxnAge
-  reg Name.PgDbOldestQueryAge "s" "Age of the oldest running query, across the whole database" $
-    perDb Health.oldestQueryAge
-  reg Name.PgDbBackends "{backend}" "Backends connected to the database" $
-    perDb (fromIntegral . Health.numBackends)
-
-  advances <-
-    sequence
-      [ regCounter Name.PgTableScans "{scan}" "Table scans, by the access path they took" $
-          perTableTotals "path" (\tableHealth -> [("seq", Health.seqScan tableHealth), ("index", Health.idxScan tableHealth)])
-      , regCounter Name.PgTableBlocks "{block}" "Block reads for the table, by whether they hit the cache" $
-          perTableTotals "source" (\tableHealth -> [("hit", Health.blksHit tableHealth), ("disk", Health.blksRead tableHealth)])
-      ]
 
   -- Absent until the first scan.
   regGauge
     Name.DbReachable
     "1"
-    "1 when the last gauge scan reached the database, 0 when it failed"
+    "1 when the last gauge scan reached the database, 0 when it failed. An abandoned slow scan leaves it as it was"
     [ \res ->
         readTVarIO (databaseReachable cache) >>= traverse_ (\reachable -> observe res (if reachable then 1 else 0) (attrs []))
     ]
 
   -- How far behind the exported readings have fallen. Before the first scan it counts
-  -- from registration. A stopped loop leaves the other gauges holding their last
-  -- reading. This gauge tells that reading apart from a fresh one.
+  -- from registration. After a stopped loop the SDK keeps exporting the other gauges'
+  -- last observations. This gauge tells those apart from a fresh one.
   regGauge
     Name.GaugesAge
     "s"
@@ -162,32 +128,17 @@ registerInstruments meter cache = do
         scanned <- lastScan <$> readTVarIO (export cache)
         observe res (now - fromMaybe (registeredAt cache) scanned) (attrs [])
     ]
-
-  pure (\cached -> traverse_ ($ cached) advances)
   where
     effectiveLimit policy = fromMaybe (Conc.defaultLimit policy) (Conc.overrideLimit policy)
     effectiveMaxTokens policy = fromMaybe (RL.defaultMaxTokens policy) (RL.overrideMaxTokens policy)
-    connCounts dbHealth =
-      [ ("active", Health.connActive dbHealth)
-      , ("idle", Health.connIdle dbHealth)
-      , ("idle_in_transaction", Health.connIdleInTxn dbHealth)
-      , ("idle_in_transaction_aborted", Health.connIdleInTxnAborted dbHealth)
-      , ("blocked", Health.connBlocked dbHealth)
-      , ("other", Health.connOther dbHealth)
-      ]
     -- Every series is a list of rows picked out of the snapshot, each row labelled
-    -- and valued. Counters hand that list over, gauges observe it.
+    -- and valued.
     over pick label snap = concatMap label (pick snap)
     observed rows res = traverse_ (\(kvs, value) -> observe res value (attrs kvs)) . rows
     perConcurrency field = observed (over concurrency (\policy -> [([("policy", Conc.prefix policy)], field policy)]))
     bothKinds concField rateField = observed $ \snap ->
       [([("policy_kind", concurrencyKind), ("policy", Conc.prefix policy)], concField policy) | policy <- concurrency snap]
         <> [([("policy_kind", rateLimitKind), ("policy", RL.prefix policy)], rateField policy) | policy <- rateLimits snap]
-    dbOf = toList . db
-    perTableTotals label pairs =
-      over
-        tables
-        (\tableHealth -> [([("table", Health.table tableHealth), (label, key)], value) | (key, value) <- pairs tableHealth])
     perTable field = perTableMaybe (Just . field)
     perTableMaybe field =
       observed
@@ -195,18 +146,3 @@ registerInstruments meter cache = do
     perQueue field =
       observed
         (over queues (\overview -> [([("queue", overviewQueue overview)], fromMaybe 0 (field (overviewStats overview)))]))
-    perDb field = observed (over dbOf (\dbHealth -> [([], field dbHealth)]))
-    perDbBy label pairs = observed (over dbOf (\dbHealth -> [([(label, key)], value) | (key, value) <- pairs dbHealth]))
-
--- | Count an absolute total's rise since the scan it was last counted from.
-addRise
-  :: IORef (HashMap SeriesKey Baseline)
-  -> Text
-  -> Counter Double
-  -> Double
-  -- ^ Monotonic time the reading was scanned at.
-  -> ([(Text, Text)], Double)
-  -> IO ()
-addRise baselines name counter scannedAt (kvs, total) = do
-  rise <- atomicModifyIORef' baselines (riseSince (name, kvs) scannedAt total)
-  counterAdd counter rise (attrs kvs)

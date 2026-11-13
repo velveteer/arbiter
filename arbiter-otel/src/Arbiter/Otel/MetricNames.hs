@@ -17,6 +17,8 @@ data MetricName
     -- | Counter, no unit. Attributes: @queue@, @kind@.
     JobsClaimed
   | -- | Counter, no unit. Attributes: @queue@, @outcome@ (success, dlq, cancelled, unavailable), @kind@.
+    -- One per claim that ends in neither a retry nor a release. A spawning job and its
+    -- finalizer count once each.
     JobsProcessed
   | -- | Counter, no unit. Attributes: @queue@, @kind@.
     JobsRetried
@@ -32,6 +34,10 @@ data MetricName
     QueueDepth
   | -- | Gauge, @{job}@. Attributes: @queue@, @kind@.
     QueueDepthByKind
+  | -- | Gauge, @{job}@. Attributes: @queue@.
+    QueueDlqDepth
+  | -- | Gauge, @1@, 1 when the queue is paused and 0 when not. Attributes: @queue@.
+    QueuePaused
   | -- | Gauge, @s@. Attributes: @queue@.
     QueueOldestReadyAge
   | -- | Gauge, @s@. Attributes: @queue@.
@@ -60,20 +66,8 @@ data MetricName
     PgTableVacuumAge
   | -- | Gauge, @By@. Attributes: @table@.
     PgTableSize
-  | -- | Counter, @{scan}@. Attributes: @table@, @path@ (seq, index).
-    PgTableScans
-  | -- | Counter, @{block}@. Attributes: @table@, @source@ (hit, disk).
-    PgTableBlocks
   | -- | Gauge, @{transaction}@. Attributes: @table@.
     PgTableXidAge
-  | -- | Gauge, @{connection}@. Attributes: @state@ (active, idle, idle_in_transaction, idle_in_transaction_aborted, blocked, other).
-    PgDbConnections
-  | -- | Gauge, @{backend}@. No attributes.
-    PgDbBackends
-  | -- | Gauge, @s@. No attributes.
-    PgDbOldestTransactionAge
-  | -- | Gauge, @s@. No attributes.
-    PgDbOldestQueryAge
   | -- | Gauge, @1@, 1 when reachable and 0 when not. No attributes.
     DbReachable
   | -- | Gauge, @s@. No attributes.
@@ -91,6 +85,8 @@ metricName = \case
   HandlerDuration -> "arbiter.jobs.handler.duration"
   QueueDepth -> "arbiter.queue.depth"
   QueueDepthByKind -> "arbiter.queue.depth_by_kind"
+  QueueDlqDepth -> "arbiter.queue.dlq_depth"
+  QueuePaused -> "arbiter.queue.paused"
   QueueOldestReadyAge -> "arbiter.queue.oldest_ready_age"
   QueueOldestInFlightAge -> "arbiter.queue.oldest_in_flight_age"
   Workers -> "arbiter.workers"
@@ -103,13 +99,7 @@ metricName = \case
   PgTableLiveTuples -> "arbiter.pg.table.live_tuples"
   PgTableVacuumAge -> "arbiter.pg.table.vacuum_age"
   PgTableSize -> "arbiter.pg.table.size"
-  PgTableScans -> "arbiter.pg.table.scans"
-  PgTableBlocks -> "arbiter.pg.table.blocks"
   PgTableXidAge -> "arbiter.pg.table.xid_age"
-  PgDbConnections -> "arbiter.pg.database.connections"
-  PgDbBackends -> "arbiter.pg.database.backends"
-  PgDbOldestTransactionAge -> "arbiter.pg.database.oldest_transaction_age"
-  PgDbOldestQueryAge -> "arbiter.pg.database.oldest_query_age"
   DbReachable -> "arbiter.pg.database.reachable"
   GaugesAge -> "arbiter.gauges.age"
 

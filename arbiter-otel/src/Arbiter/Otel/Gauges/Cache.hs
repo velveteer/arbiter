@@ -16,9 +16,6 @@ module Arbiter.Otel.Gauges.Cache
   , publishSnapshot
   , setReachable
   , retireCache
-  , SeriesKey
-  , Baseline
-  , riseSince
   ) where
 
 import Arbiter.Core.Concurrency.Stats qualified as Conc (ConcurrencyPolicyView)
@@ -27,17 +24,12 @@ import Arbiter.Core.Operations (QueueOverview)
 import Arbiter.Core.RateLimit.Stats qualified as RL (RateLimitPolicyView)
 import Control.Concurrent.STM (STM, TVar, modifyTVar', newTVarIO, writeTVar)
 import Data.Aeson (FromJSON, ToJSON)
-import Data.HashMap.Strict (HashMap)
-import Data.HashMap.Strict qualified as HM
-import Data.Text (Text)
 import GHC.Generics (Generic)
 
 -- | Values from one database scan.
 data Snapshot = Snapshot
   { queues :: [QueueOverview]
   -- ^ One overview per registry queue.
-  , db :: Maybe Health.PgDbHealth
-  -- ^ Database counters. 'Nothing' when the database reports no row.
   , tables :: [Health.PgTableHealth]
   -- ^ Health counters per arbiter table.
   , concurrency :: [Conc.ConcurrencyPolicyView]
@@ -55,11 +47,12 @@ data Cached = Cached
   , reading :: Snapshot
   }
 
--- | Instrument export state. 'Idle' retains the last scan time, if available.
+-- | What the instruments observe. 'Idle' retains the last scan time, if available.
+-- The SDK keeps exporting a series it stops observing, under its last timestamp.
 data Export
-  = -- | Export the readings of this scan.
+  = -- | Observe the readings of this scan.
     Live Cached
-  | -- | Export nothing. Keep the last scan time, if any.
+  | -- | Observe nothing. Keep the last scan time, if any.
     Idle (Maybe Double)
 
 -- | The scan behind an export, if it has one.
@@ -74,16 +67,17 @@ lastScan = \case
   Live cached -> Just (takenAt cached)
   Idle lastAt -> lastAt
 
--- | Stop exporting readings, keeping when the last one was scanned.
+-- | Stop observing readings, keeping when the last one was scanned.
 retire :: Export -> Export
 retire = Idle . lastScan
 
 -- | Mutable gauge state and its registration time.
 data GaugeCache = GaugeCache
   { export :: TVar Export
-  -- ^ What the instruments export now.
+  -- ^ What the instruments observe now.
   , databaseReachable :: TVar (Maybe Bool)
-  -- ^ Whether the last gauge scan reached the database. 'Nothing' before the first scan.
+  -- ^ Whether the last gauge scan reached the database. 'Nothing' before the first scan
+  -- and after retirement.
   , registeredAt :: Double
   -- ^ Monotonic time of the registration.
   }
@@ -104,31 +98,6 @@ publishSnapshot cache = writeTVar (export cache) . Live
 setReachable :: GaugeCache -> Bool -> STM ()
 setReachable cache = writeTVar (databaseReachable cache) . Just
 
--- | Stop exporting the cached snapshot.
+-- | Stop observing the cached snapshot and the reachability reading.
 retireCache :: GaugeCache -> STM ()
-retireCache cache = modifyTVar' (export cache) retire
-
--- | One counter series: its instrument and attributes.
-type SeriesKey = (Text, [(Text, Text)])
-
--- | The scan a counter series was last counted from, and the total it stood at.
-data Baseline = Baseline
-  { countedFrom :: Double
-  , countedTotal :: Double
-  }
-
--- | What a scanned total adds to its series.
-riseSince
-  :: SeriesKey
-  -> Double
-  -- ^ Monotonic time the total was scanned at.
-  -> Double
-  -- ^ The scanned total.
-  -> HashMap SeriesKey Baseline
-  -> (HashMap SeriesKey Baseline, Double)
-riseSince key scannedAt total seen = case HM.lookup key seen of
-  Just base | countedFrom base >= scannedAt -> (seen, 0)
-  Just base -> (counted, if total < countedTotal base then total else total - countedTotal base)
-  Nothing -> (counted, 0)
-  where
-    counted = HM.insert key Baseline {countedFrom = scannedAt, countedTotal = total} seen
+retireCache cache = modifyTVar' (export cache) retire >> writeTVar (databaseReachable cache) Nothing

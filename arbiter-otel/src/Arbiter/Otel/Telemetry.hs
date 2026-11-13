@@ -8,6 +8,8 @@ module Arbiter.Otel.Telemetry
   , withTelemetryIf
   , withTelemetryFromEnv
   , withExternalTelemetry
+  , ExternalProviders (..)
+  , defaultExternalProviders
   , telemetryLogConfig
   ) where
 
@@ -16,12 +18,12 @@ import Arbiter.Core.Threads (microsPerSecond)
 import Arbiter.Core.Trace (resolveTracer)
 import Arbiter.Worker.Logger (LogConfig, LogDestination)
 import Control.Exception (SomeException, bracket)
-import Control.Monad (guard, void)
+import Control.Monad (guard, mfilter, void)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Bifunctor (first)
-import Data.Either (fromRight)
+import Data.Either (fromRight, isRight)
 import Data.Foldable (traverse_)
-import Data.Maybe (catMaybes, fromMaybe, isJust)
+import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
@@ -29,7 +31,7 @@ import OpenTelemetry.Attributes (lookupAttributeByKey)
 import OpenTelemetry.Attributes.Key (AttributeKey)
 import OpenTelemetry.Environment (MetricsExporterSelection (..), lookupBooleanEnv, lookupMetricsExporterSelection)
 import OpenTelemetry.Log
-  ( LoggerProvider
+  ( LoggerProvider (..)
   , getGlobalLoggerProvider
   , initializeGlobalLoggerProvider
   , setGlobalLoggerProvider
@@ -63,7 +65,6 @@ import OpenTelemetry.Trace
   ( TracerProvider
   , TracerProviderOptions (..)
   , createTracerProvider
-  , emptyTracerProviderOptions
   , getGlobalTracerProvider
   , getTracerProviderInitializationOptions
   , setGlobalTracerProvider
@@ -84,7 +85,8 @@ data Telemetry = Telemetry
   , telemetryLogDestination :: Maybe LogDestination
   -- ^ An extra destination the logs are copied to. 'Nothing' adds none.
   , gaugeRefresh :: NominalDiffTime
-  -- ^ The metric export interval this handle resolved.
+  -- ^ How often the gauges rescan the database: the metric export interval this
+  -- handle resolved.
   , telemetrySummary :: Text
   -- ^ A startup line for the caller to log, with a note for each signal that failed to start.
   }
@@ -97,30 +99,38 @@ withTelemetry action = do
   previousMeters <- getGlobalMeterProvider
   readerOpts <- periodicMetricReaderOptionsFromEnv
   detected <- tryAny getTracerProviderInitializationOptions
-  let (processors, traceOpts) = fromRight ([], emptyTracerProviderOptions) detected
-      detectNote = noteOf (first (signalFailed "traces") detected)
   resources <- either (const detectResources) (pure . tracerProviderOptionsResources . snd) detected
+  let tracesExport = either (const False) (not . null . fst) detected
   evalContT $ do
-    traces <- ContT (withTraces processors traceOpts)
+    traces <- ContT (withTraces (first detectionFailed detected))
     metrics <- ContT (withMeterProvider resources previousMeters)
     reader <- ContT (withReader readerOpts (snd <$> metrics))
     logs <- ContT withLogs
     liftIO $ do
       let meterProvider = either (const noopMeterProvider) fst metrics
+          exporting = either (const Nothing) (mfilter exportsLogs . Just) logs
       instruments <- either (pure . Left) (const (arbiterInstruments meterProvider)) reader
       action
         (baseTelemetry meterProvider)
           { meters = either (const Nothing) Just instruments
-          , telemetryLogDestination = either (const Nothing) (Just . loggerDestination) logs
+          , telemetryLogDestination = loggerDestination <$> exporting
           , gaugeRefresh = refreshFor readerOpts
           , telemetrySummary =
               summarize
+                ((isRight traces && tracesExport) || isRight instruments || isJust exporting)
                 ("service.name=" <> fromMaybe "unset" (serviceName resources))
-                [detectNote, noteOf traces, noteOf instruments, noteOf logs]
+                [ noteOf traces
+                , "traces off, no span exporter configured" <$ guard (isRight traces && not tracesExport)
+                , noteOf instruments
+                , noteOf logs
+                , "logs off, no log exporter configured" <$ guard (isRight logs && isNothing exporting)
+                ]
           }
   where
-    withTraces :: [SpanProcessor] -> TracerProviderOptions -> (Either Text TracerProvider -> IO a) -> IO a
-    withTraces processors opts inner =
+    withTraces
+      :: Either Text ([SpanProcessor], TracerProviderOptions) -> (Either Text TracerProvider -> IO a) -> IO a
+    withTraces detected inner = either (inner . Left) (\(processors, opts) -> installTraces processors opts inner) detected
+    installTraces processors opts inner =
       bracket getGlobalTextMapPropagator setGlobalTextMapPropagator $ \_ ->
         withGlobalProvider
           "traces"
@@ -193,6 +203,12 @@ detectResources = fromRight emptyMaterializedResources <$> tryAny detect
 signalFailed :: Text -> SomeException -> Text
 signalFailed signal exception = signal <> " exporter did not start: " <> displayEx exception
 
+-- | The note a trace setup that could not resolve its options leaves in the summary.
+detectionFailed :: SomeException -> Text
+detectionFailed exception =
+  "traces not installed, the previous global tracer provider stays, its options did not resolve: "
+    <> displayEx exception
+
 -- | Reason a signal is disabled, when applicable.
 noteOf :: Either Text r -> Maybe Text
 noteOf = either Just (const Nothing)
@@ -202,12 +218,19 @@ arbiterInstruments :: MeterProvider -> IO (Either Text ArbiterMeters)
 arbiterInstruments meterProvider = first (signalFailed "metrics") <$> tryAny (newArbiterMeters meterProvider)
 
 -- | Startup log line naming the provider source and listing unavailable telemetry components.
-summarize :: Text -> [Maybe Text] -> Text
-summarize source notes = T.intercalate ", " (("telemetry on, " <> source) : catMaybes notes)
+-- It reads off when no signal is on.
+summarize :: Bool -> Text -> [Maybe Text] -> Text
+summarize anyOn source notes = T.intercalate ", " ((state <> source) : catMaybes notes)
+  where
+    state = if anyOn then "telemetry on, " else "telemetry off, "
 
 -- | Service name in the detected resource. All signals use this name.
 serviceName :: MaterializedResources -> Maybe Text
 serviceName res = lookupAttributeByKey (getMaterializedResourcesAttributes res) ("service.name" :: AttributeKey Text)
+
+-- | Whether a logger provider sends its records anywhere.
+exportsLogs :: LoggerProvider -> Bool
+exportsLogs = not . null . loggerProviderProcessors
 
 -- | A handle that uses the API no-op providers.
 inertTelemetry :: Telemetry
@@ -242,22 +265,46 @@ withTelemetryIf False action = action inertTelemetry
 telemetryLogConfig :: Telemetry -> LogConfig -> LogConfig
 telemetryLogConfig = otelLogs . telemetryLogDestination
 
+-- | Providers the application owns, for 'withExternalTelemetry'.
+data ExternalProviders = ExternalProviders
+  { externalMeterProvider :: Maybe MeterProvider
+  -- ^ 'Nothing' turns metrics off.
+  , externalLoggerProvider :: Maybe LoggerProvider
+  -- ^ 'Nothing' turns the log copy off.
+  , externalGaugeRefresh :: NominalDiffTime
+  -- ^ How often the gauges rescan the database. Match the meter provider's export
+  -- interval.
+  }
+
+-- | No providers, and the default 60s gauge refresh.
+defaultExternalProviders :: ExternalProviders
+defaultExternalProviders =
+  ExternalProviders
+    { externalMeterProvider = Nothing
+    , externalLoggerProvider = Nothing
+    , externalGaugeRefresh = refreshFor defaultPeriodicMetricReaderOptions
+    }
+
 -- | Run an action with application-owned providers. Missing providers disable
 -- their applicable signals.
-withExternalTelemetry :: Maybe MeterProvider -> Maybe LoggerProvider -> (Telemetry -> IO a) -> IO a
-withExternalTelemetry mmp mlp action = do
+withExternalTelemetry :: ExternalProviders -> (Telemetry -> IO a) -> IO a
+withExternalTelemetry external action = do
   tracing <- isJust <$> resolveTracer
-  instruments <- traverse arbiterInstruments mmp
-  readerOpts <- periodicMetricReaderOptionsFromEnv
+  instruments <- traverse arbiterInstruments (externalMeterProvider external)
+  let mlp = externalLoggerProvider external
+      exporting = mfilter exportsLogs mlp
   action
-    (baseTelemetry (fromMaybe noopMeterProvider mmp))
+    (baseTelemetry (fromMaybe noopMeterProvider (externalMeterProvider external)))
       { meters = either (const Nothing) Just =<< instruments
-      , telemetryLogDestination = loggerDestination <$> mlp
-      , gaugeRefresh = refreshFor readerOpts
+      , telemetryLogDestination = loggerDestination <$> exporting
+      , gaugeRefresh = externalGaugeRefresh external
       , telemetrySummary =
           summarize
+            (tracing || any isRight instruments || isJust exporting)
             "caller's providers"
             [ "no global tracer provider installed" <$ guard (not tracing)
-            , noteOf =<< instruments
+            , maybe (Just "metrics off, no meter provider") noteOf instruments
+            , "logs off, no logger provider" <$ guard (isNothing mlp)
+            , "logs off, the logger provider has no processor" <$ guard (isJust mlp && isNothing exporting)
             ]
       }

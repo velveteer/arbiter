@@ -57,7 +57,9 @@ services:
   # Grafana's all-in-one LGTM stack, taking OTLP from the demo. Only its Grafana
   # is reachable outside, through caddy.
   lgtm:
-    image: grafana/otel-lgtm:latest
+    image: grafana/otel-lgtm:0.40.0
+    # Adds the postgres_exporter scrape to the bundled collector.
+    command: ["--otelcol-config=file:/otel-lgtm/postgres-scrape.yaml"]
     environment:
       # Caddy serves it under a subpath.
       GF_SERVER_ROOT_URL: "https://${DEMO_DOMAIN:-localhost}/dash"
@@ -74,6 +76,20 @@ services:
       - ../arbiter-otel/deploy/observability/grafana/dashboards:/otel-lgtm/grafana/conf/provisioning/dashboards/arbiter:ro
       - ../arbiter-otel/deploy/observability/grafana/provisioning/dashboards/provider.yml:/otel-lgtm/grafana/conf/provisioning/dashboards/arbiter.yaml:ro
       - ../arbiter-otel/deploy/observability/grafana/provisioning/alerting/arbiter.yaml:/otel-lgtm/grafana/conf/provisioning/alerting/arbiter.yaml:ro
+      - ../arbiter-otel/deploy/observability/postgres/otelcol.yaml:/otel-lgtm/postgres-scrape.yaml:ro
+    restart: always
+
+  # Database-wide Postgres statistics for the Postgres dashboard.
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.17.1
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATA_SOURCE_NAME: "postgresql://postgres:master@db:5432/postgres?sslmode=disable"
+      PG_EXPORTER_EXTEND_QUERY_PATH: /queries.yaml
+    volumes:
+      - ../arbiter-otel/deploy/observability/postgres/queries.yaml:/queries.yaml:ro
     restart: always
 
   caddy:

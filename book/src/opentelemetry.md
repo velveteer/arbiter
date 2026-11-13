@@ -24,10 +24,12 @@ it off. Logs go to OTel and to the configured log destination, with the job
 trace, id, queue, and attempt.
 
 To own the telemetry handle, open it with a bracket such as `withTelemetry`,
-or with `withExternalTelemetry` for providers your application owns. Pass it
-and the gauge loop's base log config to `runWorkerPoolsWith`. For another pool
-runner, apply `instrumentPools` to the pools and wrap the runner in
-`withGauges`.
+or with `withExternalTelemetry` for providers your application owns. Its
+`ExternalProviders` names the meter and logger providers and the gauge refresh
+interval, which should match the meter provider's export interval.
+Pass the handle and the gauge loop's base log config to `runWorkerPoolsWith`.
+For another pool runner, apply `instrumentPools` to the pools and wrap the
+runner in `withGauges`.
 
 ## Traces
 
@@ -44,7 +46,11 @@ enqueue made outside a handler.
 ## Metrics
 
 `arbiter-otel` reports job activity, queue depth, admission policies, reaper
-activity, Arbiter table health, and PostgreSQL health.
+activity, and Arbiter table health: dead and live tuples, size, vacuum age, and
+transaction-id age. The rest of the database is left to a database exporter,
+such as
+[postgres_exporter](https://github.com/prometheus-community/postgres_exporter)
+or the OpenTelemetry Collector's `postgresql` receiver.
 [`Arbiter.Otel.MetricNames`](https://arbiterq.dev/arbiter-otel/Arbiter-Otel-MetricNames.html)
 lists each instrument with its type, unit, and attributes.
 
@@ -55,16 +61,17 @@ in-flight, busiest-key, and tokens gauges carry `policy` only.
 `kind` on `arbiter.queue.depth_by_kind` and the job counters is one of the payload's `kindsFor`
 labels, or absent.
 
-PostgreSQL health outside the Arbiter role needs `pg_read_all_stats`. One
-replica scans per interval and the rest export that reading.
+One replica scans per interval and the rest export that reading.
 
 | Aggregate across replicas with | Metrics |
 | --- | --- |
-| `max` | queue depth, PostgreSQL health |
-| `sum` | per-process counters and latencies |
+| `max` | queue, worker, admission and table gauges, `arbiter.gauges.age` |
+| `min` | `arbiter.pg.database.reachable` |
+| `sum` | job, admission and maintenance counters, handler duration |
 
-Queue and PostgreSQL gauges scan once per `OTEL_METRIC_EXPORT_INTERVAL`
-(default 60s).
+Queue and table gauges scan once per `OTEL_METRIC_EXPORT_INTERVAL`
+(default 60s), or once per the `externalGaugeRefresh` passed to
+`withExternalTelemetry`.
 
 ## Prometheus
 
@@ -77,4 +84,6 @@ Metrics leave over OTLP. Scrape an OTel collector.
 [LGTM stack](https://github.com/grafana/docker-otel-lgtm) at
 http://localhost:8000, dashboard at /dash. The
 [live demo](https://demo.arbiterq.dev/) runs the same stack. The dashboard and
-alert rules expect metrics over OTLP through a collector.
+alert rules expect metrics over OTLP through a collector. The stack also runs
+postgres_exporter, scraped by the bundled collector, for a second dashboard on
+the database.

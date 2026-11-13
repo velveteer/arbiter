@@ -41,8 +41,7 @@ pgDbHealthSQL =
     ) activity
   |]
 
--- | Per-table churn, block traffic, and freeze age for arbiter's own tables, one row per
--- table. Block counts total the heap, index, and toast reads.
+-- | Tuple counts, size, and freeze age for arbiter's own tables, one row per table.
 pgTableHealthSQL :: SchemaName -> [TableName] -> Query ()
 pgTableHealthSQL schemaName tableNames =
   [sql|
@@ -51,15 +50,9 @@ pgTableHealthSQL schemaName tableNames =
       EXTRACT(EPOCH FROM clock_timestamp() - GREATEST(stats.last_autovacuum, stats.last_vacuum))::float8
         AS vacuum_age,
       pg_total_relation_size(stats.relid)::int8 AS total_bytes,
-      stats.seq_scan::float8, COALESCE(stats.idx_scan, 0)::float8 AS idx_scan,
-      (COALESCE(block_io.heap_blks_hit, 0) + COALESCE(block_io.idx_blks_hit, 0)
-        + COALESCE(block_io.toast_blks_hit, 0) + COALESCE(block_io.tidx_blks_hit, 0))::float8 AS blks_hit,
-      (COALESCE(block_io.heap_blks_read, 0) + COALESCE(block_io.idx_blks_read, 0)
-        + COALESCE(block_io.toast_blks_read, 0) + COALESCE(block_io.tidx_blks_read, 0))::float8 AS blks_read,
       age(NULLIF(relation.relfrozenxid, '0'::xid))::int8 AS xid_age
     FROM pg_stat_user_tables stats
     JOIN pg_class relation ON relation.oid = stats.relid
-    LEFT JOIN pg_statio_user_tables block_io ON block_io.relid = stats.relid
     WHERE stats.schemaname = #{schemaName :: CText}
       AND stats.relname = ANY(#{tableNames :: [CText]})
   |]

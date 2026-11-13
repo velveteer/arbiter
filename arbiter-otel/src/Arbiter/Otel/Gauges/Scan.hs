@@ -30,13 +30,12 @@ scanSnapshot
   -> m Snapshot
 scanSnapshot statementTimeout schema queueKinds = do
   overviews <- map zeroFilled <$> boundedRead (getAllQueueStats schema queueKinds)
-  (dbHealth, tableHealth) <- boundedRead (Health.getPgHealth queueTables)
+  tableHealth <- boundedRead (Health.getPgTableHealth (map fst queueKinds))
   concurrencyPolicies <- boundedRead (listConcurrencyPolicies schema)
   rateLimitPolicies <- boundedRead (listRateLimitPolicies schema [])
   pure
     Snapshot
       { queues = overviews
-      , db = dbHealth
       , tables = tableHealth
       , concurrency = concurrencyPolicies
       , rateLimits = rateLimitPolicies
@@ -45,7 +44,6 @@ scanSnapshot statementTimeout schema queueKinds = do
     boundedRead :: forall a. m a -> m a
     boundedRead query =
       withDbTransaction (setLocalStatementTimeout statementTimeout >> query)
-    queueTables = map fst queueKinds
     declaredKinds = Map.fromList queueKinds
     zeroFilled overview =
       let zeros = Map.fromList [(kind, 0) | kind <- Map.findWithDefault [] (overviewQueue overview) declaredKinds]

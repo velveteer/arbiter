@@ -1356,16 +1356,17 @@ moveToDLQ locks schemaName tableName errorMsg job = withDbTransaction $ do
     lockJobsAndParents schemaName tableName [(jobId, parentId job)]
     lockJobTrees schemaName tableName [jobId]
   rollup <- not . null <$> rollupIdsNow schemaName tableName [jobId]
-  moveToDLQFieldsInner
-    (LocksHeld held)
-    Tmpl.MoveNow
-    schemaName
-    tableName
-    errorMsg
-    jobId
-    (claimSeq job)
-    (parentId job)
-    rollup
+  fmap fst $
+    moveToDLQFieldsInner
+      (LocksHeld held)
+      Tmpl.MoveNow
+      schemaName
+      tableName
+      errorMsg
+      jobId
+      (claimSeq job)
+      (parentId job)
+      rollup
   where
     jobId = primaryKey job
 
@@ -1392,9 +1393,25 @@ moveToDLQFields
   -- ^ Whether the job is a rollup finalizer
   -> m Int64
 moveToDLQFields locks move schemaName tableName errorMsg jobId cseq mParentId rollup =
+  fst <$> moveTreeToDLQFields locks move schemaName tableName errorMsg jobId cseq mParentId rollup
+
+-- | 'moveToDLQFields', returning the job's moved row count and its descendants' count.
+moveTreeToDLQFields
+  :: (MonadArbiter m)
+  => TreeLocks
+  -> Tmpl.DLQMove
+  -> SchemaName
+  -> TableName
+  -> Text
+  -> Int64
+  -> Int64
+  -> Maybe Int64
+  -> Bool
+  -> m (Int64, Int64)
+moveTreeToDLQFields locks move schemaName tableName errorMsg jobId cseq mParentId rollup =
   withDbTransaction $ moveToDLQFieldsInner locks move schemaName tableName errorMsg jobId cseq mParentId rollup
 
--- | 'moveToDLQFields' run inside the caller's transaction.
+-- | 'moveTreeToDLQFields' run inside the caller's transaction.
 moveToDLQFieldsInner
   :: (MonadArbiter m)
   => TreeLocks
@@ -1406,17 +1423,19 @@ moveToDLQFieldsInner
   -> Int64
   -> Maybe Int64
   -> Bool
-  -> m Int64
+  -> m (Int64, Int64)
 moveToDLQFieldsInner locks move schemaName tableName errorMsg jobId cseq mParentId rollup = do
   held <-
     holdTreeLocks locks (lockJobParents schemaName tableName [mParentId] *> lockJobTrees schemaName tableName [jobId])
   when rollup $ snapshotTreeRollups schemaName tableName jobId
   rows <- countOr0 (Tmpl.moveToDLQSQL move schemaName tableName jobId cseq errorMsg)
-  when (rows > 0) $ do
-    when rollup $ void $ cascadeChildrenToDLQ schemaName tableName jobId parentMovedToDLQ
-    for_ mParentId $ \pid ->
-      tryResumeParent held schemaName tableName pid
-  pure rows
+  if rows > 0
+    then do
+      cascaded <- if rollup then cascadeChildrenToDLQ schemaName tableName jobId parentMovedToDLQ else pure 0
+      for_ mParentId $ \pid ->
+        tryResumeParent held schemaName tableName pid
+      pure (rows, cascaded)
+    else pure (rows, 0)
 
 -- | The error message a rollup parent's move to the DLQ gives its children.
 parentMovedToDLQ :: Text
@@ -2773,9 +2792,9 @@ sweepExhaustedJobs
   -> m (Int64, [(Text, Text)])
 sweepExhaustedJobs = sweepQueues sweepExhaustedForQueue
 
--- | Move each exhausted job to the DLQ via the tree-aware 'moveToDLQFields'. One
+-- | Move each exhausted job to the DLQ via the tree-aware 'moveTreeToDLQFields'. One
 -- transaction for the pass, taking every parent and every tree the moves will touch
--- up front.
+-- up front. Counts every row moved, the descendants a rollup takes with it included.
 sweepExhaustedForQueue
   :: (MonadArbiter m)
   => SchemaName
@@ -2791,7 +2810,18 @@ sweepExhaustedForQueue schemaName tableName = withDbTransaction $ do
     moveOne held (jobId, cseq, mParentId, rollup) =
       fromRight 0
         <$> tryAny
-          (moveToDLQFields (LocksHeld held) Tmpl.MoveIfExhausted schemaName tableName sweepError jobId cseq mParentId rollup)
+          ( uncurry (+)
+              <$> moveTreeToDLQFields
+                (LocksHeld held)
+                Tmpl.MoveIfExhausted
+                schemaName
+                tableName
+                sweepError
+                jobId
+                cseq
+                mParentId
+                rollup
+          )
     sweepError = "max attempts exceeded (reaper sweep)"
 
 -- | Per-queue cap on jobs swept to the DLQ in one reaper pass.
