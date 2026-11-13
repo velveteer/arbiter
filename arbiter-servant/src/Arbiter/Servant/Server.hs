@@ -121,7 +121,7 @@ import Arbiter.Servant.Types
 
 -- | Configuration for the API server. @m@ is the backend monad every handler's
 -- statements run in. 'createArbiterServer' fills the cache fields.
-data ArbiterServerConfig m (registry :: JobPayloadRegistry) = ArbiterServerConfig
+data ArbiterServerConfig m = ArbiterServerConfig
   { serverRun :: forall a. m a -> IO a
   -- ^ Backend runner, such as @runSimpleDb env@ or @runHasqlDb env@.
   , serverSchema :: Text
@@ -165,7 +165,7 @@ data ArbiterServerConfig m (registry :: JobPayloadRegistry) = ArbiterServerConfi
   }
 
 -- | Run a statement on the backend.
-runDb :: (MonadIO n) => ArbiterServerConfig m registry -> m a -> n a
+runDb :: (MonadIO n) => ArbiterServerConfig m -> m a -> n a
 runDb config = liftIO . serverRun config
 
 -- | 404 for a job id that matches no row.
@@ -203,7 +203,7 @@ noContentOr = either throwError (const (pure NoContent))
 -- | Run a mutation. When it touches no row, answer what @probe@ finds.
 mutateOr
   :: (Monad m)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> (Text -> m Int64)
   -> (Text -> m (Either ServerError ()))
   -> Handler NoContent
@@ -218,7 +218,7 @@ mutateOr config mutate probe =
 -- | Run a mutation. When it touches no row, answer @missing@.
 mutateOr404
   :: (Monad m)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> ServerError
   -> (Text -> m Int64)
   -> Handler NoContent
@@ -231,7 +231,7 @@ mutateJob
   :: forall (payload :: Type) registry m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> (Text -> m Int64)
   -> (Job.JobRead (Job.Stored payload) -> JobStatus -> LBS.ByteString)
@@ -246,7 +246,7 @@ mutateChildren
   :: forall registry m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> (Text -> Text -> Int64 -> m Int64)
   -> Handler NoContent
@@ -261,7 +261,7 @@ createArbiterServer
   :: forall m registry
    . (HasRegistry m registry)
   => (forall a. m a -> IO a)
-  -> IO (ArbiterServerConfig m registry)
+  -> IO (ArbiterServerConfig m)
 createArbiterServer run = do
   schemaName <- run getSchema
   rlCache <- newCacheCell
@@ -294,7 +294,7 @@ jobsServer
   :: forall registry payload result m
    . (EncodeJobResult result, HasRegistry m registry, JobPayload payload)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> JobsAPI payload result (AsServerT Handler)
 jobsServer table config =
   JobsAPI
@@ -321,7 +321,7 @@ listJobsHandler
   :: forall registry (payload :: Type) m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Maybe PageLimit
   -> Maybe Int
   -> Maybe Text
@@ -380,7 +380,7 @@ insertJobHandler
   :: forall registry payload m
    . (HasRegistry m registry, JobPayload payload)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> ApiJobWrite payload
   -> Handler (JobResponse (Job.JobRead payload))
 insertJobHandler tableName config (ApiJobWrite jobWrite) = do
@@ -403,7 +403,7 @@ insertJobsBatchHandler
   :: forall registry payload m
    . (HasRegistry m registry, JobPayload payload)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> BatchInsertRequest payload
   -> Handler (BatchInsertResponse payload)
 insertJobsBatchHandler tableName config (BatchInsertRequest apiWrites) = do
@@ -421,7 +421,7 @@ getJobHandler
   :: forall registry (payload :: Type) m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> Handler (JobResponse (ApiJobWithStatus (Job.Stored payload)))
 getJobHandler tableName config jobId =
@@ -433,7 +433,7 @@ cancelJobHandler
   :: forall registry m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> Handler NoContent
 cancelJobHandler tableName config jobId =
@@ -445,7 +445,7 @@ forceCancelJobHandler
   :: forall registry m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> Handler NoContent
 forceCancelJobHandler tableName config jobId =
@@ -456,7 +456,7 @@ promoteJobHandler
   :: forall registry m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> Handler NoContent
 promoteJobHandler tableName config jobId =
@@ -478,7 +478,7 @@ rescheduleJobHandler
   :: forall registry m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> RescheduleRequest
   -> Handler NoContent
@@ -494,7 +494,7 @@ moveToDLQHandler
   :: forall registry m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> Handler NoContent
 moveToDLQHandler tableName config jobId =
@@ -513,7 +513,7 @@ pauseChildrenHandler
   :: forall registry m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> Handler NoContent
 pauseChildrenHandler tableName config jobId =
@@ -524,7 +524,7 @@ resumeChildrenHandler
   :: forall registry m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> Handler NoContent
 resumeChildrenHandler tableName config jobId =
@@ -535,7 +535,7 @@ suspendJobHandler
   :: forall registry m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> Handler NoContent
 suspendJobHandler tableName config jobId =
@@ -551,7 +551,7 @@ resumeJobHandler
   :: forall registry m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> Handler NoContent
 resumeJobHandler tableName config jobId =
@@ -567,7 +567,7 @@ dlqServer
   :: forall registry payload m
    . (HasRegistry m registry, JobPayload payload)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> DLQAPI payload (AsServerT Handler)
 dlqServer table config =
   DLQAPI
@@ -587,7 +587,7 @@ listDLQHandler
   :: forall registry (payload :: Type) m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Maybe PageLimit
   -> Maybe Int
   -> Maybe Int64
@@ -614,7 +614,7 @@ dlqFilters mParentId mJobId mGroupKey mKind mPayload mError =
       <> [FilterJobId <$> mJobId, FilterErrorText <$> nonBlank mError]
 
 -- | Run a DLQ retry and report how many trees it restored.
-retriedResponse :: ArbiterServerConfig m registry -> (Text -> m Int64) -> Handler BatchRetryResponse
+retriedResponse :: ArbiterServerConfig m -> (Text -> m Int64) -> Handler BatchRetryResponse
 retriedResponse config retry = BatchRetryResponse <$> runDb config (retry (serverSchema config))
 
 -- | Retry a DLQ job back into the main queue, with its payload replaced when the
@@ -623,7 +623,7 @@ retryFromDLQHandler
   :: forall registry (payload :: Type) m
    . (HasRegistry m registry, JobPayload payload)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> Maybe (PayloadEdit payload)
   -> Handler NoContent
@@ -645,7 +645,7 @@ deleteDLQHandler
   :: forall registry m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> Handler NoContent
 deleteDLQHandler tableName config dlqId =
@@ -653,7 +653,7 @@ deleteDLQHandler tableName config dlqId =
 
 -- | Delete a batch of rows by primary key with this statement.
 deleteBatchHandler
-  :: ArbiterServerConfig m registry
+  :: ArbiterServerConfig m
   -> (Text -> [Int64] -> m Int64)
   -> BatchDeleteRequest
   -> Handler BatchDeleteResponse
@@ -666,7 +666,7 @@ archiveServer
   :: forall registry payload m
    . (HasRegistry m registry, JobPayload payload)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> ArchiveAPI payload (AsServerT Handler)
 archiveServer table config =
   ArchiveAPI
@@ -681,7 +681,7 @@ listArchiveHandler
   :: forall registry (payload :: Type) m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Maybe PageLimit
   -> Maybe Int
   -> Maybe Int64
@@ -713,7 +713,7 @@ reEnqueueArchiveHandler
   :: forall registry (payload :: Type) m
    . (HasRegistry m registry, JobPayload payload)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> Maybe (PayloadEdit payload)
   -> Handler NoContent
@@ -728,7 +728,7 @@ deleteArchiveHandler
   :: forall registry m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> Handler NoContent
 deleteArchiveHandler tableName config archiveId =
@@ -739,7 +739,7 @@ statsServer
   :: forall registry payload m
    . (HasRegistry m registry, JobPayload payload)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> StatsAPI (AsServerT Handler)
 statsServer tableName config =
   StatsAPI
@@ -751,7 +751,7 @@ getStatsHandler
   :: forall registry m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> [Text]
   -> Handler StatsResponse
 getStatsHandler tableName config kinds =
@@ -767,7 +767,7 @@ getStatsHandler tableName config kinds =
 getAllStatsHandler
   :: forall registry m
    . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> [(Text, [Text])]
   -> Handler AllStatsResponse
 getAllStatsHandler config queueKinds =
@@ -779,7 +779,7 @@ tableServer
   :: forall registry payload result m
    . (EncodeJobResult result, HasRegistry m registry, JobPayload payload)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> TableAPI payload result (AsServerT Handler)
 tableServer table config =
   TableAPI
@@ -801,7 +801,7 @@ listGroupsHandler
   :: forall registry m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Maybe PageLimit
   -> Maybe Int
   -> Maybe Text
@@ -815,7 +815,7 @@ listGroupsHandler tableName config mLimit mOffset mGroupKey =
 -- | Read one page and the total it pages through in one transaction.
 readPage
   :: (MonadArbiter m)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Maybe PageLimit
   -> Maybe Int
   -> (Int -> Int -> m [a])
@@ -837,7 +837,7 @@ claimJobsHandler
   :: forall registry payload m
    . (HasRegistry m registry, JobPayload payload)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> ClaimRequest
   -> Handler (ClaimResponse payload)
 claimJobsHandler tableName config req = liftIO $ do
@@ -872,7 +872,7 @@ ackClaimedJobHandler
   :: forall registry result m
    . (EncodeJobResult result, HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> AckRequest result
   -> Handler NoContent
@@ -889,7 +889,7 @@ nackClaimedJobHandler
   :: forall registry m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> JobLease
   -> Handler NoContent
@@ -902,7 +902,7 @@ extendClaimedJobHandler
   :: forall registry m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> ExtendRequest
   -> Handler NoContent
@@ -917,7 +917,7 @@ withHeldJob
   :: forall registry (payload :: Type) m
    . (HasRegistry m registry)
   => Text
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Int64
   -> JobLease
   -> (Text -> Job.JobRead (Job.Stored payload) -> m Int64)
@@ -946,7 +946,7 @@ withHeldJob tableName config jobId lease finalize =
 maintenanceServer
   :: forall registry m
    . (HL.RegistryAdmissionPolicies registry, HasRegistry m registry, RegistryTables registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> MaintenanceAPI (AsServerT Handler)
 maintenanceServer config = MaintenanceAPI {runMaintenance = maintenanceHandler @registry config}
 
@@ -956,7 +956,7 @@ maintenanceServer config = MaintenanceAPI {runMaintenance = maintenanceHandler @
 maintenanceHandler
   :: forall registry m
    . (HL.RegistryAdmissionPolicies registry, HasRegistry m registry, RegistryTables registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Handler MaintenanceResponse
 maintenanceHandler config = liftIO $ do
   touched <- newIORef Map.empty
@@ -978,7 +978,7 @@ queuesServer
   :: forall registry m
    . (HasRegistry m registry, RegistryTables registry)
   => Proxy registry
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> QueuesAPI (AsServerT Handler)
 queuesServer registryProxy config =
   QueuesAPI
@@ -990,7 +990,7 @@ queuesServer registryProxy config =
 setDLQRetentionHandler
   :: forall registry m
    . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Text
   -> DLQRetentionRequest
   -> Handler NoContent
@@ -1002,7 +1002,7 @@ setDLQRetentionHandler config queue (DLQRetentionRequest retention) = do
 setQueuePausedHandler
   :: forall registry m
    . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Text
   -> Bool
   -> Handler NoContent
@@ -1018,7 +1018,7 @@ setQueuePausedHandler config queue pauseFlag =
 eventsServer
   :: forall registry m
    . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Tagged Handler Application
 eventsServer config = Tagged $ \_req sendResponse -> do
   mListener <- if enableSSE config then runDb config getListener else pure Nothing
@@ -1064,7 +1064,7 @@ eventStreamingChannel = encodeUtf8 Schema.eventStreamingChannel
 cronServer
   :: forall registry m
    . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> CronAPI (AsServerT Handler)
 cronServer config =
   CronAPI
@@ -1077,7 +1077,7 @@ cronServer config =
 listCronSchedulesHandler
   :: forall registry m
    . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Maybe Text
   -> Handler CronSchedulesResponse
 listCronSchedulesHandler config mQueue = do
@@ -1100,7 +1100,7 @@ cronScheduleView now row@CS.CronScheduleRow {CS.enabled = isEnabled} =
 updateCronScheduleHandler
   :: forall registry m
    . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Text
   -> CronScheduleUpdate
   -> Handler CronScheduleView
@@ -1120,7 +1120,7 @@ updateCronScheduleHandler config name update = do
 runCronScheduleHandler
   :: forall registry m
    . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Text
   -> Handler NoContent
 runCronScheduleHandler config name = do
@@ -1136,7 +1136,7 @@ runCronScheduleHandler config name = do
 workersServer
   :: forall registry m
    . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> WorkersAPI (AsServerT Handler)
 workersServer config =
   WorkersAPI
@@ -1149,7 +1149,7 @@ workersServer config =
 listWorkersHandler
   :: forall registry m
    . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Maybe Text
   -> Maybe Double
   -> Handler WorkersResponse
@@ -1163,7 +1163,7 @@ listWorkersHandler config mQueue mLiveSecs = do
 setWorkerPausedHandler
   :: forall registry m
    . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Bool
   -> UUID
   -> Handler NoContent
@@ -1174,7 +1174,7 @@ setWorkerPausedHandler config pauseFlag workerId =
 rateLimitsServer
   :: forall registry m
    . (HasRegistry m registry, RegistryTables registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> RateLimitsAPI (AsServerT Handler)
 rateLimitsServer config =
   RateLimitsAPI
@@ -1190,7 +1190,7 @@ rateLimitsServer config =
 healthServer
   :: forall registry m
    . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> HealthAPI (AsServerT Handler)
 healthServer config =
   HealthAPI
@@ -1203,7 +1203,7 @@ healthServer config =
 healthHandler
   :: forall registry m
    . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Handler HealthResponse
 healthHandler config = do
   report <- liftIO (probeHealth config)
@@ -1220,7 +1220,7 @@ healthHandler config = do
 probeHealth
   :: forall registry m
    . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> IO HealthResponse
 probeHealth config = cachedFor healthCacheTtl (healthCache config) $ do
   let schemaName = serverSchema config
@@ -1311,14 +1311,14 @@ invalidating :: CacheCell a -> Handler b -> Handler b
 invalidating cell mutation = mutation <* invalidate cell
 
 -- | Run a read through a stats-TTL cache cell and wrap its result.
-cachedRead :: ArbiterServerConfig m registry -> CacheCell a -> (b -> a) -> m b -> Handler a
+cachedRead :: ArbiterServerConfig m -> CacheCell a -> (b -> a) -> m b -> Handler a
 cachedRead config cell wrap action = liftIO $ cachedFor (statsCacheTtl config) cell (wrap <$> runDb config action)
 
 -- | List policies with bucket stats and currently-throttled job counts.
 listRateLimitsHandler
   :: forall registry m
    . (HasRegistry m registry, RegistryTables registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Handler RateLimitPoliciesResponse
 listRateLimitsHandler config =
   cachedRead
@@ -1331,7 +1331,7 @@ listRateLimitsHandler config =
 listRateLimitBucketsHandler
   :: forall registry m
    . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Text
   -> Maybe KeyPageLimit
   -> Maybe Int
@@ -1340,7 +1340,7 @@ listRateLimitBucketsHandler config prefix = keyPage config (HL.listRateLimitBuck
 
 -- | Read one page of keys at a limit and offset.
 keyPage
-  :: ArbiterServerConfig m registry
+  :: ArbiterServerConfig m
   -> (Int -> Int -> m [a])
   -> Maybe KeyPageLimit
   -> Maybe Int
@@ -1351,7 +1351,7 @@ keyPage config page mLimit mOffset =
 
 -- | Run an action. 'Nothing' throws the given error.
 orNotFound
-  :: ArbiterServerConfig m registry
+  :: ArbiterServerConfig m
   -> m (Maybe a)
   -> ServerError
   -> Handler a
@@ -1362,7 +1362,7 @@ orNotFound config action notFound =
 updateRateLimitPolicyHandler
   :: forall registry m
    . (HasRegistry m registry, RegistryTables registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Text
   -> RateLimitPolicyUpdate
   -> Handler RateLimitPolicyView
@@ -1382,7 +1382,7 @@ updateRateLimitPolicyHandler config prefix upd@(RateLimitPolicyUpdate mMax mRefi
 resetRateLimitBucketsHandler
   :: forall registry m
    . (HasRegistry m registry, RegistryTables registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Text
   -> Handler RateLimitResetResponse
 resetRateLimitBucketsHandler config prefix =
@@ -1400,7 +1400,7 @@ onRateLimitPolicy prefix action =
 addRateLimitTokensHandler
   :: forall registry m
    . (HasRegistry m registry, RegistryTables registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Text
   -> Text
   -> AddTokensRequest
@@ -1420,7 +1420,7 @@ addRateLimitTokensHandler config prefix key request = do
 pruneRateLimitBucketsHandler
   :: forall registry m
    . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Maybe Double
   -> Handler PruneResponse
 pruneRateLimitBucketsHandler config mIdle = do
@@ -1433,7 +1433,7 @@ pruneRateLimitBucketsHandler config mIdle = do
 concurrencyServer
   :: forall registry m
    . (HasRegistry m registry, RegistryTables registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> ConcurrencyAPI (AsServerT Handler)
 concurrencyServer config =
   ConcurrencyAPI
@@ -1448,7 +1448,7 @@ concurrencyServer config =
 listConcurrencyHandler
   :: forall registry m
    . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Handler ConcurrencyPoliciesResponse
 listConcurrencyHandler config =
   cachedRead
@@ -1461,7 +1461,7 @@ listConcurrencyHandler config =
 listConcurrencyKeysHandler
   :: forall registry m
    . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Text
   -> Maybe KeyPageLimit
   -> Maybe Int
@@ -1472,7 +1472,7 @@ listConcurrencyKeysHandler config prefix = keyPage config (HL.listConcurrencyKey
 updateConcurrencyPolicyHandler
   :: forall registry m
    . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Text
   -> ConcurrencyPolicyUpdate
   -> Handler ConcurrencyPolicyView
@@ -1487,7 +1487,7 @@ updateConcurrencyPolicyHandler config prefix upd@(ConcurrencyPolicyUpdate mLimit
 reconcileConcurrencyHandler
   :: forall registry m
    . (HasRegistry m registry, RegistryTables registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Handler ConcurrencyReconcileResponse
 reconcileConcurrencyHandler config =
   invalidating (concurrencyPoliciesCache config) $
@@ -1497,7 +1497,7 @@ reconcileConcurrencyHandler config =
 pruneConcurrencyKeysHandler
   :: forall registry m
    . (HasRegistry m registry, RegistryTables registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Handler PruneResponse
 pruneConcurrencyKeysHandler config =
   invalidating (concurrencyPoliciesCache config) $
@@ -1507,7 +1507,7 @@ pruneConcurrencyKeysHandler config =
 sharedServer
   :: forall registry m
    . (HL.RegistryAdmissionPolicies registry, HasRegistry m registry, RegistryTables registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> ServerT SharedAPI Handler
 sharedServer config =
   queuesServer @registry (Proxy @registry) config
@@ -1524,7 +1524,7 @@ sharedServer config =
 -- 'EncodeJobResult' instance. Each payload type needs 'JobPayload'.
 class BuildServer registry (reg :: JobPayloadRegistry) where
   -- | The server for the queues in @reg@, then the shared routes.
-  buildServer :: (HasRegistry m registry) => ArbiterServerConfig m registry -> ServerT (RegistryToAPI reg) Handler
+  buildServer :: (HasRegistry m registry) => ArbiterServerConfig m -> ServerT (RegistryToAPI reg) Handler
 
 -- The empty registry builds the shared top-level routes alone.
 instance
@@ -1551,7 +1551,7 @@ instance
 arbiterServer
   :: forall registry m
    . (BuildServer registry registry, HasRegistry m registry)
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> ServerT (ArbiterAPI registry) Handler
 arbiterServer = buildServer @registry @registry
 
@@ -1563,7 +1563,7 @@ arbiterServerHoisted
      , HasServer (ArbiterAPI registry) '[]
      )
   => (forall x. Handler x -> n x)
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> ServerT (ArbiterAPI registry) n
 arbiterServerHoisted natTrans config =
   hoistServer (Proxy @(ArbiterAPI registry)) natTrans (arbiterServer config)
@@ -1575,7 +1575,7 @@ arbiterApp
      , HasRegistry m registry
      , HasServer (ArbiterAPI registry) '[]
      )
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Application
 arbiterApp config =
   serve (Proxy @(ArbiterAPI registry)) (arbiterServer config)
@@ -1588,7 +1588,7 @@ runArbiterAPI
      , HasServer (ArbiterAPI registry) '[]
      )
   => Port
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> IO ()
 runArbiterAPI port config = do
   putStrLn $ "Starting Arbiter API server on port " <> show port

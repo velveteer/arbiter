@@ -323,7 +323,7 @@ arbiterAppWithAdmin
      , HasRegistry m registry
      , HasServer (ArbiterAPI registry) '[]
      )
-  => ArbiterServerConfig m registry
+  => ArbiterServerConfig m
   -> Application
 arbiterAppWithAdmin config =
   serve
@@ -339,7 +339,7 @@ arbiterAppWithAdminDev
      )
   => FilePath
   -- ^ The static directory.
-  -> ArbiterServerConfig m registry
+  -> ArbiterServerConfig m
   -> Application
 arbiterAppWithAdminDev dir config =
   serve
