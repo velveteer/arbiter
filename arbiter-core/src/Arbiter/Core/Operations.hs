@@ -1169,14 +1169,19 @@ resumeJobParents held schemaName tableName =
   traverse_ (tryResumeParent held schemaName tableName) . distinctParents
 
 -- | Proof that this transaction ran 'lockJobTrees' or 'lockJobTreesFromRoot', so it
--- holds the rows and their groups before it wakes a parent.
-data TreesLocked = TreesLocked
+-- holds the rows and their groups before it wakes a parent. Carries the ids it locked.
+newtype TreesLocked = TreesLocked (Set.Set Int64)
+
+-- | Whether the tree locks hold this row.
+treeLocked :: TreesLocked -> Int64 -> Bool
+treeLocked (TreesLocked ids) jobId = Set.member jobId ids
 
 -- | Lock every job named and all of its descendants, in one descending pass, then
--- their groups and their parents' groups.
+-- their groups and their parents' groups. A job gone by the time the pass reaches it is
+-- left out.
 lockJobTrees :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m TreesLocked
-lockJobTrees _ _ [] = pure TreesLocked
-lockJobTrees schemaName tableName ids = TreesLocked <$ countOr0 (Tmpl.lockJobTreesSQL schemaName tableName ids)
+lockJobTrees _ _ [] = pure (TreesLocked Set.empty)
+lockJobTrees schemaName tableName ids = TreesLocked . Set.fromList <$> MA.executeQuery (Tmpl.lockJobTreesSQL schemaName tableName ids)
 
 -- | Take the parents' advisory locks, then 'lockJobTrees' over the jobs named.
 lockParentsAndTrees :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m TreesLocked
@@ -1187,14 +1192,14 @@ lockParentsAndTrees schemaName tableName ids = do
 -- | Apply 'lockJobTrees' to the complete tree of each named job. Use these locks
 -- before tree cancellation.
 lockJobTreesFromRoot :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m TreesLocked
-lockJobTreesFromRoot _ _ [] = pure TreesLocked
+lockJobTreesFromRoot _ _ [] = pure (TreesLocked Set.empty)
 lockJobTreesFromRoot schemaName tableName ids =
-  TreesLocked <$ countOr0 (Tmpl.lockJobTreesFromRootSQL schemaName tableName ids)
+  TreesLocked . Set.fromList <$> MA.executeQuery (Tmpl.lockJobTreesFromRootSQL schemaName tableName ids)
 
 -- | Wake a suspended parent when all children are done. The caller holds the parent's
 -- advisory lock.
 tryResumeParent :: (MonadArbiter m) => TreesLocked -> SchemaName -> TableName -> Int64 -> m ()
-tryResumeParent TreesLocked schemaName tableName pid =
+tryResumeParent _ schemaName tableName pid =
   void $
     MA.executeStatement
       (Tmpl.tryWakeAncestorSQL schemaName tableName pid)
@@ -1427,15 +1432,18 @@ moveToDLQFieldsInner
 moveToDLQFieldsInner locks move schemaName tableName errorMsg jobId cseq mParentId rollup = do
   held <-
     holdTreeLocks locks (lockJobParents schemaName tableName [mParentId] *> lockJobTrees schemaName tableName [jobId])
-  when rollup $ snapshotTreeRollups schemaName tableName jobId
-  rows <- countOr0 (Tmpl.moveToDLQSQL move schemaName tableName jobId cseq errorMsg)
-  if rows > 0
-    then do
-      cascaded <- if rollup then cascadeChildrenToDLQ schemaName tableName jobId parentMovedToDLQ else pure 0
-      for_ mParentId $ \pid ->
-        tryResumeParent held schemaName tableName pid
-      pure (rows, cascaded)
-    else pure (rows, 0)
+  if treeLocked held jobId then moveLocked held else pure (0, 0)
+  where
+    moveLocked held = do
+      when rollup $ snapshotTreeRollups schemaName tableName jobId
+      rows <- countOr0 (Tmpl.moveToDLQSQL move schemaName tableName jobId cseq errorMsg)
+      if rows > 0
+        then do
+          cascaded <- if rollup then cascadeChildrenToDLQ schemaName tableName jobId parentMovedToDLQ else pure 0
+          for_ mParentId $ \pid ->
+            tryResumeParent held schemaName tableName pid
+          pure (rows, cascaded)
+        else pure (rows, 0)
 
 -- | The error message a rollup parent's move to the DLQ gives its children.
 parentMovedToDLQ :: Text
@@ -1487,17 +1495,22 @@ moveToDLQBatch
   -> m Int64
 moveToDLQBatch _ _ [] = pure 0
 moveToDLQBatch schemaName tableName jobsWithErrors = withDbTransaction $ do
-  let ids = map (primaryKey . fst) jobsWithErrors
-      cseqs = map (claimSeq . fst) jobsWithErrors
-      msgs = map snd jobsWithErrors
+  let requestedIds = map (primaryKey . fst) jobsWithErrors
   lockJobsAndParents schemaName tableName [(primaryKey job, parentId job) | (job, _) <- jobsWithErrors]
-  rollupIds <- Set.fromList <$> rollupIdsNow schemaName tableName ids
+  rollupIds <- Set.fromList <$> rollupIdsNow schemaName tableName requestedIds
   -- Every row the move will lock, plus the trees, in one descending pass.
-  held <- lockJobTrees schemaName tableName ids
+  held <- lockJobTrees schemaName tableName requestedIds
+  let lockedJobs = filter (treeLocked held . primaryKey . fst) jobsWithErrors
+      (jobs, msgs) = unzip lockedJobs
+      ids = map primaryKey jobs
+      cseqs = map claimSeq jobs
   -- Before the move, which takes a named rollup's results with it.
-  for_ (Set.toAscList rollupIds) $ snapshotTreeRollups schemaName tableName
-  moved <- Set.fromList <$> MA.executeQuery (Tmpl.moveToDLQBatchSQL schemaName tableName ids cseqs msgs)
-  let movedJobs = filter (flip Set.member moved . primaryKey . fst) jobsWithErrors
+  for_ (filter (treeLocked held) (Set.toAscList rollupIds)) $ snapshotTreeRollups schemaName tableName
+  moved <-
+    if null lockedJobs
+      then pure Set.empty
+      else Set.fromList <$> MA.executeQuery (Tmpl.moveToDLQBatchSQL schemaName tableName ids cseqs msgs)
+  let movedJobs = filter (flip Set.member moved . primaryKey . fst) lockedJobs
   for_ movedJobs $ \(job, _) ->
     when (Set.member (primaryKey job) rollupIds)
       $ void
@@ -1507,7 +1520,7 @@ moveToDLQBatch schemaName tableName jobsWithErrors = withDbTransaction $ do
 
 -- | Retry the whole DLQ tree that holds a DLQ row, with a fresh attempt count. The dedup
 -- key is left behind. Returns the restored job for that row. 'Nothing' when the row is
--- gone or the root's parent no longer exists.
+-- gone or the root's parent no longer exists or is flagged for cancellation.
 retryFromDLQ
   :: forall m payload
    . (MonadArbiter m)
@@ -2098,8 +2111,8 @@ cancelJobsBatch _ _ [] = pure 0
 cancelJobsBatch schemaName tableName jobIds =
   withDbTransaction $ do
     let ids = Set.toList (Set.fromList jobIds)
-    void $ lockParentsAndTrees schemaName tableName ids
-    sum <$> traverse (countOr0 . Tmpl.cancelJobSQL schemaName tableName) ids
+    held <- lockParentsAndTrees schemaName tableName ids
+    sum <$> traverse (countOr0 . Tmpl.cancelJobSQL schemaName tableName) (filter (treeLocked held) ids)
 
 -- | Make a delayed or retrying job immediately visible. Refuses an in-flight or suspended job.
 promoteJob
@@ -2527,30 +2540,33 @@ cancelJobCascade
   -- ^ Root job id
   -> m [Int64]
 cancelJobCascade schemaName tableName =
-  cascadeDeleteJob (not . null) (MA.executeQuery . Tmpl.cancelJobCascadeSQL schemaName tableName) schemaName tableName
+  cascadeDeleteJob [] (not . null) (MA.executeQuery . Tmpl.cancelJobCascadeSQL schemaName tableName) schemaName tableName
 
 -- | Transactional wrapper for cascade-delete SQL. Reads the root's parent, runs the
 -- supplied delete, and wakes the parent for a completion round when the delete changed
--- anything.
+-- anything. A root gone before its lock gives @none@.
 cascadeDeleteJob
   :: (MonadArbiter m)
-  => (a -> Bool)
+  => a
+  -- ^ The result for a root gone before its lock.
+  -> (a -> Bool)
   -- ^ Whether the delete changed anything.
   -> (Int64 -> m a)
   -> SchemaName
   -> TableName
   -> Int64
   -> m a
-cascadeDeleteJob deletedAny delete schemaName tableName jobId = withDbTransaction $ do
+cascadeDeleteJob none deletedAny delete schemaName tableName jobId = withDbTransaction $ do
   rootParentId <- lockParentAndSelf schemaName tableName jobId
   held <- lockJobTrees schemaName tableName [jobId]
-  deleted <- delete jobId
-
-  when (deletedAny deleted)
-    $ for_ rootParentId
-    $ tryResumeParent held schemaName tableName
-
-  pure deleted
+  if treeLocked held jobId
+    then do
+      deleted <- delete jobId
+      when (deletedAny deleted)
+        $ for_ rootParentId
+        $ tryResumeParent held schemaName tableName
+      pure deleted
+    else pure none
 
 -- | Delete a whole job tree, named by any node in it. Walks up to the root, then deletes
 -- from there down. The root has no parent to resume. The caller holds
@@ -2576,7 +2592,7 @@ forceCancelJob
   -- ^ Root job id
   -> m Int64
 forceCancelJob schemaName tableName =
-  cascadeDeleteJob (> 0) (countOr0 . Tmpl.forceCancelJobSQL schemaName tableName) schemaName tableName
+  cascadeDeleteJob 0 (> 0) (countOr0 . Tmpl.forceCancelJobSQL schemaName tableName) schemaName tableName
 
 -- | Which force-cancel-flagged jobs 'deleteCancelledJobs' deletes.
 data CancelledScope payload
@@ -2598,13 +2614,18 @@ deleteCancelledJobs schemaName tableName scope
   | null jobIds = pure []
   | otherwise = withDbTransaction $ do
       held <- lockParentsAndTrees schemaName tableName jobIds
-      deleteJobsResumingParents held schemaName tableName deleteSql
+      deleteJobsResumingParents held schemaName tableName (deleteSql (treeLocked held))
   where
     (jobIds, deleteSql) = case scope of
-      LapsedOnly ids -> (ids, Tmpl.deleteLapsedCancelledJobsSQL schemaName tableName ids)
+      LapsedOnly ids -> (ids, \locked -> Tmpl.deleteLapsedCancelledJobsSQL schemaName tableName (filter locked ids))
       HeldBy owner jobs ->
         ( map primaryKey jobs
-        , Tmpl.deleteHeldCancelledJobsSQL schemaName tableName owner [(primaryKey job, claimSeq job) | job <- jobs]
+        , \locked ->
+            Tmpl.deleteHeldCancelledJobsSQL
+              schemaName
+              tableName
+              owner
+              [(primaryKey job, claimSeq job) | job <- jobs, locked (primaryKey job)]
         )
 
 -- | Suspend a job, making it unclaimable. Refuses an in-flight job.

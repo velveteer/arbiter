@@ -114,7 +114,7 @@ operationsSpec mkMessage mkResult runM = do
       lockedFromRoot env jobIds =
         runM env $ do
           schemaName <- getSchema
-          sum <$> MA.executeQuery (TreeTmpl.lockJobTreesFromRootSQL schemaName (HL.queueTable @payload @m) jobIds)
+          length <$> MA.executeQuery (TreeTmpl.lockJobTreesFromRootSQL schemaName (HL.queueTable @payload @m) jobIds)
       driftGroupCount env key count =
         runM env $ do
           tbl <- groupsTable

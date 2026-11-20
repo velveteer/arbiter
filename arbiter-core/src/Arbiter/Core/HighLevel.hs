@@ -817,7 +817,7 @@ listDLQJobs limit offset =
 
 -- | Retry the whole DLQ tree that holds a DLQ row, with a fresh attempt count. The dedup
 -- key is left behind. Returns the restored job for that row. 'Nothing' when the row is
--- gone or the root's parent no longer exists.
+-- gone or the root's parent no longer exists or is flagged for cancellation.
 retryFromDLQ
   :: forall payload m
    . (QueueOperation m payload)
