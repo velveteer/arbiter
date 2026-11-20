@@ -229,22 +229,32 @@ failAllLocked
   -> [Job.JobRead payload]
   -> m [(Job.JobRead payload, Either Text Outcome)]
 failAllLocked config schemaName queue failure@(_, kind) unhandled unowned = do
-  lockAdvisory
-  held <- lockTrees schemaName queue (map Job.primaryKey (unhandled <> unowned))
+  held <-
+    if cancelsTree kind
+      then lockCancelTargets schemaName queue (map (cancelTarget kind) (unhandled <> unowned))
+      else do
+        Ops.lockJobsAndParents schemaName queue [(Job.primaryKey job, Job.parentId job) | job <- unhandled]
+        Ops.lockJobTrees schemaName queue (map Job.primaryKey unhandled)
   outcomes <- traverse (\job -> (job,) <$> handleJobFailure config (Ops.LocksHeld held) failure job) unhandled
-  traverse_ (void . cancelJobFor kind) (filter (Ops.treeLocked held . Job.primaryKey) unowned)
+  traverse_ (void . cancelJobFor kind) (filter (Ops.treeLocked held . cancelTarget kind) unowned)
   pure outcomes
-  where
-    lockAdvisory
-      | cancelsTree kind = Ops.lockJobAncestors schemaName queue (map Job.primaryKey (unhandled <> unowned))
-      | otherwise = Ops.lockJobsAndParents schemaName queue [(Job.primaryKey job, Job.parentId job) | job <- unhandled]
-    lockTrees
-      | cancelsTree kind = Ops.lockJobTreesFromRoot
-      | otherwise = Ops.lockJobTrees
+
+-- | Take the advisory locks of the cancel targets and every ancestor above them, then
+-- lock their complete trees.
+lockCancelTargets :: (MonadArbiter m) => SchemaName -> TableName -> [Job.JobId] -> m Ops.TreesLocked
+lockCancelTargets schemaName queue targets = do
+  Ops.lockJobAncestors schemaName queue targets
+  Ops.lockJobTreesFromRoot schemaName queue targets
 
 -- | The job's parent, or the job when it has none.
 branchRoot :: Job.JobRead payload -> Job.JobId
 branchRoot job = fromMaybe (Job.primaryKey job) (Job.parentId job)
+
+-- | The job a tree or branch cancel deletes from.
+cancelTarget :: FailureKind -> Job.JobRead payload -> Job.JobId
+cancelTarget = \case
+  BranchCancelFailure -> branchRoot
+  _ -> Job.primaryKey
 
 -- | Delete what a tree or branch cancel names, returning the ids deleted.
 cancelJobFor
@@ -273,7 +283,13 @@ handleJobFailure
   -> m (Either Text Outcome)
 handleJobFailure config locks (errorMsg, failureKind) job
   -- A batch sibling's cancel takes out the whole tree. Zero rows still means gone.
-  | cancelsTree failureKind = Right . TreeCancelled <$> whenHeld [] (cancelJobFor failureKind job)
+  | cancelsTree failureKind = do
+      schemaName <- getSchema
+      held <- case locks of
+        Ops.LocksHeld held -> pure held
+        Ops.TakeLocks -> lockCancelTargets schemaName (Job.queueName job) [target]
+      Right . TreeCancelled
+        <$> if Ops.treeLocked held target then cancelJobFor failureKind job else pure []
   | failureKind == PermanentFailure || Job.attempts job >= jobMaxAttempts job = do
       schemaName <- getSchema
       wrote "no longer available for the dead-letter queue" DeadLettered
@@ -285,6 +301,7 @@ handleJobFailure config locks (errorMsg, failureKind) job
       wrote "no longer available for retry" (Retrying backoffSecs)
         <$> whenHeld 0 (Arb.updateJobForRetry backoffSecs errorMsg job)
   where
+    target = cancelTarget failureKind job
     whenHeld :: forall a. a -> m a -> m a
     whenHeld none act = case locks of
       Ops.LocksHeld held | not (Ops.treeLocked held (Job.primaryKey job)) -> pure none

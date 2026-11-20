@@ -28,7 +28,7 @@ module Arbiter.Core.Sql.Tree
   , spawnedAlreadySQL
   , rollupIdsSQL
   , getParentIdsSQL
-  , ancestorIdsSQL
+  , advisoryXactLockAncestorsSQL
   , advisoryXactLockManySQL
   , jobExistsSQL
   , insertResultSQL
@@ -192,7 +192,7 @@ descendantsOfCte tbl jobIds =
 -- | Lock the named jobs and all their descendants, several trees in one pass. Locks rows
 -- in descending id order. Then lock the group summaries of the rows and their parents.
 -- Returns the named ids locked.
-lockJobTreesSQL :: SchemaName -> TableName -> [Int64] -> Query Int64
+lockJobTreesSQL :: SchemaName -> TableName -> [Int64] -> Query (Maybe Int64)
 lockJobTreesSQL schemaName tableName jobIds =
   let tbl = jobQueueTable schemaName tableName
       cte = descendantsOfCte tbl jobIds
@@ -202,9 +202,9 @@ lockJobTreesSQL schemaName tableName jobIds =
         ${cte},
         ${locked},
         ${groups}
-        SELECT locked.id AS @{id :: CInt8}
-        FROM locked CROSS JOIN (SELECT count(*) FROM tree_groups) held
-        WHERE locked.id = ANY(#{jobIds :: [CInt8]})
+        SELECT locked.id AS @{id :: Maybe CInt8}
+        FROM (SELECT count(*) FROM tree_groups) held
+        LEFT JOIN locked ON locked.id = ANY(#{jobIds :: [CInt8]})
       |]
 
 -- | CTE binding @tree_groups@ to the group summaries of the @locked@ rows and of their
@@ -227,7 +227,7 @@ lockTreeGroupsCte tbl groupsTbl =
 -- | Extend 'lockJobTreesSQL' to the complete tree of each named job. This locks
 -- all rows that tree cancellation can delete. The named identifiers also start
 -- the downward walk. An orphan locks its subtree. Returns the named ids locked.
-lockJobTreesFromRootSQL :: SchemaName -> TableName -> [Int64] -> Query Int64
+lockJobTreesFromRootSQL :: SchemaName -> TableName -> [Int64] -> Query (Maybe Int64)
 lockJobTreesFromRootSQL schemaName tableName jobIds =
   let tbl = jobQueueTable schemaName tableName
       cte = rootsFromCte tbl [sql|id = ANY(#{jobIds :: [CInt8]})|]
@@ -239,9 +239,9 @@ lockJobTreesFromRootSQL schemaName tableName jobIds =
         ${walk},
         ${locked},
         ${groups}
-        SELECT locked.id AS @{id :: CInt8}
-        FROM locked CROSS JOIN (SELECT count(*) FROM tree_groups) held
-        WHERE locked.id = ANY(#{jobIds :: [CInt8]})
+        SELECT locked.id AS @{id :: Maybe CInt8}
+        FROM (SELECT count(*) FROM tree_groups) held
+        LEFT JOIN locked ON locked.id = ANY(#{jobIds :: [CInt8]})
       |]
 
 -- | Cancel a job and all its descendants recursively. Locks rows in descending id order.
@@ -484,14 +484,21 @@ jobExistsSQL schemaName tableName jobId =
   let tbl = jobQueueTable schemaName tableName
    in [sql|SELECT EXISTS (SELECT 1 FROM ${tbl} WHERE id = #{jobId :: CInt8}) AS @{result :: CBool}|]
 
--- | The jobs named and every ancestor above them.
-ancestorIdsSQL :: SchemaName -> TableName -> [Int64] -> Query Int64
-ancestorIdsSQL schemaName tableName jobIds =
+-- | Take the transaction-scoped advisory locks of the jobs named and of every ancestor
+-- above them, ascending, in one round trip.
+advisoryXactLockAncestorsSQL :: SchemaName -> TableName -> [Int64] -> Query (Maybe Text)
+advisoryXactLockAncestorsSQL schemaName tableName jobIds =
   let tbl = jobQueueTable schemaName tableName
-      cte = rootsFromCte tbl [sql|id = ANY(#{jobIds :: [CInt8]})|]
+      key = schemaName <> "." <> tableName
    in [sql|
-        ${cte}
-        SELECT @{id :: CInt8} FROM ancestors
+        WITH RECURSIVE ancestors AS (
+          SELECT id, parent_id FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]})
+          UNION
+          SELECT job.id, job.parent_id FROM ${tbl} job JOIN ancestors ancestor ON job.id = ancestor.parent_id
+        )
+        SELECT pg_advisory_xact_lock(hashtextextended(#{key :: CText}, id))::text AS @{result :: Maybe CText}
+        FROM ancestors
+        ORDER BY id
       |]
 
 -- | Fetch the parent ids of several jobs.

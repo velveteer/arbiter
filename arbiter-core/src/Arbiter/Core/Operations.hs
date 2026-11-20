@@ -1146,7 +1146,7 @@ lockJobParents schemaName tableName parents =
 lockJobAncestors :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m ()
 lockJobAncestors _ _ [] = pure ()
 lockJobAncestors schemaName tableName ids =
-  lockJobParents schemaName tableName . map Just =<< MA.executeQuery (Tmpl.ancestorIdsSQL schemaName tableName ids)
+  void $ MA.executeQuery (Tmpl.advisoryXactLockAncestorsSQL schemaName tableName ids)
 
 -- | Take the advisory locks of the jobs named and of their parents.
 lockJobsAndParents :: (MonadArbiter m) => SchemaName -> TableName -> [(Int64, Maybe Int64)] -> m ()
@@ -1181,7 +1181,8 @@ treeLocked (TreesLocked ids) jobId = Set.member jobId ids
 -- left out.
 lockJobTrees :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m TreesLocked
 lockJobTrees _ _ [] = pure (TreesLocked Set.empty)
-lockJobTrees schemaName tableName ids = TreesLocked . Set.fromList <$> MA.executeQuery (Tmpl.lockJobTreesSQL schemaName tableName ids)
+lockJobTrees schemaName tableName ids =
+  TreesLocked . Set.fromList . catMaybes <$> MA.executeQuery (Tmpl.lockJobTreesSQL schemaName tableName ids)
 
 -- | Take the parents' advisory locks, then 'lockJobTrees' over the jobs named.
 lockParentsAndTrees :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m TreesLocked
@@ -1194,7 +1195,7 @@ lockParentsAndTrees schemaName tableName ids = do
 lockJobTreesFromRoot :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m TreesLocked
 lockJobTreesFromRoot _ _ [] = pure (TreesLocked Set.empty)
 lockJobTreesFromRoot schemaName tableName ids =
-  TreesLocked . Set.fromList <$> MA.executeQuery (Tmpl.lockJobTreesFromRootSQL schemaName tableName ids)
+  TreesLocked . Set.fromList . catMaybes <$> MA.executeQuery (Tmpl.lockJobTreesFromRootSQL schemaName tableName ids)
 
 -- | Wake a suspended parent when all children are done. The caller holds the parent's
 -- advisory lock.
