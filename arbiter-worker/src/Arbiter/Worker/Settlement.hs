@@ -229,16 +229,15 @@ failAllLocked
   -> [Job.JobRead payload]
   -> m [(Job.JobRead payload, Either Text Outcome)]
 failAllLocked config schemaName queue failure@(_, kind) unhandled unowned = do
-  lockParents
+  lockAdvisory
   held <- lockTrees schemaName queue (map Job.primaryKey (unhandled <> unowned))
   outcomes <- traverse (\job -> (job,) <$> handleJobFailure config (Ops.LocksHeld held) failure job) unhandled
-  traverse_ (void . cancelJobFor kind) unowned
+  traverse_ (void . cancelJobFor kind) (filter (Ops.treeLocked held . Job.primaryKey) unowned)
   pure outcomes
   where
-    lockParents
-      | kind == BranchCancelFailure =
-          Ops.lockJobRootsAndParents schemaName queue (map branchRoot (unhandled <> unowned))
-      | otherwise = Ops.lockJobParents schemaName queue (map Job.parentId unhandled)
+    lockAdvisory
+      | cancelsTree kind = Ops.lockJobAncestors schemaName queue (map Job.primaryKey (unhandled <> unowned))
+      | otherwise = Ops.lockJobsAndParents schemaName queue [(Job.primaryKey job, Job.parentId job) | job <- unhandled]
     lockTrees
       | cancelsTree kind = Ops.lockJobTreesFromRoot
       | otherwise = Ops.lockJobTrees
@@ -274,7 +273,7 @@ handleJobFailure
   -> m (Either Text Outcome)
 handleJobFailure config locks (errorMsg, failureKind) job
   -- A batch sibling's cancel takes out the whole tree. Zero rows still means gone.
-  | cancelsTree failureKind = Right . TreeCancelled <$> cancelJobFor failureKind job
+  | cancelsTree failureKind = Right . TreeCancelled <$> whenHeld [] (cancelJobFor failureKind job)
   | failureKind == PermanentFailure || Job.attempts job >= jobMaxAttempts job = do
       schemaName <- getSchema
       wrote "no longer available for the dead-letter queue" DeadLettered
@@ -284,8 +283,12 @@ handleJobFailure config locks (errorMsg, failureKind) job
         RetryAfterFailure delay -> pure delay
         _ -> liftIO $ applyJitter (jitter config) (calculateBackoff (backoffStrategy config) (Job.attempts job))
       wrote "no longer available for retry" (Retrying backoffSecs)
-        <$> Arb.updateJobForRetry backoffSecs errorMsg job
+        <$> whenHeld 0 (Arb.updateJobForRetry backoffSecs errorMsg job)
   where
+    whenHeld :: forall a. a -> m a -> m a
+    whenHeld none act = case locks of
+      Ops.LocksHeld held | not (Ops.treeLocked held (Job.primaryKey job)) -> pure none
+      _ -> act
     -- Nothing written means the job went elsewhere.
     wrote reason outcome rowsAffected
       | rowsAffected == 0 = Left reason

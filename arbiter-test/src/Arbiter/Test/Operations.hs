@@ -19,7 +19,7 @@ import Arbiter.Core.Job.Types
 import Arbiter.Core.JobResult (EncodeJobResult)
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
-import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf, ResultOf, getSchema)
+import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf, ResultOf, getSchema, withDbTransaction)
 import Arbiter.Core.MonadArbiter qualified as MA
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (TableForPayload)
@@ -112,9 +112,15 @@ operationsSpec mkMessage mkResult runM = do
           let tbl = Schema.jobQueueTable schemaName (HL.queueTable @payload @m)
           void $ execStatement ("DELETE FROM " <> tbl <> " WHERE id = ?") [pval CInt8 jobId]
       lockedFromRoot env jobIds =
-        runM env $ do
+        runM env . withDbTransaction $ do
           schemaName <- getSchema
-          length <$> MA.executeQuery (TreeTmpl.lockJobTreesFromRootSQL schemaName (HL.queueTable @payload @m) jobIds)
+          let tbl = Schema.jobQueueTable schemaName (HL.queueTable @payload @m)
+          void $ MA.executeQuery (TreeTmpl.lockJobTreesFromRootSQL schemaName (HL.queueTable @payload @m) jobIds)
+          sum
+            <$> execQuery
+              ("SELECT count(*) AS locked FROM " <> tbl <> " WHERE xmax = pg_current_xact_id()::xid")
+              []
+              (col "locked" CInt8)
       driftGroupCount env key count =
         runM env $ do
           tbl <- groupsTable

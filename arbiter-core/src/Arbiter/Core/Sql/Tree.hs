@@ -28,6 +28,7 @@ module Arbiter.Core.Sql.Tree
   , spawnedAlreadySQL
   , rollupIdsSQL
   , getParentIdsSQL
+  , ancestorIdsSQL
   , advisoryXactLockManySQL
   , jobExistsSQL
   , insertResultSQL
@@ -190,7 +191,7 @@ descendantsOfCte tbl jobIds =
 
 -- | Lock the named jobs and all their descendants, several trees in one pass. Locks rows
 -- in descending id order. Then lock the group summaries of the rows and their parents.
--- Returns the ids locked.
+-- Returns the named ids locked.
 lockJobTreesSQL :: SchemaName -> TableName -> [Int64] -> Query Int64
 lockJobTreesSQL schemaName tableName jobIds =
   let tbl = jobQueueTable schemaName tableName
@@ -203,6 +204,7 @@ lockJobTreesSQL schemaName tableName jobIds =
         ${groups}
         SELECT locked.id AS @{id :: CInt8}
         FROM locked CROSS JOIN (SELECT count(*) FROM tree_groups) held
+        WHERE locked.id = ANY(#{jobIds :: [CInt8]})
       |]
 
 -- | CTE binding @tree_groups@ to the group summaries of the @locked@ rows and of their
@@ -224,7 +226,7 @@ lockTreeGroupsCte tbl groupsTbl =
 
 -- | Extend 'lockJobTreesSQL' to the complete tree of each named job. This locks
 -- all rows that tree cancellation can delete. The named identifiers also start
--- the downward walk. An orphan locks its subtree. Returns the ids locked.
+-- the downward walk. An orphan locks its subtree. Returns the named ids locked.
 lockJobTreesFromRootSQL :: SchemaName -> TableName -> [Int64] -> Query Int64
 lockJobTreesFromRootSQL schemaName tableName jobIds =
   let tbl = jobQueueTable schemaName tableName
@@ -239,6 +241,7 @@ lockJobTreesFromRootSQL schemaName tableName jobIds =
         ${groups}
         SELECT locked.id AS @{id :: CInt8}
         FROM locked CROSS JOIN (SELECT count(*) FROM tree_groups) held
+        WHERE locked.id = ANY(#{jobIds :: [CInt8]})
       |]
 
 -- | Cancel a job and all its descendants recursively. Locks rows in descending id order.
@@ -480,6 +483,16 @@ jobExistsSQL :: SchemaName -> TableName -> Int64 -> Query Bool
 jobExistsSQL schemaName tableName jobId =
   let tbl = jobQueueTable schemaName tableName
    in [sql|SELECT EXISTS (SELECT 1 FROM ${tbl} WHERE id = #{jobId :: CInt8}) AS @{result :: CBool}|]
+
+-- | The jobs named and every ancestor above them.
+ancestorIdsSQL :: SchemaName -> TableName -> [Int64] -> Query Int64
+ancestorIdsSQL schemaName tableName jobIds =
+  let tbl = jobQueueTable schemaName tableName
+      cte = rootsFromCte tbl [sql|id = ANY(#{jobIds :: [CInt8]})|]
+   in [sql|
+        ${cte}
+        SELECT @{id :: CInt8} FROM ancestors
+      |]
 
 -- | Fetch the parent ids of several jobs.
 getParentIdsSQL :: SchemaName -> TableName -> [Int64] -> Query (Maybe Int64)

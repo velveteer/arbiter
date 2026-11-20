@@ -12,6 +12,7 @@ import Arbiter.Core.Job.Schema (jobQueueGroupsTable, jobQueueTable)
 import Arbiter.Core.Job.Types (JobRead, primaryKey, setNotVisibleUntil)
 import Arbiter.Core.Job.Types qualified as Job
 import Arbiter.Core.JobTree ((<~~))
+import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.MonadArbiter (withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.RateLimit.Schema (arbiterRateLimitsTable)
@@ -130,6 +131,8 @@ lockOrderSpec run schema table withConn reset = do
     withinSecs 30 (replacedRowLockOrder @sm (HL.moveToDLQBatch . map (,"sm dlq")) run schema table withConn reset)
   it "a tree lock holds the group a waited-on job moved to" $
     withinSecs 30 (movedGroupLockOrder @sm run schema table withConn reset)
+  it "a spawn under a grandchild waits on the advisory lock of its tree's root" $
+    withinSecs 30 (ancestorSpawnLockOrder @sm run schema table withConn reset)
 
 -- | Test for the cross-group trigger deadlock. Two actors repeatedly run
 -- conflicting multi-group operations. One inserts a batch across g1 and g3.
@@ -762,3 +765,50 @@ movedGroupLockOrder run schema table withConn reset = do
       putMVar done ()
       wait lockDone
       either (const (pure ())) (const (expectationFailure "the moved job's new group was not locked")) grabbed
+
+-- | A spawn under a grandchild, against a transaction that holds the advisory lock of the
+-- tree's root.
+ancestorSpawnLockOrder
+  :: forall sm
+   . (ArbiterC sm)
+  => (forall a. sm a -> IO a)
+  -> Text
+  -> Text
+  -> WithConn
+  -> IO ()
+  -> IO ()
+ancestorSpawnLockOrder run schema table withConn reset = do
+  reset
+  Right (root :| _) <-
+    run
+      ( HL.insertJobTree @SMPayload
+          ( JT.rollup
+              (smJob Nothing "as root")
+              (JT.rollup (smJob Nothing "as mid") (JT.leaf (smJob Nothing "as leaf") :| []) :| [])
+          )
+      )
+  [leaf] <- run (HL.claimNextVisibleJobs 1 60) :: IO [JobRead SMPayload]
+  held <- newEmptyMVar
+  release <- newEmptyMVar
+  let lockRoot =
+        "SELECT 1 FROM (SELECT pg_advisory_xact_lock(hashtextextended('"
+          <> schema
+          <> "."
+          <> table
+          <> "', "
+          <> T.pack (show (primaryKey root))
+          <> "))) advisory"
+      holder = withConn $ \conn -> do
+        PG.begin conn
+        void (PG.query_ conn (toQuery lockRoot) :: IO [Only Int])
+        PG.query_ conn "SELECT pg_backend_pid()" >>= traverse_ (putMVar held . fromOnly)
+        takeMVar release
+        PG.commit conn
+      spawner = run (void (HL.spawnChildren leaf (smChildren Nothing "as spawn" 1)))
+  withAsync holder $ \holding -> do
+    link holding
+    holderPid <- takeMVar held
+    withAsync spawner $ \spawnDone -> releasing release $ do
+      awaitBlockedBy withConn holderPid
+      putMVar release ()
+      wait spawnDone
