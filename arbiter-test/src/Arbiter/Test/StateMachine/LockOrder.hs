@@ -132,7 +132,9 @@ lockOrderSpec run schema table withConn reset = do
   it "a tree lock holds the group a waited-on job moved to" $
     withinSecs 30 (movedGroupLockOrder @sm run schema table withConn reset)
   it "a spawn under a grandchild waits on the advisory lock of its tree's root" $
-    withinSecs 30 (ancestorSpawnLockOrder @sm run schema table withConn reset)
+    withinSecs 30 (ancestorSpawnLockOrder @sm False run schema table withConn reset)
+  it "a spawn under a grandchild does not wait on a shared advisory lock of its tree's root" $
+    withinSecs 30 (ancestorSpawnLockOrder @sm True run schema table withConn reset)
 
 -- | Test for the cross-group trigger deadlock. Two actors repeatedly run
 -- conflicting multi-group operations. One inserts a batch across g1 and g3.
@@ -767,17 +769,19 @@ movedGroupLockOrder run schema table withConn reset = do
       either (const (pure ())) (const (expectationFailure "the moved job's new group was not locked")) grabbed
 
 -- | A spawn under a grandchild, against a transaction that holds the advisory lock of the
--- tree's root.
+-- tree's root, shared when @shared@ and exclusive otherwise. The spawn waits only on
+-- the exclusive lock.
 ancestorSpawnLockOrder
   :: forall sm
    . (ArbiterC sm)
-  => (forall a. sm a -> IO a)
+  => Bool
+  -> (forall a. sm a -> IO a)
   -> Text
   -> Text
   -> WithConn
   -> IO ()
   -> IO ()
-ancestorSpawnLockOrder run schema table withConn reset = do
+ancestorSpawnLockOrder shared run schema table withConn reset = do
   reset
   Right (root :| _) <-
     run
@@ -791,7 +795,9 @@ ancestorSpawnLockOrder run schema table withConn reset = do
   held <- newEmptyMVar
   release <- newEmptyMVar
   let lockRoot =
-        "SELECT 1 FROM (SELECT pg_advisory_xact_lock(hashtextextended('"
+        "SELECT 1 FROM (SELECT "
+          <> (if shared then "pg_advisory_xact_lock_shared" else "pg_advisory_xact_lock")
+          <> "(hashtextextended('"
           <> schema
           <> "."
           <> table
@@ -808,7 +814,11 @@ ancestorSpawnLockOrder run schema table withConn reset = do
   withAsync holder $ \holding -> do
     link holding
     holderPid <- takeMVar held
-    withAsync spawner $ \spawnDone -> releasing release $ do
-      awaitBlockedBy withConn holderPid
-      putMVar release ()
-      wait spawnDone
+    withAsync spawner $ \spawnDone ->
+      releasing release $
+        if shared
+          then wait spawnDone
+          else do
+            awaitBlockedBy withConn holderPid
+            putMVar release ()
+            wait spawnDone

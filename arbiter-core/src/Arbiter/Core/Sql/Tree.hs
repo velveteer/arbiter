@@ -485,19 +485,33 @@ jobExistsSQL schemaName tableName jobId =
    in [sql|SELECT EXISTS (SELECT 1 FROM ${tbl} WHERE id = #{jobId :: CInt8}) AS @{result :: CBool}|]
 
 -- | Take the transaction-scoped advisory locks of the jobs named and of every ancestor
--- above them, ascending, in one round trip.
-advisoryXactLockAncestorsSQL :: SchemaName -> TableName -> [Int64] -> Query (Maybe Text)
-advisoryXactLockAncestorsSQL schemaName tableName jobIds =
+-- above them, ascending, in one round trip. With @shareAbove@, ancestors more than one
+-- level above every named job take shared locks and the rest take exclusive locks.
+-- Otherwise every lock is exclusive.
+advisoryXactLockAncestorsSQL :: SchemaName -> TableName -> Bool -> [Int64] -> Query (Maybe Text)
+advisoryXactLockAncestorsSQL schemaName tableName shareAbove jobIds =
   let tbl = jobQueueTable schemaName tableName
       key = schemaName <> "." <> tableName
    in [sql|
         WITH RECURSIVE ancestors AS (
-          SELECT id, parent_id FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]})
+          SELECT id, parent_id, 0 AS depth FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]})
           UNION
-          SELECT job.id, job.parent_id FROM ${tbl} job JOIN ancestors ancestor ON job.id = ancestor.parent_id
+          SELECT
+            ancestor.parent_id,
+            (SELECT parent.parent_id FROM ${tbl} parent WHERE parent.id = ancestor.parent_id),
+            ancestor.depth + 1
+          FROM ancestors ancestor
+          WHERE ancestor.parent_id IS NOT NULL
+        ),
+        levels AS (
+          SELECT id, min(depth) AS depth FROM ancestors GROUP BY id
         )
-        SELECT pg_advisory_xact_lock(hashtextextended(#{key :: CText}, id))::text AS @{result :: Maybe CText}
-        FROM ancestors
+        SELECT (CASE
+          WHEN #{shareAbove :: CBool}::boolean AND depth > 1
+            THEN pg_advisory_xact_lock_shared(hashtextextended(#{key :: CText}, id))
+          ELSE pg_advisory_xact_lock(hashtextextended(#{key :: CText}, id))
+        END)::text AS @{result :: Maybe CText}
+        FROM levels
         ORDER BY id
       |]
 

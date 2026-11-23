@@ -595,7 +595,7 @@ spawnChildren
   -> NonEmpty (JobWrite payload)
   -> m (NonEmpty (JobRead payload))
 spawnChildren schemaName tableName job children = withDbTransaction $ do
-  lockJobAncestors schemaName tableName [jobId]
+  lockGrowthAncestors schemaName tableName [jobId]
   marked <- MA.executeStatement (Tmpl.beginSpawnSQL schemaName tableName jobId (claimSeq job))
   when (marked == 0) refuseSpawn
   when (Set.size groups > 1)
@@ -1146,7 +1146,15 @@ lockJobParents schemaName tableName parents =
 lockJobAncestors :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m ()
 lockJobAncestors _ _ [] = pure ()
 lockJobAncestors schemaName tableName ids =
-  void $ MA.executeQuery (Tmpl.advisoryXactLockAncestorsSQL schemaName tableName ids)
+  void $ MA.executeQuery (Tmpl.advisoryXactLockAncestorsSQL schemaName tableName False ids)
+
+-- | The advisory locks a spawn or restore under the named jobs takes: exclusive on the
+-- jobs and their parents, shared on every ancestor above. A tree move holds its root
+-- exclusively and waits on these.
+lockGrowthAncestors :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m ()
+lockGrowthAncestors _ _ [] = pure ()
+lockGrowthAncestors schemaName tableName ids =
+  void $ MA.executeQuery (Tmpl.advisoryXactLockAncestorsSQL schemaName tableName True ids)
 
 -- | Take the advisory locks of the jobs named and of their parents.
 lockJobsAndParents :: (MonadArbiter m) => SchemaName -> TableName -> [(Int64, Maybe Int64)] -> m ()
@@ -1432,7 +1440,9 @@ moveToDLQFieldsInner
   -> m (Int64, Int64)
 moveToDLQFieldsInner locks move schemaName tableName errorMsg jobId cseq mParentId rollup = do
   held <-
-    holdTreeLocks locks (lockJobsAndParents schemaName tableName [(jobId, mParentId)] *> lockJobTrees schemaName tableName [jobId])
+    holdTreeLocks
+      locks
+      (lockJobsAndParents schemaName tableName [(jobId, mParentId)] *> lockJobTrees schemaName tableName [jobId])
   if treeLocked held jobId then moveLocked held else pure (0, 0)
   where
     moveLocked held = do
@@ -1551,7 +1561,7 @@ retryFromDLQEditing
   -> Maybe RowEdit
   -> m (Maybe (JobRead (Stored payload)))
 retryFromDLQEditing schemaName tableName dlqId edit = withDbTransaction $ do
-  lockJobAncestors schemaName tableName =<< MA.executeQuery (Tmpl.dlqRetryParentSQL schemaName tableName dlqId)
+  lockGrowthAncestors schemaName tableName =<< MA.executeQuery (Tmpl.dlqRetryParentSQL schemaName tableName dlqId)
   void (MA.executeQuery (Tmpl.lockDLQRetryParentSQL schemaName tableName dlqId))
   void (MA.executeStatement (Tmpl.lockDLQRetryGroupsSQL schemaName tableName dlqId))
   MA.queryMaybe (Tmpl.retryFromDLQSQL schemaName tableName dlqId edit)
