@@ -189,18 +189,26 @@ descendantsOfCte tbl jobIds =
   let walk = descendantsAs tbl "UNION" [sql|id = ANY(#{jobIds :: [CInt8]})|]
    in [sql|WITH RECURSIVE ${walk}|]
 
--- | Lock the named jobs and all their descendants, several trees in one pass. Locks rows
--- in descending id order. Then lock the group summaries of the rows and their parents.
--- Returns the named ids locked.
+-- | Lock the named jobs, all their descendants and their parents, several trees in one
+-- pass. Locks rows in descending id order. Then lock the group summaries of the rows and
+-- their parents. Returns the named ids locked.
 lockJobTreesSQL :: SchemaName -> TableName -> [Int64] -> Query (Maybe Int64)
 lockJobTreesSQL schemaName tableName jobIds =
   let tbl = jobQueueTable schemaName tableName
       cte = descendantsOfCte tbl jobIds
-      locked = lockDescendantsCte tbl
       groups = lockTreeGroupsCte tbl (jobQueueGroupsTable schemaName tableName)
    in [sql|
         ${cte},
-        ${locked},
+        targets AS (
+          SELECT id FROM descendants
+          UNION
+          SELECT parent_id FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]}) AND parent_id IS NOT NULL
+        ),
+        locked AS (
+          SELECT id, group_key, parent_id FROM ${tbl} WHERE id IN (SELECT id FROM targets)
+          ORDER BY id DESC
+          FOR UPDATE
+        ),
         ${groups}
         SELECT locked.id AS @{id :: Maybe CInt8}
         FROM (SELECT count(*) FROM tree_groups) held

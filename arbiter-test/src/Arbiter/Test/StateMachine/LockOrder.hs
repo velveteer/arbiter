@@ -19,7 +19,7 @@ import Arbiter.Core.RateLimit.Schema (arbiterRateLimitsTable)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar, tryPutMVar)
 import Control.Exception (finally, throwIO)
-import Control.Monad (replicateM_, void, when)
+import Control.Monad (replicateM_, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Foldable (traverse_)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
@@ -131,6 +131,8 @@ lockOrderSpec run schema table withConn reset = do
     withinSecs 30 (replacedRowLockOrder @sm (HL.moveToDLQBatch . map (,"sm dlq")) run schema table withConn reset)
   it "a tree lock holds the group a waited-on job moved to" $
     withinSecs 30 (movedGroupLockOrder @sm run schema table withConn reset)
+  it "a dead-letter move of a child locks the parent row before the parent's group" $
+    withinSecs 30 (parentRowLockOrder @sm (void . HL.moveToDLQ "sm dlq") run schema table withConn reset)
   it "a spawn under a grandchild waits on the advisory lock of its tree's root" $
     withinSecs 30 (ancestorSpawnLockOrder @sm False run schema table withConn reset)
   it "a spawn under a grandchild does not wait on a shared advisory lock of its tree's root" $
@@ -767,6 +769,61 @@ movedGroupLockOrder run schema table withConn reset = do
       putMVar done ()
       wait lockDone
       either (const (pure ())) (const (expectationFailure "the moved job's new group was not locked")) grabbed
+
+-- | A tree move of a child, against a transaction that holds the child's parent row and
+-- then takes the parent's group. The move locks the parent row before any group.
+parentRowLockOrder
+  :: forall sm
+   . (ArbiterC sm)
+  => (JobRead SMPayload -> sm ())
+  -> (forall a. sm a -> IO a)
+  -> Text
+  -> Text
+  -> WithConn
+  -> IO ()
+  -> IO ()
+parentRowLockOrder move run schema table withConn reset = do
+  reset
+  Right (parent :| _) <-
+    run
+      ( HL.insertJobTree @SMPayload
+          (JT.rollup (smJob (Just "pr-parent") "pr parent") (JT.leaf (smJob (Just "pr-child") "pr child") :| []))
+      )
+  [child] <- run (HL.claimNextVisibleJobs 1 60) :: IO [JobRead SMPayload]
+  held <- newEmptyMVar
+  release <- newEmptyMVar
+  grabbed <- newEmptyMVar
+  let holder = withConn $ \conn -> do
+        PG.begin conn
+        void
+          ( PG.query_
+              conn
+              ( toQuery
+                  ("SELECT 1 FROM " <> jobQueueTable schema table <> " WHERE id = " <> T.pack (show (primaryKey parent)) <> " FOR UPDATE")
+              )
+              :: IO [Only Int]
+          )
+        PG.query_ conn "SELECT pg_backend_pid()" >>= traverse_ (putMVar held . fromOnly)
+        takeMVar release
+        outcome <-
+          tryAny
+            ( PG.query_
+                conn
+                (toQuery ("SELECT 1 FROM " <> jobQueueGroupsTable schema table <> " WHERE group_key = 'pr-parent' FOR UPDATE NOWAIT"))
+                :: IO [Only Int]
+            )
+        PG.rollback conn
+        putMVar grabbed (either (const False) (const True) outcome)
+      mover = run (move child)
+  withAsync holder $ \holding -> do
+    link holding
+    holderPid <- takeMVar held
+    withAsync mover $ \moveDone -> releasing release $ do
+      awaitBlockedBy withConn holderPid
+      putMVar release ()
+      took <- takeMVar grabbed
+      wait moveDone
+      unless took (expectationFailure "the move held the parent's group while it waited on the parent row")
 
 -- | A spawn under a grandchild, against a transaction that holds the advisory lock of the
 -- tree's root, shared when @shared@ and exclusive otherwise. The spawn waits only on
