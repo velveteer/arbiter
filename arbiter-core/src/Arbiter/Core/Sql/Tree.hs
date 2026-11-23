@@ -145,10 +145,14 @@ descendantsCte tbl jobId = descendantsFromCte tbl [sql|id = #{jobId :: CInt8}|]
 -- match ack and force-cancel. Each row's @group_key@ and @parent_id@ are those of the
 -- version locked.
 lockDescendantsCte :: Text -> Query ()
-lockDescendantsCte tbl =
+lockDescendantsCte tbl = lockRowsOfCte tbl "descendants"
+
+-- | CTE binding @locked@ to the rows the CTE @source@ names, as 'lockDescendantsCte'.
+lockRowsOfCte :: Text -> Text -> Query ()
+lockRowsOfCte tbl source =
   [sql|
     locked AS (
-      SELECT id, group_key, parent_id FROM ${tbl} WHERE id IN (SELECT id FROM descendants)
+      SELECT id, group_key, parent_id FROM ${tbl} WHERE id IN (SELECT id FROM ${source})
       ORDER BY id DESC
       FOR UPDATE
     )
@@ -189,44 +193,38 @@ descendantsOfCte tbl jobIds =
   let walk = descendantsAs tbl "UNION" [sql|id = ANY(#{jobIds :: [CInt8]})|]
    in [sql|WITH RECURSIVE ${walk}|]
 
--- | Lock the named jobs, all their descendants and their parents, several trees in one
--- pass. Locks rows in descending id order. Then lock the group summaries of the rows and
--- their parents. Returns the named ids locked.
-lockJobTreesSQL :: SchemaName -> TableName -> [Int64] -> Query (Maybe Int64)
-lockJobTreesSQL schemaName tableName jobIds =
+-- | Lock the named jobs and all their descendants, several trees in one pass, plus the
+-- named jobs' parents when @withParents@ is set. Locks rows in descending id order. Then
+-- lock the group summaries of the locked rows in key order. Returns the named ids locked.
+lockJobTreesSQL :: SchemaName -> TableName -> Bool -> [Int64] -> Query (Maybe Int64)
+lockJobTreesSQL schemaName tableName withParents jobIds =
   let tbl = jobQueueTable schemaName tableName
       cte = descendantsOfCte tbl jobIds
-      groups = lockTreeGroupsCte tbl (jobQueueGroupsTable schemaName tableName)
+      locked = lockRowsOfCte tbl "targets"
+      groups = lockTreeGroupsCte (jobQueueGroupsTable schemaName tableName)
    in [sql|
         ${cte},
         targets AS (
           SELECT id FROM descendants
           UNION
-          SELECT parent_id FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]}) AND parent_id IS NOT NULL
+          SELECT parent_id FROM ${tbl}
+          WHERE #{withParents :: CBool}::boolean AND id = ANY(#{jobIds :: [CInt8]}) AND parent_id IS NOT NULL
         ),
-        locked AS (
-          SELECT id, group_key, parent_id FROM ${tbl} WHERE id IN (SELECT id FROM targets)
-          ORDER BY id DESC
-          FOR UPDATE
-        ),
+        ${locked},
         ${groups}
         SELECT locked.id AS @{id :: Maybe CInt8}
         FROM (SELECT count(*) FROM tree_groups) held
         LEFT JOIN locked ON locked.id = ANY(#{jobIds :: [CInt8]})
       |]
 
--- | CTE binding @tree_groups@ to the group summaries of the @locked@ rows and of their
--- parents, locked in key order after the rows.
-lockTreeGroupsCte :: Text -> Text -> Query ()
-lockTreeGroupsCte tbl groupsTbl =
+-- | CTE binding @tree_groups@ to the group summaries of the @locked@ rows, locked in key
+-- order after the rows.
+lockTreeGroupsCte :: Text -> Query ()
+lockTreeGroupsCte groupsTbl =
   [sql|
     tree_groups AS (
       SELECT 1 FROM ${groupsTbl} tree_group
-      WHERE tree_group.group_key IN (
-        SELECT group_key FROM locked
-        UNION
-        SELECT parent.group_key FROM ${tbl} parent WHERE parent.id IN (SELECT parent_id FROM locked)
-      )
+      WHERE tree_group.group_key IN (SELECT group_key FROM locked)
       ORDER BY tree_group.group_key
       FOR UPDATE
     )
@@ -241,7 +239,7 @@ lockJobTreesFromRootSQL schemaName tableName jobIds =
       cte = rootsFromCte tbl [sql|id = ANY(#{jobIds :: [CInt8]})|]
       walk = descendantsAs tbl "UNION" [sql|id = ANY(#{jobIds :: [CInt8]}) OR id IN (SELECT id FROM roots)|]
       locked = lockDescendantsCte tbl
-      groups = lockTreeGroupsCte tbl (jobQueueGroupsTable schemaName tableName)
+      groups = lockTreeGroupsCte (jobQueueGroupsTable schemaName tableName)
    in [sql|
         ${cte},
         ${walk},

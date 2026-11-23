@@ -1184,13 +1184,21 @@ newtype TreesLocked = TreesLocked (Set.Set Int64)
 treeLocked :: TreesLocked -> Int64 -> Bool
 treeLocked (TreesLocked ids) jobId = Set.member jobId ids
 
--- | Lock every job named and all of its descendants, in one descending pass, then
--- their groups and their parents' groups. A job gone by the time the pass reaches it is
--- left out.
+-- | Lock every job named, all of its descendants and its parent, in one descending pass,
+-- then the groups of those rows. A job gone by the time the pass reaches it is left out.
 lockJobTrees :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m TreesLocked
-lockJobTrees _ _ [] = pure (TreesLocked Set.empty)
-lockJobTrees schemaName tableName ids =
-  TreesLocked . Set.fromList . catMaybes <$> MA.executeQuery (Tmpl.lockJobTreesSQL schemaName tableName ids)
+lockJobTrees schemaName tableName = lockTreesWith schemaName tableName True
+
+-- | 'lockJobTrees' without the parents.
+lockJobSubtrees :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m TreesLocked
+lockJobSubtrees schemaName tableName = lockTreesWith schemaName tableName False
+
+-- | 'lockJobTrees', with the parents when the flag is set.
+lockTreesWith :: (MonadArbiter m) => SchemaName -> TableName -> Bool -> [Int64] -> m TreesLocked
+lockTreesWith _ _ _ [] = pure (TreesLocked Set.empty)
+lockTreesWith schemaName tableName withParents ids =
+  TreesLocked . Set.fromList . catMaybes
+    <$> MA.executeQuery (Tmpl.lockJobTreesSQL schemaName tableName withParents ids)
 
 -- | Take the parents' advisory locks, then 'lockJobTrees' over the jobs named.
 lockParentsAndTrees :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m TreesLocked
@@ -1655,7 +1663,7 @@ deleteDLQJobsBatch _ _ [] = pure 0
 deleteDLQJobsBatch schemaName tableName dlqIds = withDbTransaction $ do
   parents <- MA.executeQuery (Tmpl.dlqParentIdsSQL schemaName tableName dlqIds)
   lockJobParents schemaName tableName parents
-  held <- lockJobTrees schemaName tableName (catMaybes parents)
+  held <- lockJobSubtrees schemaName tableName (catMaybes parents)
   fromIntegral . length
     <$> deleteJobsResumingParents held schemaName tableName (Tmpl.deleteDLQJobsBatchSQL schemaName tableName dlqIds)
 
