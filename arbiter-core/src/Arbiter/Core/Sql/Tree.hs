@@ -200,22 +200,31 @@ lockJobTreesSQL :: SchemaName -> TableName -> Bool -> [Int64] -> Query (Maybe In
 lockJobTreesSQL schemaName tableName withParents jobIds =
   let tbl = jobQueueTable schemaName tableName
       cte = descendantsOfCte tbl jobIds
+      targets = targetsCte tbl withParents jobIds
       locked = lockRowsOfCte tbl "targets"
       groups = lockTreeGroupsCte (jobQueueGroupsTable schemaName tableName)
    in [sql|
         ${cte},
-        targets AS (
-          SELECT id FROM descendants
-          UNION
-          SELECT parent_id FROM ${tbl}
-          WHERE #{withParents :: CBool}::boolean AND id = ANY(#{jobIds :: [CInt8]}) AND parent_id IS NOT NULL
-        ),
+        ${targets},
         ${locked},
         ${groups}
         SELECT locked.id AS @{id :: Maybe CInt8}
         FROM (SELECT count(*) FROM tree_groups) held
         LEFT JOIN locked ON locked.id = ANY(#{jobIds :: [CInt8]})
       |]
+
+-- | CTE binding @targets@ to the @descendants@ ids, plus the named jobs' parents when
+-- @withParents@ is set.
+targetsCte :: Text -> Bool -> [Int64] -> Query ()
+targetsCte tbl withParents jobIds =
+  [sql|
+    targets AS (
+      SELECT id FROM descendants
+      UNION
+      SELECT parent_id FROM ${tbl}
+      WHERE #{withParents :: CBool}::boolean AND id = ANY(#{jobIds :: [CInt8]}) AND parent_id IS NOT NULL
+    )
+  |]
 
 -- | CTE binding @tree_groups@ to the group summaries of the @locked@ rows, locked in key
 -- order after the rows.
@@ -230,19 +239,21 @@ lockTreeGroupsCte groupsTbl =
     )
   |]
 
--- | Extend 'lockJobTreesSQL' to the complete tree of each named job. This locks
--- all rows that tree cancellation can delete. The named identifiers also start
+-- | Extend 'lockJobTreesSQL', parents included, to the complete tree of each named job.
+-- This locks all rows that tree cancellation can delete. The named identifiers also start
 -- the downward walk. An orphan locks its subtree. Returns the named ids locked.
 lockJobTreesFromRootSQL :: SchemaName -> TableName -> [Int64] -> Query (Maybe Int64)
 lockJobTreesFromRootSQL schemaName tableName jobIds =
   let tbl = jobQueueTable schemaName tableName
       cte = rootsFromCte tbl [sql|id = ANY(#{jobIds :: [CInt8]})|]
       walk = descendantsAs tbl "UNION" [sql|id = ANY(#{jobIds :: [CInt8]}) OR id IN (SELECT id FROM roots)|]
-      locked = lockDescendantsCte tbl
+      targets = targetsCte tbl True jobIds
+      locked = lockRowsOfCte tbl "targets"
       groups = lockTreeGroupsCte (jobQueueGroupsTable schemaName tableName)
    in [sql|
         ${cte},
         ${walk},
+        ${targets},
         ${locked},
         ${groups}
         SELECT locked.id AS @{id :: Maybe CInt8}
