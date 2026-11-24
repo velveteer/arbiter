@@ -257,7 +257,9 @@ data BatchCallbacks m payload result = BatchCallbacks
   -- ^ 'nack' that reprocesses after a delay in seconds in place of the lease's end.
   , spawn :: JobRead payload -> NonEmpty (JobWrite payload) -> m ()
   -- ^ Insert children under this job and suspend it, in one transaction. Fires
-  -- 'Arbiter.Core.Job.Types.onJobSuccess'.
+  -- 'Arbiter.Core.Job.Types.onJobSuccess'. The children are claimable once it
+  -- commits, while the handler may still be running. Inside
+  -- 'Arbiter.Core.MonadArbiter.withDbTransaction' they wait for the outer commit.
   }
 
 -- | Callbacks for @m@, called from @n@ through the given natural transformation.

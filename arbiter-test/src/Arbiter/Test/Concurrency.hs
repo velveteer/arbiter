@@ -39,7 +39,7 @@ import Test.Hspec
 import UnliftIO.Async (mapConcurrently, replicateConcurrently_, withAsync)
 
 import Arbiter.Test.Poll (bumpRef)
-import Arbiter.Test.StateMachine (holViolations, installHolDetector, removeHolDetector)
+import Arbiter.Test.StateMachine.Oracle (holViolations, installHolDetector, removeHolDetector)
 
 -- | A pause after an empty claim, before the next claim.
 drainIdleMicros :: Int

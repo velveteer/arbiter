@@ -28,6 +28,7 @@ module Arbiter.Core.Sql.Tree
   , spawnedAlreadySQL
   , rollupIdsSQL
   , getParentIdsSQL
+  , advisoryXactLockAncestorsSQL
   , advisoryXactLockManySQL
   , jobExistsSQL
   , insertResultSQL
@@ -141,12 +142,17 @@ descendantsCte :: Text -> Int64 -> Query ()
 descendantsCte tbl jobId = descendantsFromCte tbl [sql|id = #{jobId :: CInt8}|]
 
 -- | CTE binding @locked@ to the rows @descendants@ names, locked children-first to
--- match ack and force-cancel.
+-- match ack and force-cancel. Each row's @group_key@ and @parent_id@ are those of the
+-- version locked.
 lockDescendantsCte :: Text -> Query ()
-lockDescendantsCte tbl =
+lockDescendantsCte tbl = lockRowsOfCte tbl "descendants"
+
+-- | CTE binding @locked@ to the rows the CTE @source@ names, as 'lockDescendantsCte'.
+lockRowsOfCte :: Text -> Text -> Query ()
+lockRowsOfCte tbl source =
   [sql|
     locked AS (
-      SELECT id FROM ${tbl} WHERE id IN (SELECT id FROM descendants)
+      SELECT id, group_key, parent_id FROM ${tbl} WHERE id IN (SELECT id FROM ${source})
       ORDER BY id DESC
       FOR UPDATE
     )
@@ -187,57 +193,72 @@ descendantsOfCte tbl jobIds =
   let walk = descendantsAs tbl "UNION" [sql|id = ANY(#{jobIds :: [CInt8]})|]
    in [sql|WITH RECURSIVE ${walk}|]
 
--- | Lock the named jobs and all their descendants, several trees in one pass. Locks rows
--- in descending id order. Then lock the group summaries of the rows and their parents.
-lockJobTreesSQL :: SchemaName -> TableName -> [Int64] -> Query Int64
-lockJobTreesSQL schemaName tableName jobIds =
+-- | Lock the named jobs and all their descendants, several trees in one pass, plus the
+-- named jobs' parents when @withParents@ is set. Locks rows in descending id order. Then
+-- lock the group summaries of the locked rows in key order. Returns the named ids locked.
+lockJobTreesSQL :: SchemaName -> TableName -> Bool -> [Int64] -> Query (Maybe Int64)
+lockJobTreesSQL schemaName tableName withParents jobIds =
   let tbl = jobQueueTable schemaName tableName
       cte = descendantsOfCte tbl jobIds
-      locked = lockDescendantsCte tbl
-      groups = lockTreeGroupsCte tbl (jobQueueGroupsTable schemaName tableName)
+      targets = targetsCte tbl withParents jobIds
+      locked = lockRowsOfCte tbl "targets"
+      groups = lockTreeGroupsCte (jobQueueGroupsTable schemaName tableName)
    in [sql|
         ${cte},
+        ${targets},
         ${locked},
         ${groups}
-        SELECT (SELECT count(*) FROM locked) AS @{count :: CInt8}
+        SELECT locked.id AS @{id :: Maybe CInt8}
         FROM (SELECT count(*) FROM tree_groups) held
+        LEFT JOIN locked ON locked.id = ANY(#{jobIds :: [CInt8]})
       |]
 
--- | CTE binding @tree_groups@ to the group summaries of the @locked@ rows and of their
--- parents, locked in key order after the rows.
-lockTreeGroupsCte :: Text -> Text -> Query ()
-lockTreeGroupsCte tbl groupsTbl =
+-- | CTE binding @targets@ to the @descendants@ ids, plus the named jobs' parents when
+-- @withParents@ is set.
+targetsCte :: Text -> Bool -> [Int64] -> Query ()
+targetsCte tbl withParents jobIds =
+  [sql|
+    targets AS (
+      SELECT id FROM descendants
+      UNION
+      SELECT parent_id FROM ${tbl}
+      WHERE #{withParents :: CBool}::boolean AND id = ANY(#{jobIds :: [CInt8]}) AND parent_id IS NOT NULL
+    )
+  |]
+
+-- | CTE binding @tree_groups@ to the group summaries of the @locked@ rows, locked in key
+-- order after the rows.
+lockTreeGroupsCte :: Text -> Query ()
+lockTreeGroupsCte groupsTbl =
   [sql|
     tree_groups AS (
       SELECT 1 FROM ${groupsTbl} tree_group
-      WHERE tree_group.group_key IN (
-        SELECT job.group_key FROM ${tbl} job WHERE job.id IN (SELECT id FROM locked)
-        UNION
-        SELECT parent.group_key FROM ${tbl} job JOIN ${tbl} parent ON parent.id = job.parent_id
-        WHERE job.id IN (SELECT id FROM locked)
-      )
+      WHERE tree_group.group_key IN (SELECT group_key FROM locked)
       ORDER BY tree_group.group_key
       FOR UPDATE
     )
   |]
 
--- | Extend 'lockJobTreesSQL' to the complete tree of each named job. This locks
--- all rows that tree cancellation can delete. The named identifiers also start
--- the downward walk. An orphan locks its subtree.
-lockJobTreesFromRootSQL :: SchemaName -> TableName -> [Int64] -> Query Int64
+-- | Extend 'lockJobTreesSQL', parents included, to the complete tree of each named job.
+-- This locks all rows that tree cancellation can delete. The named identifiers also start
+-- the downward walk. An orphan locks its subtree. Returns the named ids locked.
+lockJobTreesFromRootSQL :: SchemaName -> TableName -> [Int64] -> Query (Maybe Int64)
 lockJobTreesFromRootSQL schemaName tableName jobIds =
   let tbl = jobQueueTable schemaName tableName
       cte = rootsFromCte tbl [sql|id = ANY(#{jobIds :: [CInt8]})|]
       walk = descendantsAs tbl "UNION" [sql|id = ANY(#{jobIds :: [CInt8]}) OR id IN (SELECT id FROM roots)|]
-      locked = lockDescendantsCte tbl
-      groups = lockTreeGroupsCte tbl (jobQueueGroupsTable schemaName tableName)
+      targets = targetsCte tbl True jobIds
+      locked = lockRowsOfCte tbl "targets"
+      groups = lockTreeGroupsCte (jobQueueGroupsTable schemaName tableName)
    in [sql|
         ${cte},
         ${walk},
+        ${targets},
         ${locked},
         ${groups}
-        SELECT (SELECT count(*) FROM locked) AS @{count :: CInt8}
+        SELECT locked.id AS @{id :: Maybe CInt8}
         FROM (SELECT count(*) FROM tree_groups) held
+        LEFT JOIN locked ON locked.id = ANY(#{jobIds :: [CInt8]})
       |]
 
 -- | Cancel a job and all its descendants recursively. Locks rows in descending id order.
@@ -479,6 +500,37 @@ jobExistsSQL :: SchemaName -> TableName -> Int64 -> Query Bool
 jobExistsSQL schemaName tableName jobId =
   let tbl = jobQueueTable schemaName tableName
    in [sql|SELECT EXISTS (SELECT 1 FROM ${tbl} WHERE id = #{jobId :: CInt8}) AS @{result :: CBool}|]
+
+-- | Take the transaction-scoped advisory locks of the jobs named and of every ancestor
+-- above them, ascending, in one round trip. With @shareAbove@, ancestors more than one
+-- level above every named job take shared locks and the rest take exclusive locks.
+-- Otherwise every lock is exclusive.
+advisoryXactLockAncestorsSQL :: SchemaName -> TableName -> Bool -> [Int64] -> Query (Maybe Text)
+advisoryXactLockAncestorsSQL schemaName tableName shareAbove jobIds =
+  let tbl = jobQueueTable schemaName tableName
+      key = schemaName <> "." <> tableName
+   in [sql|
+        WITH RECURSIVE ancestors AS (
+          SELECT id, parent_id, 0 AS depth FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]})
+          UNION
+          SELECT
+            ancestor.parent_id,
+            (SELECT parent.parent_id FROM ${tbl} parent WHERE parent.id = ancestor.parent_id),
+            ancestor.depth + 1
+          FROM ancestors ancestor
+          WHERE ancestor.parent_id IS NOT NULL
+        ),
+        levels AS (
+          SELECT id, min(depth) AS depth FROM ancestors GROUP BY id
+        )
+        SELECT (CASE
+          WHEN #{shareAbove :: CBool}::boolean AND depth > 1
+            THEN pg_advisory_xact_lock_shared(hashtextextended(#{key :: CText}, id))
+          ELSE pg_advisory_xact_lock(hashtextextended(#{key :: CText}, id))
+        END)::text AS @{result :: Maybe CText}
+        FROM levels
+        ORDER BY id
+      |]
 
 -- | Fetch the parent ids of several jobs.
 getParentIdsSQL :: SchemaName -> TableName -> [Int64] -> Query (Maybe Int64)

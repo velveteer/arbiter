@@ -97,6 +97,11 @@ handler's return value. Return `mempty` from a round that spawns.
 - **Dedup conflict on a child.** The handler aborts and commits nothing. The
   abort names the spawning job. Batch siblings are nacked.
 - **Callback after a spawn.** Ignored, with a warning.
+- **Children start before the handler returns.** A batched `spawn` commits at
+  the call. Its children can be claimed, and the finalizer can wake, while the
+  handler is still running. Wrap the handler in `withDbTransaction` to hold them
+  until the batch commits. A transactional handler's children wait for its
+  commit.
 
 ## Chunked Data Migration
 

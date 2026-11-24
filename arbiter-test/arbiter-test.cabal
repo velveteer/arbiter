@@ -55,6 +55,10 @@ library
     Arbiter.Test.RateLimit
     Arbiter.Test.Setup
     Arbiter.Test.StateMachine
+    Arbiter.Test.StateMachine.Actions
+    Arbiter.Test.StateMachine.Guards
+    Arbiter.Test.StateMachine.LockOrder
+    Arbiter.Test.StateMachine.Oracle
     Arbiter.Test.Worker
     Arbiter.Test.Worker.Backend
     Arbiter.Test.Worker.ConnectionRecovery
@@ -71,7 +75,6 @@ library
     , arbiter-core          >=0.1  && <0.2
     , arbiter-migrations    >=0.1  && <0.2
     , arbiter-worker        >=0.1  && <0.2
-    , barbies               >=2.1  && <2.2
     , base                  >=4.20 && <5
     , bytestring            >=0.10.12 && <0.13
     , containers            >=0.6  && <0.9

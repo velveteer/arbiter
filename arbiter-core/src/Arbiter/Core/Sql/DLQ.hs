@@ -102,9 +102,9 @@ selectExhaustedJobsSQL schemaName tableName limit =
 -- finalizers. Keep a finalizer suspended when it has children in the retry or the
 -- main queue. Make it ready when it has no children. Re-suspend a main-queue
 -- rollup parent that gains restored children, unless it is under a live lease. Refuse a
--- root whose parent is absent from the main queue. Remove the deduplication key during
--- the retry. An @edit@ replaces its columns on the target row only. Returns the
--- target's restored row.
+-- root whose parent is absent from the main queue or flagged for cancellation. Remove the
+-- deduplication key during the retry. An @edit@ replaces its columns on the target row
+-- only. Returns the target's restored row.
 retryFromDLQSQL :: SchemaName -> TableName -> Int64 -> Maybe RowEdit -> Query (JobRead (Stored payload))
 retryFromDLQSQL schemaName tableName dlqId edit =
   let dlqTbl = jobQueueDLQTable schemaName tableName
@@ -112,20 +112,12 @@ retryFromDLQSQL schemaName tableName dlqId edit =
       joinedEdit = editJoin edit
       vals = requeuedValsEditing (foldMap editColumns edit) targetEdited
       walk = dlqRetryTreeCte dlqTbl tbl dlqId
+      canRetry = canRetryCte dlqTbl tbl
    in rows
         (jobRowCodec tableName)
         [sql|
         ${walk},
-        -- The root's parent is NULL or exists in the main queue
-        can_retry AS (
-          SELECT EXISTS (
-            SELECT 1
-            FROM root_job_id root
-            JOIN ${dlqTbl} dead ON dead.job_id = root.job_id
-            WHERE dead.parent_id IS NULL
-               OR EXISTS (SELECT 1 FROM ${tbl} WHERE id = dead.parent_id)
-          ) AS val
-        ),
+        ${canRetry},
         -- Delete all tree members from DLQ (guarded by can_retry)
         deleted AS (
           DELETE FROM ${dlqTbl}
@@ -159,6 +151,22 @@ retryFromDLQSQL schemaName tableName dlqId edit =
         )
         SELECT ${jobReadColumns} FROM inserted WHERE id = (SELECT job_id FROM target)
       |]
+
+-- | CTE binding @can_retry@ to whether the root's parent is absent or lives in the main
+-- queue unflagged.
+canRetryCte :: Text -> Text -> Query ()
+canRetryCte dlqTbl tbl =
+  [sql|
+    can_retry AS (
+      SELECT EXISTS (
+        SELECT 1
+        FROM root_job_id root
+        JOIN ${dlqTbl} dead ON dead.job_id = root.job_id
+        WHERE dead.parent_id IS NULL
+           OR EXISTS (SELECT 1 FROM ${tbl} WHERE id = dead.parent_id AND cancel_requested_at IS NULL)
+      ) AS val
+    )
+  |]
 
 -- | Recursive CTEs binding @root_job_id@ to the root of the DLQ tree that holds
 -- @dlqId@, and @tree@ to that tree's members.
@@ -225,15 +233,17 @@ dlqRetryParent schemaName tableName dlqId lockClause =
       |]
 
 -- | Create and lock, in key order, the group summaries of the tree a DLQ retry restores
--- and of its parent.
+-- and of its parent. A retry the parent refuses creates none.
 lockDLQRetryGroupsSQL :: SchemaName -> TableName -> Int64 -> Query ()
 lockDLQRetryGroupsSQL schemaName tableName dlqId =
   let dlqTbl = jobQueueDLQTable schemaName tableName
       tbl = jobQueueTable schemaName tableName
       groupsTbl = jobQueueGroupsTable schemaName tableName
       walk = dlqRetryTreeCte dlqTbl tbl dlqId
+      canRetry = canRetryCte dlqTbl tbl
    in [sql|
-        ${walk}
+        ${walk},
+        ${canRetry}
         INSERT INTO ${groupsTbl} (group_key)
         SELECT DISTINCT group_key FROM (
           SELECT dead.group_key FROM ${dlqTbl} dead WHERE dead.job_id IN (SELECT job_id FROM tree)
@@ -242,7 +252,7 @@ lockDLQRetryGroupsSQL schemaName tableName dlqId =
           JOIN ${dlqTbl} dead ON parent.id = dead.parent_id
           WHERE dead.job_id = (SELECT job_id FROM root_job_id)
         ) keys
-        WHERE group_key IS NOT NULL
+        WHERE group_key IS NOT NULL AND (SELECT val FROM can_retry)
         ORDER BY group_key
         ${lockGroupKeyOnConflictSQL}
       |]
